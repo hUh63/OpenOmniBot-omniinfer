@@ -257,7 +257,7 @@ jobs:
           set -euo pipefail
 
           bash scripts/build-local-release.sh \
-            --edition standard \
+            --edition omniinfer \
             --tag "${RELEASE_REF_NAME}" \
             --out-dir "${RELEASE_ASSET_DIR}" \
             --non-interactive
@@ -270,8 +270,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -f "${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-standard.apk"
-          test -f "${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-standard.apk.sha256"
+          test -f "${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-omniinfer.apk"
+          test -f "${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-omniinfer.apk.sha256"
           test -f "${RELEASE_ASSET_DIR}/manifest.txt"
           find "${RELEASE_ASSET_DIR}" -maxdepth 1 -type f -print | sort
 
@@ -296,8 +296,8 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            ${{ steps.artifacts.outputs.dir }}/OpenOmniBot-${{ steps.release_ref.outputs.safe_ref_name }}-standard.apk
-            ${{ steps.artifacts.outputs.dir }}/OpenOmniBot-${{ steps.release_ref.outputs.safe_ref_name }}-standard.apk.sha256
+            ${{ steps.artifacts.outputs.dir }}/OpenOmniBot-${{ steps.release_ref.outputs.safe_ref_name }}-omniinfer.apk
+            ${{ steps.artifacts.outputs.dir }}/OpenOmniBot-${{ steps.release_ref.outputs.safe_ref_name }}-omniinfer.apk.sha256
             ${{ steps.artifacts.outputs.dir }}/manifest.txt
 
       - name: Upload APKs to Cloudflare R2 via Worker
@@ -313,8 +313,8 @@ jobs:
           set -euo pipefail
 
           if [[ -z "${APP_UPDATE_WORKER_URL}" || -z "${APP_UPDATE_WORKER_TOKEN}" ]]; then
-            echo "APP_UPDATE_WORKER_URL and APP_UPDATE_WORKER_TOKEN secrets are required to upload APKs." >&2
-            exit 1
+            echo "APP_UPDATE_WORKER_URL and APP_UPDATE_WORKER_TOKEN secrets are not configured. Skipping R2 upload."
+            exit 0
           fi
 
           PYTHON_BIN=python3
@@ -322,7 +322,7 @@ jobs:
             PYTHON_BIN=python3.11
           fi
 
-          for edition in standard; do
+          for edition in omniinfer; do
             apk_path="${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-${edition}.apk"
             sha_path="${apk_path}.sha256"
             sha256="$(awk '{print $1}' "${sha_path}")"
@@ -361,8 +361,8 @@ jobs:
           set -euo pipefail
 
           if [[ -z "${APP_UPDATE_WORKER_URL}" || -z "${APP_UPDATE_WORKER_TOKEN}" ]]; then
-            echo "APP_UPDATE_WORKER_URL and APP_UPDATE_WORKER_TOKEN secrets are required to publish update metadata." >&2
-            exit 1
+            echo "APP_UPDATE_WORKER_URL and APP_UPDATE_WORKER_TOKEN secrets are not configured. Skipping worker publish."
+            exit 0
           fi
 
           PYTHON_BIN=python3
@@ -406,7 +406,7 @@ jobs:
               # releaseNotes is intentionally omitted: the worker keeps the
               # changelog curated in the admin console (/admin) across republishes.
               "assets": [
-                  apk_asset("standard"),
+                  apk_asset("omniinfer"),
               ],
           }
           print(json.dumps(payload, ensure_ascii=False))

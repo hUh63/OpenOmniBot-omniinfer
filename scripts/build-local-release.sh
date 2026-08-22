@@ -32,7 +32,7 @@ Usage:
   bash scripts/build-local-release.sh [options]
 
 Options:
-  --edition standard  Build the Android release APK. Defaults to standard.
+  --edition standard  Build the Android release APK. Defaults to standard. Options: standard|omniinfer|all.
   --install           Build one release APK and install it with adb.
   --bundle            Unsupported; APK only for now.
   --skip-flutter      Skip `flutter pub get` in ui/.
@@ -477,6 +477,9 @@ task_for_edition() {
     standard)
       printf '%s\n' assembleProductionStandardRelease
       ;;
+    omniinfer)
+      printf '%s\n' assembleProductionOmniinferRelease
+      ;;
     *)
       echo "Invalid edition: $1" >&2
       exit 1
@@ -489,6 +492,9 @@ flutter_target_for_edition() {
     standard)
       printf '%s\n' lib/main_standard.dart
       ;;
+    omniinfer)
+      printf '%s\n' lib/main_omniinfer.dart
+      ;;
     *)
       echo "Invalid edition: $1" >&2
       exit 1
@@ -500,6 +506,9 @@ apk_path_for_edition() {
   case "$1" in
     standard)
       printf '%s\n' "$ROOT_DIR/app/build/outputs/apk/productionStandard/release/app-production-standard-release.apk"
+      ;;
+    omniinfer)
+      printf '%s\n' "$ROOT_DIR/app/build/outputs/apk/productionOmniinfer/release/app-production-omniinfer-release.apk"
       ;;
     *)
       echo "Invalid edition: $1" >&2
@@ -618,6 +627,12 @@ done
 case "$EDITION" in
   standard)
     EDITIONS=(standard)
+    ;;
+  omniinfer)
+    EDITIONS=(omniinfer)
+    ;;
+  all)
+    EDITIONS=(standard omniinfer)
     ;;
   *)
     echo "Invalid edition: $EDITION" >&2
