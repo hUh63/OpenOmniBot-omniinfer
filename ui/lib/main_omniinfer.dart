@@ -9,12 +9,6 @@ Future<void> main(List<String> args) async {
   await bootstrapMain(args);
 }
 
-@pragma('vm:entry-point')
-void subEngineMain(List<String> args) async {
-  _configureOmniInferEdition();
-  await bootstrapSubEngine(args);
-}
-
 void _configureOmniInferEdition() {
   configureOmniinferLocalModelFeature();
   AppRouterConfig.configure(

@@ -1878,3 +1878,360 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get homeDrawerLateNightSub2 => 'Say good night to today';
 }
+
+
+  @override
+  String get localModelsTitle => 'Local Models';
+
+
+  @override
+  String get localModelsAutoPreheat => 'Auto preheat on app open';
+
+
+  @override
+  String get localModelsAutoPreheatDesc =>
+      'Automatically start local service and load the current model when entering the app.';
+
+
+  @override
+  String get localModelsInstalled => 'Installed Models';
+
+
+  @override
+  String get localModelsInstalledDesc =>
+      'Search, switch default model, or delete models on the current device.';
+
+
+  @override
+  String get localModelsSearchHint => 'Search model name, ID, or tag';
+
+
+  @override
+  String get localModelsEmpty => 'No local models available';
+
+
+  @override
+  String get localModelsEmptyDesc =>
+      'Download a model from the market, or manually place an MNN model directory.';
+
+
+  @override
+  String get localModelsServiceControl => 'Service Control';
+
+
+  @override
+  String get localModelsServiceControlDesc =>
+      'Switch inference backend, current model, and listening port.';
+
+
+  @override
+  String get localModelsInferenceBackend => 'Inference Backend';
+
+
+  @override
+  String get localModelsCurrentModel => 'Current Model';
+
+
+  @override
+  String get localModelsCurrentModelHint =>
+      'The selected model will be loaded when the service starts.';
+
+
+  @override
+  String get localModelsNoAvailableModels => 'No models available';
+
+
+  @override
+  String get localModelsSelectModel => 'Select a model';
+
+
+  @override
+  String get localModelsServicePort => 'Service Port';
+
+
+  @override
+  String get localModelsServicePortHint => 'Enter port number';
+
+
+  @override
+  String get localModelsCurrentlyLoaded => 'Currently Loaded';
+
+
+  @override
+  String get localModelsAutoPreheatSection => 'Auto Preheat';
+
+
+  @override
+  String get localModelsAutoPreheatSectionDesc =>
+      'Automatically start the local service and load the current model when the app opens.';
+
+
+  @override
+  String get localModelsLocalInference => 'Local Inference Model';
+
+
+  @override
+  String get localModelsStopping => 'Stopping…';
+
+
+  @override
+  String get localModelsStarting => 'Starting…';
+
+
+  @override
+  String get localModelsStopService => 'Stop Service';
+
+
+  @override
+  String get localModelsStartService => 'Start Service';
+
+
+  @override
+  String get localModelsConfigLoadFailed => 'Failed to load local model config';
+
+
+  @override
+  String get localModelsConfigLoadFailedDesc => 'Please try again later.';
+
+
+  @override
+  String get localModelsInstalledLoadFailed =>
+      'Failed to load installed models';
+
+
+  @override
+  String get localModelsMarketLoadFailed => 'Failed to load model market';
+
+
+  @override
+  String get localModelsSwitchBackendFailed =>
+      'Failed to switch inference backend';
+
+
+  @override
+  String get localModelsActiveModelUpdated => 'Current model updated';
+
+
+  @override
+  String get localModelsSetActiveFailed => 'Failed to set current model';
+
+
+  @override
+  String get localModelsPortInvalid => 'Invalid port number';
+
+
+  @override
+  String get localModelsPortUpdated => 'Service port updated';
+
+
+  @override
+  String get localModelsPortSaveFailed => 'Failed to save port';
+
+
+  @override
+  String get localModelsAutoPreheatSaveFailed =>
+      'Failed to save auto preheat setting';
+
+
+  @override
+  String get localModelsDownloadSourceSwitchFailed =>
+      'Failed to switch download source';
+
+
+  @override
+  String get localModelsServiceStarted => 'Local service started';
+
+
+  @override
+  String get localModelsStartFailed => 'Failed to start service';
+
+
+  @override
+  String get localModelsStopFailed => 'Failed to stop service';
+
+
+  @override
+  String get localModelsServiceStopped => 'Local service stopped';
+
+
+  @override
+  String get localModelsDownloadStartFailed => 'Failed to start download';
+
+
+  @override
+  String get localModelsDownloadPauseFailed => 'Failed to pause download';
+
+
+  @override
+  String get localModelsDownloadErrorUnknown => 'Unknown error';
+
+
+  @override
+  String get localModelsFilterAndSource => 'Filter & Source';
+
+
+  @override
+  String get localModelsFilterAndSourceDesc =>
+      'Switch inference backend and download source;
+
+
+  @override
+  String get localModelsDownloadSource => 'Download Source';
+
+
+  @override
+  String get localModelsSelectDownloadSource => 'Select download source';
+
+
+  @override
+  String get localModelsMarketModels => 'Market Models';
+
+
+  @override
+  String get localModelsMarketModelsDesc =>
+      'Search, download, pause, or delete models from the market.';
+
+
+  @override
+  String get localModelsMarketSearchHint =>
+      'Search market model name, description, or tag';
+
+
+  @override
+  String get localModelsMarketEmpty => 'Model market is temporarily empty';
+
+
+  @override
+  String get localModelsMarketEmptyDesc =>
+      'Please check the download source, or pull down to refresh and try again.';
+
+
+  @override
+  String get localModelsCurrentDefault => 'Default';
+
+
+  @override
+  String get localModelsLoaded => 'Loaded';
+
+
+  @override
+  String get localModelsFileSize => 'File Size';
+
+
+  @override
+  String get localModelsModelDir => 'Model Directory';
+
+
+  @override
+  String get localModelsManualDir =>
+      'This is a manually placed directory. Deletion is not available in-app.';
+
+
+  @override
+  String get localModelsOmniInferLoadable =>
+      'This model can be loaded directly by OmniInfer.';
+
+
+  @override
+  String get localModelsSetAsCurrent => 'Set as Current';
+
+
+  @override
+  String get localModelsDelete => 'Delete';
+
+
+  @override
+  String get localModelsHasUpdate => 'Update';
+
+
+  @override
+  String get localModelsStage => 'Stage';
+
+
+  @override
+  String get localModelsErrorInfo => 'Error Info';
+
+
+  @override
+  String get localModelsResumeDownload => 'Resume Download';
+
+
+  @override
+  String get localModelsRetryDownload => 'Retry Download';
+
+
+  @override
+  String get localModelsDownloadModel => 'Download Model';
+
+
+  @override
+  String get localModelsPause => 'Pause';
+
+
+  @override
+  String get localModelsDeleteOldVersion => 'Delete Old Version';
+
+
+  @override
+  String get localModelsTabService => 'Service';
+
+
+  @override
+  String get localModelsTabMarket => 'Market';
+
+
+  @override
+  String get localModelsRefresh => 'Refresh';
+
+
+  @override
+  String get localModelsDownloadPreparing => 'Preparing';
+
+
+  @override
+  String get localModelsDownloading => 'Downloading';
+
+
+  @override
+  String get localModelsDownloadPaused => 'Paused';
+
+
+  @override
+  String get localModelsDownloadCompleted => 'Completed';
+
+
+  @override
+  String get localModelsDownloadFailed => 'Download Failed';
+
+
+  @override
+  String get localModelsDownloadCancelled => 'Cancelled';
+
+
+  @override
+  String get localModelsNotDownloaded => 'Not Downloaded';
+
+
+  @override
+  String get localModelsImportFromDevice => 'Import from Device';
+
+
+  @override
+  String get localModelsImportSuccess => 'Model imported successfully';
+
+
+  @override
+  String get companionPermissionManagement => 'Companion Permission Management';
+
+
+  @override
+  String get companionPermissionDesc =>
+      'After revoking authorization, Omnibot will still be displayed but task execution content will be hidden';
+
+
+  @override
+  String get companionPermissionNote => 'Permission Notes';
+
+
+  @override
+  String get companionAuthorizedApps => 'Authorized Apps';

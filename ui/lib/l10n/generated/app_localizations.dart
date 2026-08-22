@@ -3444,3 +3444,258 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
     'that was used.',
   );
 }
+/// **'本地模型'**
+  String get localModelsTitle;
+
+/// **'打开 App 时自动预热'**
+  String get localModelsAutoPreheat;
+
+/// **'进入应用后自动启动本地服务，并直接加载当前模型。'**
+  String get localModelsAutoPreheatDesc;
+
+/// **'已安装模型'**
+  String get localModelsInstalled;
+
+/// **'搜索、切换默认模型或删除当前设备上的模型。'**
+  String get localModelsInstalledDesc;
+
+/// **'搜索模型名称、ID 或标签'**
+  String get localModelsSearchHint;
+
+/// **'还没有可用的本地模型'**
+  String get localModelsEmpty;
+
+/// **'先去模型市场下载一个模型，或者手动放置 MNN 模型目录。'**
+  String get localModelsEmptyDesc;
+
+/// **'服务控制'**
+  String get localModelsServiceControl;
+
+/// **'切换推理后端、当前模型和监听端口。'**
+  String get localModelsServiceControlDesc;
+
+/// **'推理后端'**
+  String get localModelsInferenceBackend;
+
+/// **'当前模型'**
+  String get localModelsCurrentModel;
+
+/// **'启动服务时会加载这里选择的模型。'**
+  String get localModelsCurrentModelHint;
+
+/// **'暂无可用模型'**
+  String get localModelsNoAvailableModels;
+
+/// **'选择一个模型'**
+  String get localModelsSelectModel;
+
+/// **'服务端口'**
+  String get localModelsServicePort;
+
+/// **'请输入端口号'**
+  String get localModelsServicePortHint;
+
+/// **'当前已加载'**
+  String get localModelsCurrentlyLoaded;
+
+/// **'自动预热'**
+  String get localModelsAutoPreheatSection;
+
+/// **'打开 App 后自动启动本地服务并加载当前模型。'**
+  String get localModelsAutoPreheatSectionDesc;
+
+/// **'本地推理模型'**
+  String get localModelsLocalInference;
+
+/// **'停止中…'**
+  String get localModelsStopping;
+
+/// **'启动中…'**
+  String get localModelsStarting;
+
+/// **'停止服务'**
+  String get localModelsStopService;
+
+/// **'启动服务'**
+  String get localModelsStartService;
+
+/// **'无法加载本地模型配置'**
+  String get localModelsConfigLoadFailed;
+
+/// **'请稍后重试。'**
+  String get localModelsConfigLoadFailedDesc;
+
+/// **'加载已安装模型失败'**
+  String get localModelsInstalledLoadFailed;
+
+/// **'加载模型市场失败'**
+  String get localModelsMarketLoadFailed;
+
+/// **'切换推理后端失败'**
+  String get localModelsSwitchBackendFailed;
+
+/// **'已更新当前模型'**
+  String get localModelsActiveModelUpdated;
+
+/// **'设置当前模型失败'**
+  String get localModelsSetActiveFailed;
+
+/// **'端口号无效'**
+  String get localModelsPortInvalid;
+
+/// **'已更新服务端口'**
+  String get localModelsPortUpdated;
+
+/// **'保存端口失败'**
+  String get localModelsPortSaveFailed;
+
+/// **'保存自动预热设置失败'**
+  String get localModelsAutoPreheatSaveFailed;
+
+/// **'切换下载源失败'**
+  String get localModelsDownloadSourceSwitchFailed;
+
+/// **'本地服务已启动'**
+  String get localModelsServiceStarted;
+
+/// **'启动服务失败'**
+  String get localModelsStartFailed;
+
+/// **'停止服务失败'**
+  String get localModelsStopFailed;
+
+/// **'本地服务已停止'**
+  String get localModelsServiceStopped;
+
+/// **'启动下载失败'**
+  String get localModelsDownloadStartFailed;
+
+/// **'暂停下载失败'**
+  String get localModelsDownloadPauseFailed;
+
+/// **'未知错误'**
+  String get localModelsDownloadErrorUnknown;
+
+/// **'筛选与来源'**
+  String get localModelsFilterAndSource;
+
+/// **'切换推理后端和下载源，影响当前市场列表。'**
+  String get localModelsFilterAndSourceDesc;
+
+/// **'下载源'**
+  String get localModelsDownloadSource;
+
+/// **'选择下载源'**
+  String get localModelsSelectDownloadSource;
+
+/// **'市场模型'**
+  String get localModelsMarketModels;
+
+/// **'搜索、下载、暂停或删除市场中的模型。'**
+  String get localModelsMarketModelsDesc;
+
+/// **'搜索市场模型名称、描述或标签'**
+  String get localModelsMarketSearchHint;
+
+/// **'模型市场暂时为空'**
+  String get localModelsMarketEmpty;
+
+/// **'请检查下载源，或者下拉刷新重试。'**
+  String get localModelsMarketEmptyDesc;
+
+/// **'当前默认'**
+  String get localModelsCurrentDefault;
+
+/// **'已加载'**
+  String get localModelsLoaded;
+
+/// **'文件大小'**
+  String get localModelsFileSize;
+
+/// **'模型目录'**
+  String get localModelsModelDir;
+
+/// **'这是手动放置目录，App 内不提供删除。'**
+  String get localModelsManualDir;
+
+/// **'该模型可由 OmniInfer 直接加载。'**
+  String get localModelsOmniInferLoadable;
+
+/// **'设为当前'**
+  String get localModelsSetAsCurrent;
+
+/// **'删除'**
+  String get localModelsDelete;
+
+/// **'有更新'**
+  String get localModelsHasUpdate;
+
+/// **'阶段'**
+  String get localModelsStage;
+
+/// **'错误信息'**
+  String get localModelsErrorInfo;
+
+/// **'继续下载'**
+  String get localModelsResumeDownload;
+
+/// **'重新下载'**
+  String get localModelsRetryDownload;
+
+/// **'下载模型'**
+  String get localModelsDownloadModel;
+
+/// **'暂停'**
+  String get localModelsPause;
+
+/// **'删除旧版本'**
+  String get localModelsDeleteOldVersion;
+
+/// **'服务'**
+  String get localModelsTabService;
+
+/// **'市场'**
+  String get localModelsTabMarket;
+
+/// **'刷新'**
+  String get localModelsRefresh;
+
+/// **'准备中'**
+  String get localModelsDownloadPreparing;
+
+/// **'下载中'**
+  String get localModelsDownloading;
+
+/// **'已暂停'**
+  String get localModelsDownloadPaused;
+
+/// **'已完成'**
+  String get localModelsDownloadCompleted;
+
+/// **'下载失败'**
+  String get localModelsDownloadFailed;
+
+/// **'已取消'**
+  String get localModelsDownloadCancelled;
+
+/// **'未下载'**
+  String get localModelsNotDownloaded;
+
+/// **'从设备导入'**
+  String get localModelsImportFromDevice;
+
+/// **'模型导入成功'**
+  String get localModelsImportSuccess;
+
+/// **'陪伴权限管理'**
+  String get companionPermissionManagement;
+
+/// **'关闭对应的授权后，小万仍会显示，但不会展示任务执行内容'**
+  String get companionPermissionDesc;
+
+/// **'权限说明'**
+  String get companionPermissionNote;
+
+/// **'授权应用'**
+  String get companionAuthorizedApps;
+

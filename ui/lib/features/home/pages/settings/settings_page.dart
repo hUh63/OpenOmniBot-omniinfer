@@ -331,7 +331,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           _SettingItem(
             icon: LucideIcons.messageSquare,
-            iconSvg: 'assets/home/imessage_setting_icon.svg',
             title: 'IMessage',
             subtitle: context.trLegacy('微信与 Telegram 消息渠道'),
             onTap: () {
@@ -395,7 +394,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           _SettingItem(
             icon: LucideIcons.shield,
-            iconSvg: 'assets/home/companion_permission_setting_icon.svg',
             title: context.trLegacy('陪伴权限'),
             subtitle: context.trLegacy('查看并配置陪伴功能权限'),
             onTap: () async {

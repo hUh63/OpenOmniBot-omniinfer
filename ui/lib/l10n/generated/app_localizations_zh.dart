@@ -1776,3 +1776,343 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String get homeDrawerLateNightSub2 => '好好和今天说晚安～';
 }
+
+
+  @override
+  String get localModelsTitle => '本地模型';
+
+
+  @override
+  String get localModelsAutoPreheat => '打开 App 时自动预热';
+
+
+  @override
+  String get localModelsAutoPreheatDesc => '进入应用后自动启动本地服务，并直接加载当前模型。';
+
+
+  @override
+  String get localModelsInstalled => '已安装模型';
+
+
+  @override
+  String get localModelsInstalledDesc => '搜索、切换默认模型或删除当前设备上的模型。';
+
+
+  @override
+  String get localModelsSearchHint => '搜索模型名称、ID 或标签';
+
+
+  @override
+  String get localModelsEmpty => '还没有可用的本地模型';
+
+
+  @override
+  String get localModelsEmptyDesc => '先去模型市场下载一个模型，或者手动放置 MNN 模型目录。';
+
+
+  @override
+  String get localModelsServiceControl => '服务控制';
+
+
+  @override
+  String get localModelsServiceControlDesc => '切换推理后端、当前模型和监听端口。';
+
+
+  @override
+  String get localModelsInferenceBackend => '推理后端';
+
+
+  @override
+  String get localModelsCurrentModel => '当前模型';
+
+
+  @override
+  String get localModelsCurrentModelHint => '启动服务时会加载这里选择的模型。';
+
+
+  @override
+  String get localModelsNoAvailableModels => '暂无可用模型';
+
+
+  @override
+  String get localModelsSelectModel => '选择一个模型';
+
+
+  @override
+  String get localModelsServicePort => '服务端口';
+
+
+  @override
+  String get localModelsServicePortHint => '请输入端口号';
+
+
+  @override
+  String get localModelsCurrentlyLoaded => '当前已加载';
+
+
+  @override
+  String get localModelsAutoPreheatSection => '自动预热';
+
+
+  @override
+  String get localModelsAutoPreheatSectionDesc => '打开 App 后自动启动本地服务并加载当前模型。';
+
+
+  @override
+  String get localModelsLocalInference => '本地推理模型';
+
+
+  @override
+  String get localModelsStopping => '停止中…';
+
+
+  @override
+  String get localModelsStarting => '启动中…';
+
+
+  @override
+  String get localModelsStopService => '停止服务';
+
+
+  @override
+  String get localModelsStartService => '启动服务';
+
+
+  @override
+  String get localModelsConfigLoadFailed => '无法加载本地模型配置';
+
+
+  @override
+  String get localModelsConfigLoadFailedDesc => '请稍后重试。';
+
+
+  @override
+  String get localModelsInstalledLoadFailed => '加载已安装模型失败';
+
+
+  @override
+  String get localModelsMarketLoadFailed => '加载模型市场失败';
+
+
+  @override
+  String get localModelsSwitchBackendFailed => '切换推理后端失败';
+
+
+  @override
+  String get localModelsActiveModelUpdated => '已更新当前模型';
+
+
+  @override
+  String get localModelsSetActiveFailed => '设置当前模型失败';
+
+
+  @override
+  String get localModelsPortInvalid => '端口号无效';
+
+
+  @override
+  String get localModelsPortUpdated => '已更新服务端口';
+
+
+  @override
+  String get localModelsPortSaveFailed => '保存端口失败';
+
+
+  @override
+  String get localModelsAutoPreheatSaveFailed => '保存自动预热设置失败';
+
+
+  @override
+  String get localModelsDownloadSourceSwitchFailed => '切换下载源失败';
+
+
+  @override
+  String get localModelsServiceStarted => '本地服务已启动';
+
+
+  @override
+  String get localModelsStartFailed => '启动服务失败';
+
+
+  @override
+  String get localModelsStopFailed => '停止服务失败';
+
+
+  @override
+  String get localModelsServiceStopped => '本地服务已停止';
+
+
+  @override
+  String get localModelsDownloadStartFailed => '启动下载失败';
+
+
+  @override
+  String get localModelsDownloadPauseFailed => '暂停下载失败';
+
+
+  @override
+  String get localModelsDownloadErrorUnknown => '未知错误';
+
+
+  @override
+  String get localModelsFilterAndSource => '筛选与来源';
+
+
+  @override
+  String get localModelsFilterAndSourceDesc => '切换推理后端和下载源，影响当前市场列表。';
+
+
+  @override
+  String get localModelsDownloadSource => '下载源';
+
+
+  @override
+  String get localModelsSelectDownloadSource => '选择下载源';
+
+
+  @override
+  String get localModelsMarketModels => '市场模型';
+
+
+  @override
+  String get localModelsMarketModelsDesc => '搜索、下载、暂停或删除市场中的模型。';
+
+
+  @override
+  String get localModelsMarketSearchHint => '搜索市场模型名称、描述或标签';
+
+
+  @override
+  String get localModelsMarketEmpty => '模型市场暂时为空';
+
+
+  @override
+  String get localModelsMarketEmptyDesc => '请检查下载源，或者下拉刷新重试。';
+
+
+  @override
+  String get localModelsCurrentDefault => '当前默认';
+
+
+  @override
+  String get localModelsLoaded => '已加载';
+
+
+  @override
+  String get localModelsFileSize => '文件大小';
+
+
+  @override
+  String get localModelsModelDir => '模型目录';
+
+
+  @override
+  String get localModelsManualDir => '这是手动放置目录，App 内不提供删除。';
+
+
+  @override
+  String get localModelsOmniInferLoadable => '该模型可由 OmniInfer 直接加载。';
+
+
+  @override
+  String get localModelsSetAsCurrent => '设为当前';
+
+
+  @override
+  String get localModelsDelete => '删除';
+
+
+  @override
+  String get localModelsHasUpdate => '有更新';
+
+
+  @override
+  String get localModelsStage => '阶段';
+
+
+  @override
+  String get localModelsErrorInfo => '错误信息';
+
+
+  @override
+  String get localModelsResumeDownload => '继续下载';
+
+
+  @override
+  String get localModelsRetryDownload => '重新下载';
+
+
+  @override
+  String get localModelsDownloadModel => '下载模型';
+
+
+  @override
+  String get localModelsPause => '暂停';
+
+
+  @override
+  String get localModelsDeleteOldVersion => '删除旧版本';
+
+
+  @override
+  String get localModelsTabService => '服务';
+
+
+  @override
+  String get localModelsTabMarket => '市场';
+
+
+  @override
+  String get localModelsRefresh => '刷新';
+
+
+  @override
+  String get localModelsDownloadPreparing => '准备中';
+
+
+  @override
+  String get localModelsDownloading => '下载中';
+
+
+  @override
+  String get localModelsDownloadPaused => '已暂停';
+
+
+  @override
+  String get localModelsDownloadCompleted => '已完成';
+
+
+  @override
+  String get localModelsDownloadFailed => '下载失败';
+
+
+  @override
+  String get localModelsDownloadCancelled => '已取消';
+
+
+  @override
+  String get localModelsNotDownloaded => '未下载';
+
+
+  @override
+  String get localModelsImportFromDevice => '从设备导入';
+
+
+  @override
+  String get localModelsImportSuccess => '模型导入成功';
+
+
+  @override
+  String get companionPermissionManagement => '陪伴权限管理';
+
+
+  @override
+  String get companionPermissionDesc => '关闭对应的授权后，小万仍会显示，但不会展示任务执行内容';
+
+
+  @override
+  String get companionPermissionNote => '权限说明';
+
+
+  @override
+  String get companionAuthorizedApps => '授权应用';
