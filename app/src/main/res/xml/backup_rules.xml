@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Sample backup rules file; uncomment and customize as necessary.
+   See https://developer.android.com/guide/topics/data/autobackup
+   for details.
+   Note: This file is ignored for devices older than API 31
+   See https://developer.android.com/about/versions/12/backup-restore
+-->
+<full-backup-content>
+    <!-- Account tokens are encrypted with a device-bound Android Keystore key. -->
+    <exclude domain="sharedpref" path="omni_account_tokens.xml" />
+    <!-- User-supplied provider credentials are device-bound and must not be backed up. -->
+    <exclude domain="sharedpref" path="omni_model_provider_secrets.xml" />
+    <!--
+   <include domain="sharedpref" path="."/>
+   <exclude domain="sharedpref" path="device.xml"/>
+-->
+</full-backup-content>

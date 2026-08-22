@@ -1,0 +1,4 @@
+<resources>
+    <string name="xiaowan_accessibility_label">Omnibot</string>
+    <string name="xiaowan_accessibility_description">Allow Omnibot to observe the screen and perform taps, swipes, and text input.</string>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 权限目的说明弹窗（与华为「同步告知权限申请目的」要求一致） -->
+    <string name="permission_request_purpose_title">权限使用说明</string>
+    <string name="permission_request_purpose_continue">继续</string>
+    <!-- 自定义权限卡片：与系统弹窗一致的禁止/允许 -->
+    <string name="permission_btn_deny_text">禁止</string>
+    <string name="permission_btn_allow_text">允许</string>
+    <!-- 是否允许 [AppName] [权限操作描述] -->
+    <string name="permission_prompt_template">是否允许 %1$s「%2$s」</string>
+</resources>

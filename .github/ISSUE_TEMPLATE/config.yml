@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题与文档
+    url: https://github.com/omnimind-ai/OpenOmniBot/blob/main/README.md
+    about: 提交 Issue 前请先阅读项目文档与快速开始说明

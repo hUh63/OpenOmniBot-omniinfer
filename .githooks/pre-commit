@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [[ -z "${staged_files}" ]]; then
+  exit 0
+fi
+
+is_windows=false
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW*|MSYS*|CYGWIN*) is_windows=true ;;
+esac
+
+has_match() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -e "${pattern}" >/dev/null
+  else
+    grep -nE "${pattern}" >/dev/null
+  fi
+}
+
+echo "[pre-commit] running quick checks..."
+
+# 1) Do not allow signing assets in git.
+if echo "${staged_files}" | has_match '\.(jks|keystore)$'; then
+  echo "[pre-commit] error: keystore files must not be committed."
+  echo "[pre-commit] use CI secrets for release signing."
+  exit 1
+fi
+
+# 2) Block known commercial residue and sensitive hard-coded keys in staged diff.
+banned_pattern='DEVELOP_BASE_URL|PRODUCTION_BASE_URL|WX_APP_ID|test-app\.omnimind\.com\.cn|app\.omnimind\.com\.cn|dl\.omnimind\.com\.cn|com\.amap\.api\.v2\.apikey'
+if git diff --cached -U0 -- . ':(exclude).githooks/pre-commit' | grep -E '^\+[^+]' | has_match "${banned_pattern}"; then
+  echo "[pre-commit] error: staged changes include banned legacy/commercial strings."
+  echo "[pre-commit] please remove them before commit."
+  exit 1
+fi
+
+# 3) Kotlin/Gradle quick compile check when native code/build files changed.
+needs_kotlin_check=false
+while IFS= read -r file; do
+  [[ -z "${file}" ]] && continue
+  if [[ "${file}" =~ \.(kt|java)$ ]]; then
+    needs_kotlin_check=true
+    break
+  fi
+  case "${file}" in
+    build.gradle|build.gradle.kts|settings.gradle|settings.gradle.kts|gradle.properties|gradle/libs.versions.toml|app/build.gradle|app/build.gradle.kts)
+      needs_kotlin_check=true
+      break
+      ;;
+  esac
+done <<< "${staged_files}"
+
+if [[ "${needs_kotlin_check}" == true ]]; then
+  gradle_cmd=("./gradlew")
+  if [[ "${is_windows}" == true && -f "gradlew.bat" ]]; then
+    gradle_cmd=("cmd.exe" "//c" "gradlew.bat")
+  elif [[ ! -f "gradlew" && -f "gradlew.bat" ]]; then
+    gradle_cmd=("./gradlew.bat")
+  fi
+
+  echo "[pre-commit] kotlin compile check (:app:compileDevelopOmniinferDebugKotlin, :app:compileDevelopStandardDebugKotlin)..."
+  "${gradle_cmd[@]}" --no-daemon \
+    :app:compileDevelopOmniinferDebugKotlin \
+    :app:compileDevelopStandardDebugKotlin \
+    -x :flutter:compileFlutterBuildDebug
+fi
+
+# 4) Fast Dart static check for staged Dart files only.
+dart_files=()
+while IFS= read -r file; do
+  [[ -z "${file}" ]] && continue
+  if echo "${file}" | grep -E '^ui/.*\.dart$' >/dev/null; then
+    dart_files+=("${file#ui/}")
+  fi
+done <<< "${staged_files}"
+
+if [[ "${#dart_files[@]}" -gt 0 ]]; then
+  if ! command -v flutter >/dev/null 2>&1; then
+    echo "[pre-commit] error: flutter is required when committing Dart changes."
+    exit 1
+  fi
+
+  echo "[pre-commit] flutter analyze (changed Dart files only)..."
+  pushd ui >/dev/null
+  analyze_targets=()
+  for rel in "${dart_files[@]}"; do
+    if [[ -f "${rel}" ]]; then
+      analyze_targets+=("${rel}")
+    fi
+  done
+
+  if [[ "${#analyze_targets[@]}" -gt 0 ]]; then
+    flutter analyze --no-fatal-warnings --no-fatal-infos "${analyze_targets[@]}"
+  fi
+  popd >/dev/null
+fi
+
+echo "[pre-commit] quick checks passed."

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>App 第三方信息共享清单</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2em; color: #333; }
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+        th, td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        p { text-indent: 2em; }
+        a { color: #1a73e8; text-decoration: none; }
+        h1 { text-align: center; }
+        a:hover { text-decoration: underline; }
+        @media (max-width: 768px) {
+            .container { padding: 1em; }
+            table { font-size: 0.85em; }
+            th, td { padding: 8px; }
+            h1 { font-size: 1.5em; }
+        }
+        .personal-info {
+            font-weight: bold;
+        }
+    </style>
+<base target="_blank">
+</head>
+<body>
+
+<h1>第三方信息共享清单</h1>
+<p>我们提供的某些服务和（或）产品功能可能由我们的第三方合作伙伴提供或由我们与合作伙伴共同提供，只有通过该第三方 SDK 处理您的信息，我们才能实现相应功能。第三方 SDK 技术服务提供方会基于向您提供功能或服务之必需获取相应权限及信息。如您拒绝第三方在提供服务时收集、使用或者传递必需的权限及信息，将可能会导致您无法使用第三方的相应服务，但不影响您使用我们提供的其他服务。</p>
+<p>对于您在使用第三方提供的服务时主动提供给第三方的相关信息，我们将视为您允许该第三方获取必需的权限及信息。对于您在使用第三方服务时产生的信息，应由您与该第三方依法约定上述信息的收集和使用事项。第三方提供的服务由该第三方独立运营并独立承担全部责任。因第三方所提供服务或其使用您的信息产生的纠纷，或其违反相关法律法规或本协议协定，或您在使用其服务过程中遭受的损失，请您与该第三方协商解决。对于需由第三方解决的问题，我们将尽商业上合理的努力推动第三方解决。</p>
+
+<h2>Android 小万 App</h2>
+<div class="table-wrapper">
+<table>
+    <thead>
+        <tr>
+            <th>SDK 名称</th>
+            <th>场景描述</th>
+            <th>涉及收集的主要个人信息字段</th>
+            <th>系统权限</th>
+            <th>收集方式</th>
+            <th>数据收集方</th>
+            <th>隐私政策链接</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>Fresco（v1.3.0）</td>
+            <td>加载、显示图片</td>
+            <td class="personal-info">无</td>
+            <td>无</td>
+            <td>不向第三方共享信息</td>
+            <td>Facebook 开源库，MIT License</td>
+            <td>无</td>
+        </tr>
+        <tr>
+            <td>Glide（v4.9.0）</td>
+            <td>加载图片</td>
+            <td class="personal-info">无</td>
+            <td>无</td>
+            <td>不向第三方共享信息</td>
+            <td>开源库，BSD, part MIT and Apache 2.0</td>
+            <td>无</td>
+        </tr>
+        <tr>
+            <td>OKHTTP（v3.12.1）、Apache 网络库、Guava</td>
+            <td>用于网络数据的发送和接收</td>
+            <td class="personal-info">网络信息（IP 地址、MAC 地址、端口号、网络类型）</td>
+            <td>INTERNET</td>
+            <td>由 SDK 采集，不涉及数据共享</td>
+            <td>开源库，Apache License 2.0</td>
+            <td>无</td>
+        </tr>
+        <tr>
+            <td>ZXing</td>
+            <td>用于识别二维码</td>
+            <td class="personal-info">无</td>
+            <td>CAMERA、READ_EXTERNAL_STORAGE</td>
+            <td>不向第三方共享信息</td>
+            <td>开源库，Apache License 2.0</td>
+            <td>无</td>
+        </tr>
+        <tr>
+            <td>腾讯云号码认证（v4.0.6）</td>
+            <td>手机号码一键登录</td>
+            <td class="personal-info">手机号码、设备参数及系统信息（设备型号、系统版本、IMSI）、网络信息（IP 地址、MAC 地址、网络类型、网络制式、运营商、WIFI）、应用特征信息</td>
+            <td>INTERNET、ACCESS_WIFI_STATE、ACCESS_NETWORK_STATE、CHANGE_NETWORK_STATE、READ_PHONE_STATE</td>
+            <td>由 SDK 采集，不涉及数据共享</td>
+            <td>深圳市腾讯计算机系统有限公司</td>
+            <td><a href="https://cloud.tencent.com/document/product/1415/65372" target="_blank">查看</a></td>
+        </tr>
+        <tr>
+            <td>中国移动一键登录 SDK</td>
+            <td><b>手机号码</b>一键登录</td>
+            <td class="personal-info">设备参数及系统信息（设备型号、系统版本、IMSI）、网络信息（IP 地址、MAC 地址、网络类型、网络制式、运营商、WIFI）、应用特征信息</td>
+            <td>INTERNET、ACCESS_WIFI_STATE、ACCESS_NETWORK_STATE、CHANGE_NETWORK_STATE、READ_PHONE_STATE</td>
+            <td>由 SDK 采集，不涉及数据共享</td>
+            <td>中移互联网有限公司</td>
+            <td><a href="https://wap.cmpassport.com/resources/html/contact2.html" target="_blank">查看</a></td>
+        </tr>
+        <tr>
+            <td>中国联通一键登录 SDK</td>
+            <td><b>手机号码</b>一键登录</td>
+            <td class="personal-info">设备参数及系统信息（设备型号、系统版本、IMSI）、网络信息（IP 地址、MAC 地址、网络类型、网络制式、运营商、WIFI）、应用特征信息</td>
+            <td>INTERNET、ACCESS_WIFI_STATE、ACCESS_NETWORK_STATE、CHANGE_NETWORK_STATE、READ_PHONE_STATE</td>
+            <td>由 SDK 采集，不涉及数据共享</td>
+            <td>中国联合网络通信有限公司</td>
+            <td><a href="https://opencloud.wostore.cn/authz/resource/html/disclaimer.html" target="_blank">查看</a></td>
+        </tr>
+        <tr>
+            <td>电信一键登录 SDK</td>
+            <td><b>手机号码</b>一键登录</td>
+            <td class="personal-info">设备参数及系统信息（设备型号、系统版本、IMSI）、网络信息（IP 地址、MAC 地址、网络类型、网络制式、运营商、WIFI）、应用特征信息</td>
+            <td>INTERNET、ACCESS_WIFI_STATE、ACCESS_NETWORK_STATE、CHANGE_NETWORK_STATE、READ_PHONE_STATE</td>
+            <td>由 SDK 采集，不涉及数据共享</td>
+            <td>世纪龙信息网络有限责任公司</td>
+            <td><a href="https://e.189.cn/sdk/agreement/show.do?order=2&type=main&appKey=&hidetop=true&isShowPre=&returnUrl=https%3A%2F%2Fe.dlife.cn" target="_blank">查看</a></td>
+        </tr>
+        <tr>
+            <td>Chromium</td>
+            <td>使用 Chromium 作为内置浏览器访问 App 内网页、浏览网页</td>
+            <td class="personal-info">MAC 地址、设备信息(SSID/BSSID/Android ID)、网络信息(WIFI)、传感器列表信息、传感器信息（加速度传感器、游戏旋转矢量传感器）、剪切板、软件安装列表</td>
+            <td>INTERNET、ACCESS_WIFI_STATE、ACCESS_NETWORK_STATE</td>
+            <td>由 SDK 采集，不涉及数据共享</td>
+            <td>Google, Inc.</td>
+            <td>无</td>
+        </tr>
+    </tbody>
+</table>
+</div>
+
+</body>
+</html>

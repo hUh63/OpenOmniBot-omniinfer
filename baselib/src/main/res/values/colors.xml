@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 权限请求自定义卡片 -->
+    <color name="permission_overlay_bg">#80000000</color>
+    <color name="permission_card_bg">#FFFFFF</color>
+    <color name="permission_purpose_box_bg">#F5F5F5</color>
+    <color name="permission_divider">#E0E0E0</color>
+    <color name="permission_primary_text">#212121</color>
+    <color name="permission_secondary_text">#757575</color>
+    <color name="permission_btn_allow">#1976D2</color>
+    <color name="permission_btn_deny">#1976D2</color>
+</resources>

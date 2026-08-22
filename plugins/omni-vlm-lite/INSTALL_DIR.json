@@ -1,0 +1,10 @@
+{
+  "schema_version": "oob.component-install-layout.v1",
+  "component_id": "com.omnimind.omni-vlm-lite",
+  "android_runtime_skill_root": "<app-data>/workspace/.omnibot/skills/omniflow-gui-runtime",
+  "shell_runtime_skill_root": "/workspace/.omnibot/skills/omniflow-gui-runtime",
+  "android_developer_override_root": "<app-data>/workspace/.omnibot/omniflow-developer/python",
+  "shell_developer_override_root": "/workspace/.omnibot/omniflow-developer/python",
+  "editable_glob": "omniflow/**/*.py",
+  "recovery": "clear_omniflow_python_override"
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "com.omnimind.omni-vlm-lite",
+  "version": "2.1.7",
+  "name": "OmniFlow",
+  "kind": "runtime_component",
+  "interfaceVersion": 1,
+  "androidAdapter": "omniflow_android_gui",
+  "mcp": {
+    "providedBy": "openomnibot",
+    "transports": [
+      "streamable-http"
+    ],
+    "tools": [
+      "run_gui",
+      "run_function",
+      "list_functions",
+      "register_function"
+    ]
+  },
+  "skill": {
+    "id": "omniflow-gui-runtime"
+  },
+  "install": {
+    "manager": "bundled",
+    "sitePackages": "vendor/site-packages"
+  },
+  "runtime": {
+    "manifest": "scripts/runtime/runtime.properties",
+    "pythonSource": "scripts/runtime/python",
+    "sitePackages": "vendor/site-packages",
+    "omnitransferRoot": "scripts/runtime/.runtime/omnitransfer"
+  }
+}

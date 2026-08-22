@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "tools": [
+    {
+      "name": "project_contract",
+      "displayName": "Read Project Connector Contract",
+      "description": "Return the exact supported Connector and shared Dashboard Tool Link contract. executor.connector MUST reference connectors[].id, never a connector type. Dashboard reads and writes use window.omni.tools.call with the same toolkit.json tools as Xiaowan. Supported types: sqlite (insert/query/update/delete), xiaowan (invoke), and public HTTPS http_json (get). Call once when uncertain; do not search source code or guess names.",
+      "executor": "plugin.pool.contract",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "project_check",
+      "displayName": "Check Project Link",
+      "description": "Verify a completed project before publishing. Dashboard reads and writes must use window.omni.tools.call with a local tool declared in toolkit.json; direct window.omni.db calls are rejected. toolkit.json rule: executor.connector references connectors[].id, not a type. Supported types/actions: sqlite insert/query/update/delete; xiaowan invoke; http_json get. If uncertain, call project_contract once instead of guessing or searching source code.",
+      "executor": "plugin.pool.check",
+      "parameters": {
+        "type": "object",
+        "required": ["path", "manifest"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative, /workspace, or omnibot workspace directory containing the completed project."
+          },
+          "manifest": {
+            "type": "object",
+            "required": ["slug", "name", "description", "entry_path", "icon_path"],
+            "properties": {
+              "slug": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                "description": "Stable lowercase hyphenated project slug."
+              },
+              "name": {
+                "type": "string",
+                "description": "Short human-facing plugin name."
+              },
+              "description": {
+                "type": "string",
+                "description": "One-sentence explanation of the project's function."
+              },
+              "version": {
+                "type": "string",
+                "default": "1.0.0"
+              },
+              "entry_path": {
+                "type": "string",
+                "description": "Required standalone HTML app entry relative to the project directory."
+              },
+              "icon_path": {
+                "type": "string",
+                "pattern": "\\.svg$",
+                "description": "Required SVG app icon relative to the project directory. Create it as SVG source; never use an image-generation model or raster source asset."
+              },
+              "schema_path": {
+                "type": "string",
+                "description": "Optional SQLite schema relative to the project directory when the database connector is used."
+              },
+              "skill_path": {
+                "type": "string",
+                "default": "skill/SKILL.md",
+                "description": "Xiaowan SKILL.md relative to the project directory."
+              },
+              "toolkit_path": {
+                "type": "string",
+                "default": "toolkit.json",
+                "description": "Agent-callable business toolkit definition relative to the project directory."
+              },
+              "permissions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["xiaowan", "database", "ai", "network"]
+                },
+                "uniqueItems": true,
+                "default": ["xiaowan"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "project_publish",
+      "displayName": "Publish Linked Project",
+      "description": "Publish or update a checked project as an enabled plugin. Dashboard and Xiaowan must share the toolkit.json Tool Link through window.omni.tools.call; publication re-runs this check. toolkit.json rule: executor.connector references connectors[].id, not a type. Supported types/actions: sqlite insert/query/update/delete; xiaowan invoke; http_json get. Re-publishing preserves connector-owned data.",
+      "executor": "plugin.pool.publish",
+      "parameters": {
+        "type": "object",
+        "required": ["path", "manifest"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative, /workspace, or omnibot workspace directory containing the completed project."
+          },
+          "manifest": {
+            "type": "object",
+            "required": ["slug", "name", "description", "entry_path", "icon_path"],
+            "properties": {
+              "slug": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                "description": "Stable lowercase hyphenated project slug."
+              },
+              "name": {
+                "type": "string",
+                "description": "Short human-facing plugin name."
+              },
+              "description": {
+                "type": "string",
+                "description": "One-sentence explanation of the project's function."
+              },
+              "version": {
+                "type": "string",
+                "default": "1.0.0"
+              },
+              "entry_path": {
+                "type": "string",
+                "description": "Required standalone HTML app entry relative to the project directory."
+              },
+              "icon_path": {
+                "type": "string",
+                "pattern": "\\.svg$",
+                "description": "Required SVG app icon relative to the project directory. Create it as SVG source; never use an image-generation model or raster source asset."
+              },
+              "schema_path": {
+                "type": "string",
+                "description": "Optional SQLite schema relative to the project directory when the database connector is used."
+              },
+              "skill_path": {
+                "type": "string",
+                "default": "skill/SKILL.md",
+                "description": "Xiaowan SKILL.md relative to the project directory."
+              },
+              "toolkit_path": {
+                "type": "string",
+                "default": "toolkit.json",
+                "description": "Agent-callable business toolkit definition relative to the project directory."
+              },
+              "permissions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["xiaowan", "database", "ai", "network"]
+                },
+                "uniqueItems": true,
+                "default": ["xiaowan"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}

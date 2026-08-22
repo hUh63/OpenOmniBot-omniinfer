@@ -1,0 +1,368 @@
+{
+  "schemaVersion": 1,
+  "plugins": [
+    {
+      "id": "com.omnimind.omni-vlm-lite",
+      "name": "OmniFlow",
+      "version": "2.1.7",
+      "interfaceVersion": 1,
+      "description": "Android GUI automation powered by the OmniFlow VLM runtime.",
+      "publisher": "OmniMind",
+      "kind": "runtime_bundle",
+      "downloadSizeBytes": 941767,
+      "required": true,
+      "capabilities": [
+        "Manual recording",
+        "Canonical RunLog",
+        "RunLog to Function",
+        "Function recall and parameter binding",
+        "Function replay with OmniTransfer",
+        "Mobilerun Manager and Executor",
+        "OmniFlow Python runtime"
+      ],
+      "settingsSchema": {},
+      "adapter": "omniflow_android_gui",
+      "runtimeSkill": {
+        "id": "omniflow-gui-runtime",
+        "packagedArchivePath": "runtime-components/omniflow-gui-runtime-2.1.7.zip",
+        "componentArchiveUrl": "https://github.com/omnimind-ai/OmniBotSkills/releases/download/omniflow-gui-runtime-v2.1.7/omniflow-gui-runtime-2.1.7.zip",
+        "componentArchiveSha256": "3e7751335141dadc644b5ec9f83fcbddb562dcc926a0edb0873c70b29baeae87",
+        "installTimeoutSeconds": 900
+      },
+      "presentation": {
+        "description": {
+          "zh": "OmniFlow 是随应用自动安装并启动的 GUI/VLM 系统组件；可录制流程并在相似任务中复用。",
+          "en": "OmniFlow is a GUI/VLM system component installed and started automatically with the app for recording and reusing similar flows."
+        },
+        "readiness": "vlm_provider",
+        "usage": [
+          {
+            "icon": "power",
+            "title": {
+              "zh": "自动准备 runtime",
+              "en": "Prepare the runtime automatically"
+            },
+            "description": {
+              "zh": "插件包统一管理 OmniFlow、OmniTransfer、模型 checkpoint 和 Python 依赖，并在安装或更新阶段校验版本与契约。",
+              "en": "The plugin package manages OmniFlow, OmniTransfer, the model checkpoint, and Python dependencies, verifying versions and contracts during install or update."
+            }
+          },
+          {
+            "icon": "touch",
+            "title": {
+              "zh": "开箱即用",
+              "en": "Ready out of the box"
+            },
+            "description": {
+              "zh": "首次启动会自动安装并启用，后续启动自动恢复；用户无需在插件市场手动操作。",
+              "en": "It installs and enables itself on first launch and restores automatically later, with no manual marketplace setup."
+            }
+          },
+          {
+            "icon": "layers",
+            "title": {
+              "zh": "只增加一个轻量基线包",
+              "en": "Adds only a small baseline"
+            },
+            "description": {
+              "zh": "APK 只内置一个约 1 MB 的已验收基线 ZIP；录制、RunLog、Function、checker、重放和后续热更新仍由插件包提供。",
+              "en": "The APK embeds only an accepted baseline ZIP of about 1 MB; recording, RunLog, Function, checker, replay, and later hot updates still come from the plugin package."
+            }
+          }
+        ],
+        "ready": {
+          "key": "omniflow-ready-guide",
+          "title": {
+            "zh": "OmniFlow 自动化增强已启用",
+            "en": "OmniFlow automation is enabled"
+          },
+          "steps": [
+            {
+              "zh": "在线执行：回到聊天，直接说“打开蓝牙”或“新建联系人”。",
+              "en": "Online: return to chat and ask “Turn on Bluetooth” or “Create a contact”."
+            },
+            {
+              "zh": "录下操作：在聊天中发送“手动录制”，完成后会保存整个操作过程，方便以后再次使用。",
+              "en": "Record actions: send “Manual recording” in chat. The complete flow is saved for later reuse."
+            },
+            {
+              "zh": "自动复用：再次提出相似要求时，系统会找到已保存的流程，替换新的联系人、商品或地址后执行。",
+              "en": "Reuse automatically: for a similar request, the system finds a saved flow, substitutes the new contact, product, or address, and runs it."
+            }
+          ],
+          "actions": [
+            {
+              "route": "/home/chat",
+              "navigation": "go",
+              "icon": "chat",
+              "requiresReadiness": true,
+              "label": {
+                "zh": "去聊天试用",
+                "en": "Try in chat"
+              }
+            },
+            {
+              "route": "/task/omniflow",
+              "navigation": "push",
+              "icon": "route",
+              "requiresReadiness": false,
+              "label": {
+                "zh": "查看已保存操作",
+                "en": "View saved actions"
+              }
+            }
+          ]
+        },
+        "installedAction": {
+          "route": "/task/omniflow",
+          "navigation": "push",
+          "icon": "route",
+          "label": {
+            "zh": "已保存操作与执行记录",
+            "en": "Saved actions & history"
+          }
+        },
+        "dashboard": {
+          "route": "/task/omniflow",
+          "navigation": "push",
+          "icon": "dashboard",
+          "label": {
+            "zh": "进入 Dashboard",
+            "en": "Open Dashboard"
+          }
+        },
+        "capabilityLabels": {
+          "Manual recording": {
+            "zh": "录下你的手机操作",
+            "en": "Record your phone actions"
+          },
+          "Canonical RunLog": {
+            "zh": "查看任务执行的每一步",
+            "en": "Review every step of a task"
+          },
+          "RunLog to Function": {
+            "zh": "把成功操作保存下来重复使用",
+            "en": "Save successful actions for reuse"
+          },
+          "Function recall and parameter binding": {
+            "zh": "相似任务自动找到流程并替换新内容",
+            "en": "Find a matching flow and substitute new details"
+          },
+          "Function replay with OmniTransfer": {
+            "zh": "换一台手机也能找到对应按钮并执行",
+            "en": "Adapt saved actions to another phone"
+          },
+          "Mobilerun Manager and Executor": {
+            "zh": "管理并执行已保存的手机操作",
+            "en": "Manage and run saved phone actions"
+          },
+          "OmniFlow Python runtime": {
+            "zh": "需要高级能力时自动准备运行环境",
+            "en": "Prepare advanced automation only when needed"
+          }
+        }
+      }
+    },
+    {
+      "id": "com.omnimind.vibe-project-builder",
+      "name": "Vibe Builder",
+      "version": "0.2.1",
+      "interfaceVersion": 1,
+      "description": "Build standalone phone-first Apps linked to Xiaowan, isolated data, and reusable backend connectors.",
+      "publisher": "OmniMind",
+      "kind": "runtime_bundle",
+      "downloadSizeBytes": 0,
+      "capabilities": [
+        "Standalone HTML Apps",
+        "SVG launcher icons",
+        "Installable Xiaowan Skills",
+        "Agent-callable business tools",
+        "Reusable backend connectors",
+        "Isolated optional SQLite storage"
+      ],
+      "settingsSchema": {},
+      "adapter": "sandbox_bundle",
+      "profiles": [
+        "investor"
+      ],
+      "runtimeSkill": {
+        "id": "vibe-project-builder",
+        "packagedAssetPath": "vibe-project/runtime-skill/vibe-project-builder",
+        "markerFile": "PACKAGED_RUNTIME_SKILL"
+      },
+      "presentation": {
+        "description": {
+          "zh": "启用后，Agent 可以生成带独立 HTML 界面和 SVG 桌面图标的小 App，并快速连接小万、可调用工具与隔离数据；发布后作为独立插件管理。",
+          "en": "Enable the Agent to generate a standalone HTML App with an SVG home-screen icon, then link Xiaowan, callable tools, and isolated data behind it as an independent plugin."
+        },
+        "dashboard": {
+          "route": "/home/plugin_market/com.omnimind.vibe-project-builder",
+          "navigation": "push",
+          "icon": "dashboard",
+          "label": {
+            "zh": "进入 Vibe Builder",
+            "en": "Open Vibe Builder"
+          }
+        }
+      }
+    },
+    {
+      "id": "com.omnimind.omnilink-agent",
+      "name": "OmniLink 协作工具箱",
+      "version": "0.2.0",
+      "interfaceVersion": 1,
+      "description": "Give Xiaowan a bounded toolbox for collaborating with Xiaowan on another trusted device over the local OmniLink gateway.",
+      "publisher": "OmniMind",
+      "kind": "runtime_bundle",
+      "downloadSizeBytes": 0,
+      "capabilities": [
+        "List connected devices",
+        "Compose remote battery and device-readiness queries",
+        "Send idempotent Agent messages",
+        "Read and subscribe to Agent-safe event types",
+        "Surface privacy-safe event summaries",
+        "Reconnect-safe event cursors"
+      ],
+      "settingsSchema": {},
+      "adapter": "omnilink_agent",
+      "profiles": [
+        "investor"
+      ],
+      "runtimeSkill": {
+        "id": "omnilink-agent",
+        "packagedAssetPath": "omnilink-agent/runtime-skill/omnilink-agent",
+        "markerFile": "PACKAGED_RUNTIME_SKILL"
+      },
+      "presentation": {
+        "description": {
+          "zh": "让小万在聊天中直接组合 OmniLink 原语：查询另一台手机的电量和在线状态，订阅隐私安全的事件摘要，给另一台设备上的小万发信号，并自动把事件回流当前会话。",
+          "en": "Let Xiaowan compose OmniLink primitives from chat: query another phone's battery and reachability, subscribe to privacy-safe event summaries, signal another Xiaowan, and surface events in the current conversation."
+        },
+        "readiness": "omnilink_local_gateway",
+        "usage": [
+          {
+            "icon": "devices",
+            "title": {
+              "zh": "先看协作设备",
+              "en": "Inspect devices first"
+            },
+            "description": {
+              "zh": "说“列出协作设备”，小万会读取设备 readiness，再按你的意图组合查询。",
+              "en": "Say “list collaboration devices”; Xiaowan reads readiness and composes the requested query."
+            }
+          },
+          {
+            "icon": "battery",
+            "title": {
+              "zh": "查询另一台手机状态",
+              "en": "Query the other phone"
+            },
+            "description": {
+              "zh": "说“查另一台手机的电量和是否在线”，小万会读取实时 readiness。",
+              "en": "Say “check the other phone's battery and reachability”; Xiaowan reads live readiness."
+            }
+          },
+          {
+            "icon": "notifications",
+            "title": {
+              "zh": "接收另一台手机通知",
+              "en": "Receive remote notifications"
+            },
+            "description": {
+              "zh": "说“开始接收另一台手机的通知”，通知会持续回流当前聊天，正文按隐私策略隐藏。",
+              "en": "Say “start receiving notifications from the other phone”; safe summaries return to this chat while content stays private."
+            }
+          },
+          {
+            "icon": "notifications",
+            "title": {
+              "zh": "小万自己组合事件订阅",
+              "en": "Compose event subscriptions"
+            },
+            "description": {
+              "zh": "说“开始接收另一台手机的通知”，小万会选择安全事件类型并建立持续回流。",
+              "en": "Say “start receiving notifications from the other phone”; Xiaowan selects safe event types and starts the stream."
+            }
+          },
+          {
+            "icon": "send",
+            "title": {
+              "zh": "让两个小万互相发信号",
+              "en": "Message between Agents"
+            },
+            "description": {
+              "zh": "说“给另一台设备上的小万发消息：……”；消息带幂等 ID，可安全重试。",
+              "en": "Say “send a message to the other Xiaowan: …”; messages carry an idempotency ID and can be retried safely."
+            }
+          },
+          {
+            "icon": "sync",
+            "title": {
+              "zh": "入站消息实时回流",
+              "en": "Inbound events return live"
+            },
+            "description": {
+              "zh": "另一台设备的 Agent 消息和事件摘要会自动回到当前聊天，不需要用户复制 CLI 输出。",
+              "en": "Agent messages and notification events from the other device return to the current chat without copying CLI output."
+            }
+          }
+        ],
+        "ready": {
+          "key": "omnilink-agent-ready-guide",
+          "title": {
+            "zh": "OmniLink 协作已启用",
+            "en": "OmniLink collaboration is enabled"
+          },
+          "steps": [
+            {
+              "zh": "回到聊天，说“列出协作设备”。",
+              "en": "Return to chat and say “List collaboration devices.”"
+            },
+            {
+              "zh": "再说“给设备 <device_id> 上的小万发消息：请回复 READY”。",
+              "en": "Then say “Send to device <device_id>: reply READY.”"
+            },
+            {
+              "zh": "对方事件会作为一条 OmniLink 协作消息出现在聊天中。",
+              "en": "The peer event appears as an OmniLink collaboration message in chat."
+            }
+          ],
+          "actions": [
+            {
+              "route": "/home/chat",
+              "navigation": "go",
+              "icon": "chat",
+              "requiresReadiness": true,
+              "label": {
+                "zh": "去聊天试用",
+                "en": "Try in chat"
+              }
+            }
+          ]
+        },
+        "capabilityLabels": {
+          "List connected devices": {
+            "zh": "查看已连接协作设备",
+            "en": "List connected devices"
+          },
+          "Read device readiness": {
+            "zh": "读取设备状态与能力就绪度",
+            "en": "Read device readiness"
+          },
+          "Send idempotent Agent messages": {
+            "zh": "向另一个小万发送可重试消息",
+            "en": "Send retry-safe Agent messages"
+          },
+          "Subscribe to Agent message events": {
+            "zh": "订阅另一台设备的小万消息",
+            "en": "Subscribe to peer Agent events"
+          },
+          "Reconnect-safe event cursors": {
+            "zh": "断线重连后不丢消息",
+            "en": "Recover events after reconnect"
+          }
+        }
+      }
+    }
+  ]
+}

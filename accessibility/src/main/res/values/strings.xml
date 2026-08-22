@@ -1,0 +1,4 @@
+<resources>
+    <string name="xiaowan_accessibility_label">小万</string>
+    <string name="xiaowan_accessibility_description">允许小万读取页面并执行点击、滑动和输入。</string>
+</resources>

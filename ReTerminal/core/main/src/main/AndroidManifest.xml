@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <application>
+        <activity
+            android:name="com.rk.terminal.ui.activities.terminal.MainActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Karbon"
+            android:windowSoftInputMode="adjustResize" />
+
+        <service
+            android:name="com.rk.terminal.service.SessionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|dataSync">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="interactive_terminal_sessions_and_alpine_environment_setup" />
+        </service>
+
+        <provider
+            android:name="com.rk.AlpineDocumentProvider"
+            android:authorities="${applicationId}.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:icon="@mipmap/ic_launcher"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+       <!-- <service android:name="com.rk.runner.runners.web.html.HtmlRunner$DevTools"/> -->
+    </application>
+</manifest>

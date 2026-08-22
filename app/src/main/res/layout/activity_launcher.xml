@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="#151617"
+    android:padding="32dp">
+
+    <!-- Logo -->
+    <ImageView
+        android:id="@+id/iv_logo"
+        android:layout_width="120dp"
+        android:layout_height="120dp"
+        android:layout_marginBottom="40dp"
+        android:src="@drawable/splash_logo"
+        android:scaleType="centerInside" />
+
+    <!-- 应用名称 -->
+    <TextView
+        android:id="@+id/tv_app_name"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="60dp"
+        android:text="小万"
+        android:textSize="32sp"
+        android:textColor="#F5F7FA"
+        android:textStyle="bold"
+        android:fontFamily="sans-serif-medium" />
+
+    <!-- 加载指示器 -->
+    <ProgressBar
+        android:id="@+id/pb_loading"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginBottom="16dp"
+        android:indeterminateTint="#F5F7FA" />
+
+    <!-- 加载文字 -->
+    <TextView
+        android:id="@+id/tv_loading"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="正在初始化..."
+        android:textSize="14sp"
+        android:textColor="#A7ADB5"
+        android:fontFamily="sans-serif" />
+
+</LinearLayout>

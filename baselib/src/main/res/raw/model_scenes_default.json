@@ -1,0 +1,82 @@
+{
+  "scene.dispatch.model": {
+    "model": "qwen3.5-plus",
+    "prompt": null,
+    "description": "可执行任务三段式分流（decision/app-scope/task-match）默认模型（Flutter 侧）",
+    "description_i18n": {
+      "zh-CN": "可执行任务三段式分流（decision/app-scope/task-match）默认模型（Flutter 侧）",
+      "en-US": "Default model for three-stage executable-task routing (decision / app-scope / task-match) on the Flutter side"
+    }
+  },
+  "scene.vlm.operation.primary": {
+    "model": "qwen3-vl-plus",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": null,
+    "description": "Android GUI 自动化模型；执行策略由 AndroidGuiPolicy 提供",
+    "description_i18n": {
+      "zh-CN": "Android GUI 自动化模型；执行策略由 AndroidGuiPolicy 提供",
+      "en-US": "Android GUI automation model; execution policy is provided by AndroidGuiPolicy"
+    }
+  },
+  "scene.voice": {
+    "model": "",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": "该场景用于 AI 文本回复的语音合成配置。仅用于模型绑定，不参与普通聊天文本生成。",
+    "prompt_i18n": {
+      "zh-CN": "该场景用于 AI 文本回复的语音合成配置。仅用于模型绑定，不参与普通聊天文本生成。",
+      "en-US": "This scene is used for AI reply text-to-speech configuration only. It is used for model binding and does not participate in normal chat text generation."
+    },
+    "description": "AI 回复语音合成模型",
+    "description_i18n": {
+      "zh-CN": "AI 回复语音合成模型",
+      "en-US": "AI reply speech synthesis model"
+    }
+  },
+  "scene.compactor.context.chat": {
+    "model": "qwen3.5-plus",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": "你是一个对话上下文压缩器。你的职责是把一段多轮聊天历史压缩为一份可持续累积的上下文总结，供后续对话继续使用。\n\n输出要求：\n1. 只输出纯文本，不要 JSON，不要 Markdown 代码块。\n2. 必须使用以下固定结构，并保留标题：\n【用户目标与约束】\n- ...\n\n【已确认事实与已完成结果】\n- ...\n\n【关键上下文与参数】\n- ...\n\n【未完成事项与下一步】\n- ...\n3. 保留长期目标、用户偏好、约束条件、关键文件路径、参数、工具结果、未完成任务、待确认点。\n4. 去掉冗余寒暄、重复措辞、无关中间推理，但不能丢失会影响后续执行的重要事实。\n5. 如果系统消息里已经给出旧的累计总结，要将其与新历史整合为一份新的累计总结，而不是简单拼接。\n6. 不要编造不存在的事实；不确定时明确写“待确认”。",
+    "prompt_i18n": {
+      "zh-CN": "你是一个对话上下文压缩器。你的职责是把一段多轮聊天历史压缩为一份可持续累积的上下文总结，供后续对话继续使用。\n\n输出要求：\n1. 只输出纯文本，不要 JSON，不要 Markdown 代码块。\n2. 必须使用以下固定结构，并保留标题：\n【用户目标与约束】\n- ...\n\n【已确认事实与已完成结果】\n- ...\n\n【关键上下文与参数】\n- ...\n\n【未完成事项与下一步】\n- ...\n3. 保留长期目标、用户偏好、约束条件、关键文件路径、参数、工具结果、未完成任务、待确认点。\n4. 去掉冗余寒暄、重复措辞、无关中间推理，但不能丢失会影响后续执行的重要事实。\n5. 如果系统消息里已经给出旧的累计总结，要将其与新历史整合为一份新的累计总结，而不是简单拼接。\n6. 不要编造不存在的事实；不确定时明确写“待确认”。",
+      "en-US": "You are a conversation context compactor. Your job is to compress a multi-turn chat history into an accumulated context summary that can continue to be used in future turns.\n\nOutput requirements:\n1. Output plain text only. Do not output JSON or Markdown code fences.\n2. Use the following fixed structure and keep the headings:\n[User Goals And Constraints]\n- ...\n\n[Confirmed Facts And Completed Results]\n- ...\n\n[Key Context And Parameters]\n- ...\n\n[Open Items And Next Steps]\n- ...\n3. Preserve long-term goals, user preferences, constraints, important file paths, parameters, tool results, unfinished tasks, and items still awaiting confirmation.\n4. Remove redundant greetings, repeated phrasing, and irrelevant intermediate reasoning, but do not lose facts that matter for later execution.\n5. If the system message already provides an accumulated summary, merge it with the new history into one updated accumulated summary instead of concatenating them.\n6. Do not invent facts. When uncertain, mark the item as pending confirmation."
+    },
+    "description": "聊天历史上下文压缩模型（Conversation Summary Compactor）",
+    "description_i18n": {
+      "zh-CN": "聊天历史上下文压缩模型（Conversation Summary Compactor）",
+      "en-US": "Conversation history context compactor model"
+    }
+  },
+  "scene.memory.embedding": {
+    "model": "text-embedding-3-small",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": "该场景用于 Workspace Memory 的向量嵌入配置。仅用于模型绑定，不参与普通聊天回复。",
+    "prompt_i18n": {
+      "zh-CN": "该场景用于 Workspace Memory 的向量嵌入配置。仅用于模型绑定，不参与普通聊天回复。",
+      "en-US": "This scene is used for Workspace Memory embedding configuration only. It is used for model binding and does not participate in normal chat responses."
+    },
+    "description": "Workspace 记忆向量检索（embedding）模型",
+    "description_i18n": {
+      "zh-CN": "Workspace 记忆向量检索（embedding）模型",
+      "en-US": "Workspace memory embedding model"
+    }
+  },
+  "scene.memory.rollup": {
+    "model": "qwen3.5-plus",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": "该场景用于 Workspace Memory 夜间整理策略模型配置。仅用于记忆整理，不参与普通聊天回复。",
+    "prompt_i18n": {
+      "zh-CN": "该场景用于 Workspace Memory 夜间整理策略模型配置。仅用于记忆整理，不参与普通聊天回复。",
+      "en-US": "This scene is used for Workspace Memory nightly rollup strategy configuration only. It is used for memory organization and does not participate in normal chat responses."
+    },
+    "description": "Workspace 夜间记忆整理模型",
+    "description_i18n": {
+      "zh-CN": "Workspace 夜间记忆整理模型",
+      "en-US": "Workspace nightly memory rollup model"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.DebugHumanRecordingReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.com.omnimind.bot.debug.HUMAN_RECORDING" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".debug.DebugOmniFlowToolReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.com.omnimind.bot.debug.CALL_OMNIFLOW_TOOL" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".debug.DebugVlmTaskReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.com.omnimind.bot.debug.RUN_VLM_TASK" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".debug.DebugModelProviderConfigReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.com.omnimind.bot.debug.CONFIGURE_MODEL_PROVIDER" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".debug.DebugSandboxProjectReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.com.omnimind.bot.debug.SANDBOX_PROJECT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,38 @@
+package cn.com.omnimind.baselib.llm
+
+object SceneModelCatalogResolver {
+    fun listCatalogItems(): List<SceneCatalogItem> {
+        val profiles = ModelProviderConfigStore.listProfiles().toMutableList()
+        PlatformAiProvisioner.officialProfileOrNull()?.let { profiles.add(it) }
+        val profilesById = profiles.associateBy { it.id }
+        val bindings = SceneModelBindingStore.getBindingMap()
+        return ModelSceneRegistry.listRuntimeProfiles()
+            .map { profile ->
+                val binding = bindings[profile.sceneId]
+                val boundProfile = binding?.providerProfileId?.let(profilesById::get)
+                val bindingApplied = binding != null && boundProfile?.isConfigured() == true
+                val bindingProfileMissing = binding != null && boundProfile == null
+                SceneCatalogItem(
+                    sceneId = profile.sceneId,
+                    description = profile.description,
+                    defaultModel = profile.model,
+                    effectiveModel = if (bindingApplied) binding.modelId else profile.model,
+                    effectiveProviderProfileId = if (bindingApplied) boundProfile?.id else null,
+                    effectiveProviderProfileName = if (bindingApplied) boundProfile?.name else null,
+                    boundProviderProfileId = binding?.providerProfileId,
+                    boundProviderProfileName = boundProfile?.name,
+                    transport = if (bindingApplied) {
+                        ModelSceneRegistry.SceneTransport.OPENAI_COMPATIBLE.wireValue
+                    } else {
+                        profile.transport.wireValue
+                    },
+                    configSource = profile.configSource.wireValue,
+                    overrideApplied = bindingApplied,
+                    overrideModel = binding?.modelId,
+                    providerConfigured = boundProfile?.isConfigured() == true,
+                    bindingExists = binding != null,
+                    bindingProfileMissing = bindingProfileMissing
+                )
+            }
+    }
+}

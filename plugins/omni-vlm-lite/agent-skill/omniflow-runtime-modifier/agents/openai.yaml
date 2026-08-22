@@ -1,0 +1,4 @@
+interface:
+  display_name: "OmniFlow Runtime Modifier"
+  short_description: "Safely edit and reload OmniFlow Python runtime"
+  default_prompt: "Use $omniflow-runtime-modifier to inspect and safely update an OmniFlow Python planner file."

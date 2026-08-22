@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.OmnibotApp" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+    </style>
+
+    <style name="Theme.OmnibotApp.Splash" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background_dark</item>
+        <item name="android:statusBarColor">#151617</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <style name="Theme.OmnibotApp.Splash.Dark" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background_dark</item>
+        <item name="android:statusBarColor">#151617</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- 一键登录Activity主题：禁用返回手势 -->
+    <style name="Theme.OmnibotApp.LoginAuth" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/white</item>
+        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!-- 覆盖SDK的authsdk_activity_dialog主题，使用AppCompat兼容主题 -->
+    <style name="authsdk_activity_dialog" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowCloseOnTouchOutside">false</item>
+        <!-- 移除 windowIsFloating，让 Activity 可以控制状态栏 -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>  <!-- 允许绘制状态栏 -->
+        <item name="android:statusBarColor">@android:color/white</item>   <!-- API 21+ -->
+        <item name="android:windowLightStatusBar">true</item>             <!-- API 23+ 浅色状态栏图标 -->
+        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+
+    <!-- 完全透明的Activity主题，用于剪贴板等需要前台焦点的操作 -->
+    <style name="Theme.OmnibotApp.Transparent" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowEnterAnimation">@null</item>
+        <item name="android:windowExitAnimation">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- 底部半屏弹窗主题 -->
+    <style name="Theme.OmnibotApp.BottomSheet">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@style/BottomSheetAnimation</item>
+    </style>
+
+    <!-- 底部半屏弹窗动画 -->
+    <style name="BottomSheetAnimation">
+        <item name="android:windowEnterAnimation">@anim/slide_in_bottom</item>
+        <item name="android:windowExitAnimation">@anim/slide_out_bottom</item>
+    </style>
+
+</resources>

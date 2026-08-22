@@ -1,0 +1,70 @@
+package cn.com.omnimind.bot.agent
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class AgentRuntimeContextQueryTest {
+    private val installedApps = linkedMapOf(
+        "美团" to "com.sankuai.meituan",
+        "饿了么" to "me.ele",
+        "淘宝" to "com.taobao.taobao",
+        "Google Maps" to "com.google.android.apps.maps",
+        "Google Play 商店" to "com.android.vending",
+        "设置" to "com.android.settings"
+    )
+
+    @Test
+    fun `matches multiple app names from one query in query order`() {
+        val result = AgentRuntimeContextQuery.filterApps(
+            apps = installedApps,
+            query = "美团 饿了么 淘宝",
+            limit = 20
+        )
+
+        assertEquals(listOf("美团", "饿了么", "淘宝"), result.map { it.appName })
+    }
+
+    @Test
+    fun `matches multiple app names separated by Chinese punctuation`() {
+        val result = AgentRuntimeContextQuery.filterApps(
+            apps = installedApps,
+            query = "淘宝、美团，饿了么",
+            limit = 20
+        )
+
+        assertEquals(listOf("淘宝", "美团", "饿了么"), result.map { it.appName })
+    }
+
+    @Test
+    fun `applies limit after combining and deduplicating matches`() {
+        val result = AgentRuntimeContextQuery.filterApps(
+            apps = installedApps,
+            query = "美团 com.sankuai.meituan 淘宝",
+            limit = 2
+        )
+
+        assertEquals(listOf("美团", "淘宝"), result.map { it.appName })
+    }
+
+    @Test
+    fun `preserves single query partial matching`() {
+        val result = AgentRuntimeContextQuery.filterApps(
+            apps = installedApps,
+            query = "sankuai",
+            limit = 20
+        )
+
+        assertEquals(listOf("美团"), result.map { it.appName })
+    }
+
+    @Test
+    fun `preserves an app name that contains spaces as one query`() {
+        val result = AgentRuntimeContextQuery.filterApps(
+            apps = installedApps,
+            query = "Google Maps",
+            limit = 20
+        )
+
+        assertEquals(listOf("Google Maps"), result.map { it.appName })
+    }
+}

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.OmnibotApp.Permission" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:background">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:screenOrientation">portrait</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <!-- 权限请求卡片内按钮：无背景、仅文字 -->
+    <style name="Widget.PermissionRequest.Button" parent="android:Widget.Material.Button">
+        <item name="android:background">@android:color/transparent</item>
+        <item name="android:textColor">@color/permission_btn_deny</item>
+        <item name="android:textSize">16sp</item>
+    </style>
+</resources>

@@ -1,0 +1,96 @@
+name: Sync models.dev catalog
+
+on:
+  schedule:
+    # Avoid the start-of-hour GitHub Actions scheduling peak.
+    - cron: '37 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Allow an intentional provider/model count drop after manual review'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-models-dev-catalog
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REGION: auto
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_R2_BUCKET_NAME: ${{ vars.CLOUDFLARE_R2_BUCKET_NAME }}
+      CLOUDFLARE_R2_ENDPOINT: ${{ vars.CLOUDFLARE_R2_ENDPOINT }}
+      MODELS_DEV_UPSTREAM_URL: https://models.dev/api.json
+      MODELS_DEV_R2_PREFIX: metadata/models-dev
+      MODELS_DEV_MIN_BYTES: '100000'
+      MODELS_DEV_MAX_BYTES: '10000000'
+      MODELS_DEV_MIN_PROVIDERS: '50'
+      MODELS_DEV_MIN_MODELS: '1000'
+      MODELS_DEV_REQUIRED_PROVIDERS: openai,anthropic,google,openrouter,deepseek,alibaba
+      MODELS_DEV_MAX_DROP_RATIO: '0.35'
+      MODELS_DEV_REFRESH_TIMEOUT_MS: '60000'
+      MODELS_DEV_SNAPSHOT_RETENTION: '5'
+      MODELS_DEV_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || 'false' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify R2 tooling and configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws --version
+
+          required_names=(
+            AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY
+            CLOUDFLARE_ACCOUNT_ID
+            CLOUDFLARE_R2_BUCKET_NAME
+          )
+          for name in "${required_names[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub Actions configuration: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Fetch, validate, and publish models.dev catalog
+        run: node scripts/sync_models_dev_catalog.mjs
+
+      - name: Verify public mirror
+        if: ${{ vars.MODELS_DEV_PUBLIC_URL != '' }}
+        env:
+          MODELS_DEV_PUBLIC_URL: ${{ vars.MODELS_DEV_PUBLIC_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl \
+            --fail-with-body \
+            --retry 3 \
+            --retry-all-errors \
+            --output "${RUNNER_TEMP}/models-dev-public.json" \
+            "${MODELS_DEV_PUBLIC_URL}"
+          node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!value || typeof value !== "object" || Array.isArray(value)) {
+              throw new Error("Public models.dev mirror did not return an object");
+            }
+          ' "${RUNNER_TEMP}/models-dev-public.json"

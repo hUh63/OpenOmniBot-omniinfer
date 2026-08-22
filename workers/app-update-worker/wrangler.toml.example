@@ -1,0 +1,42 @@
+name = "omnibot-app-update-worker"
+main = "worker.js"
+compatibility_date = "2026-05-12"
+compatibility_flags = ["global_fetch_strictly_public"]
+
+[[r2_buckets]]
+binding = "APP_UPDATE_BUCKET"
+bucket_name = "replace-with-your-r2-bucket-name"
+
+# Usage statistics (device model / app version / daily checks & downloads).
+# Writing data points only needs this binding; the dataset is created lazily.
+[[analytics_engine_datasets]]
+binding = "UPDATE_ANALYTICS"
+dataset = "omnibot_app_updates"
+
+[vars]
+GITHUB_REPO = "omnimind-ai/OpenOmniBot"
+DEFAULT_SOURCE = "worker"
+R2_RELEASES_PREFIX = "releases"
+R2_METADATA_PREFIX = "metadata/releases"
+# Worker only serves the catalog already published to this R2 prefix.
+# Fetching, validation, hashing, snapshot retention, and publishing run in
+# .github/workflows/sync-models-dev.yml.
+MODELS_DEV_R2_PREFIX = "metadata/models-dev"
+# Must match the dataset name above; used by the admin console queries.
+ANALYTICS_DATASET = "omnibot_app_updates"
+# Cloudflare account id, needed by the admin console to query Analytics Engine.
+CF_ACCOUNT_ID = ""
+
+# Secrets:
+#   wrangler secret put ADMIN_TOKEN
+#     Token for the admin console (/admin) and the release management API.
+#   wrangler secret put CF_ANALYTICS_API_TOKEN
+#     Cloudflare API token with "Account Analytics: Read" permission,
+#     used to run SQL queries against Analytics Engine for the dashboards.
+#   wrangler secret put CHATGPT_LUNA_VLM_API_BASE
+#   wrangler secret put CHATGPT_LUNA_VLM_API_KEY
+#   wrangler secret put CHATGPT_LUNA_VLM_MODEL
+#     ChatGPT Luna upstream used by the Worker's OpenAI Responses proxy.
+#     The upstream URL and API key are never delivered to the Android app.
+#   wrangler secret put CHATGPT_LUNA_VLM_ENABLED
+#     Optional; defaults to enabled when the three values above are configured.

@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '17'
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10.28.0'
+  FLUTTER_VERSION: '3.38.7'
+  NDK_VERSION: '28.2.13676358'
+  ALLOWED_THIRD_PARTY_WRAPPER_SHA: 'ee3739525a995bcb5601621a6e2daec1f183bbefc375743acc235cec33547e04'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Secret scan (gitleaks)
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Skip secret scan for fork pull requests
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: echo "Skipping gitleaks for fork PRs because repository secrets are not available to pull_request workflows from forks."
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: webchat/pnpm-lock.yaml
+
+      - name: Verify app-update Worker and models.dev sync
+        working-directory: workers/app-update-worker
+        run: npm test
+
+      - name: Validate Gradle wrappers
+        uses: gradle/actions/wrapper-validation@v4
+        with:
+          allow-checksums: ${{ env.ALLOWED_THIRD_PARTY_WRAPPER_SHA }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          validate-wrappers: false
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Android NDK
+        id: cache-android-ndk
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+            ${{ env.ANDROID_SDK_ROOT }}/licenses
+          key: ${{ runner.os }}-android-ndk-${{ env.NDK_VERSION }}
+
+      - name: Install Android NDK
+        if: steps.cache-android-ndk.outputs.cache-hit != 'true'
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "ndk;${{ env.NDK_VERSION }}"
+
+      - name: Export Android NDK environment
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: Install Flutter dependencies
+        working-directory: ui
+        run: flutter pub get --enforce-lockfile
+
+      - name: Flutter test
+        working-directory: ui
+        run: flutter test test/core/router/go_router_config_test.dart
+
+      - name: Flutter analyze
+        working-directory: ui
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+
+      - name: Gradle verify develop standard debug
+        run: >-
+          ./gradlew --no-daemon --parallel --build-cache
+          :app:testDevelopStandardDebugUnitTest
+          :app:assembleDevelopStandardDebug
+          :app:lintDevelopStandardDebug
+          -Ptarget=lib/main_standard.dart
