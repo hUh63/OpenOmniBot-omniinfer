@@ -1,0 +1,405 @@
+<mxGraphModel dx="1813" dy="1312" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1300" background="#F4F1FB" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="page_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4F1FB;strokeColor=none;" parent="1" vertex="1">
+      <mxGeometry width="1520" height="1240" as="geometry" />
+    </mxCell>
+    <mxCell id="title" value="OmniInfer" style="text;html=1;align=center;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=34;fontStyle=1;fontColor=#51367D;" parent="1" vertex="1">
+      <mxGeometry x="585" y="22" width="350" height="46" as="geometry" />
+    </mxCell>
+    <mxCell id="subtitle" value="&lt;div&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(123, 110, 153), rgb(145, 133, 170));&quot;&gt;Cross-Platform Local Inference Engine&lt;/span&gt;&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=13;fontColor=#7B6E99;" parent="1" vertex="1">
+      <mxGeometry x="640" y="65" width="241" height="28" as="geometry" />
+    </mxCell>
+    <mxCell id="chip_1" value="CLI + HTTP + Mobile Modules" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontStyle=1;fontColor=#5A3D84;align=center;verticalAlign=middle;spacingLeft=8;spacingRight=8;" parent="1" vertex="1">
+      <mxGeometry x="402" y="98" width="236" height="24" as="geometry" />
+    </mxCell>
+    <mxCell id="chip_2" value="Hybrid Runtime Orchestration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontStyle=1;fontColor=#5A3D84;align=center;verticalAlign=middle;spacingLeft=8;spacingRight=8;" parent="1" vertex="1">
+      <mxGeometry x="640" y="98" width="220" height="24" as="geometry" />
+    </mxCell>
+    <mxCell id="chip_3" value="Linux / Windows / macOS / Android / iOS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontStyle=1;fontColor=#5A3D84;align=center;verticalAlign=middle;spacingLeft=8;spacingRight=8;" parent="1" vertex="1">
+      <mxGeometry x="870" y="98" width="260" height="24" as="geometry" />
+    </mxCell>
+    <mxCell id="entry_container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D8D1E9;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="135" width="1380" height="165" as="geometry" />
+    </mxCell>
+    <mxCell id="entry_header" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5A3D84;gradientColor=#694992;gradientDirection=east;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="135" width="1380" height="42" as="geometry" />
+    </mxCell>
+    <mxCell id="entry_title" value="&lt;b&gt;Entry Points&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontColor=#FFFFFF;" parent="1" vertex="1">
+      <mxGeometry x="84" y="143" width="150" height="26" as="geometry" />
+    </mxCell>
+    <mxCell id="entry_subtitle" value="USER-FACING SURFACES THAT ENTER THE OMNIINFER RUNTIME" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#DCCFF1;" parent="1" vertex="1">
+      <mxGeometry x="250" y="145" width="480" height="22" as="geometry" />
+    </mxCell>
+    <mxCell id="cli_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="185" y="195" width="240" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="cli_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3B82F6;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="185" y="195" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="cli_title" value="&lt;b&gt;CLI&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="207" y="203" width="90" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="cli_tag" value="SHELL" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#3B82F6;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="349" y="201" width="56" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="cli_desc" value="omniinfer / omniinfer.cmd" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8B82A7;" parent="1" vertex="1">
+      <mxGeometry x="207" y="224" width="170" height="16" as="geometry" />
+    </mxCell>
+    <mxCell id="cli_body" value="backend select / model load&lt;br&gt;chat, serve, status, shutdown" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="207" y="241" width="190" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="gw_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="455" y="195" width="300" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="gw_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F97316;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="455" y="195" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="gw_title" value="&lt;b&gt;HTTP Gateway&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="477" y="203" width="150" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="gw_tag" value="OPENAI API" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#F97316;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="643" y="201" width="92" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="gw_desc" value="omniinfer.py serve -&gt; service_core/service.py" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8B82A7;" parent="1" vertex="1">
+      <mxGeometry x="477" y="224" width="245" height="16" as="geometry" />
+    </mxCell>
+    <mxCell id="gw_body" value="/v1/chat/completions with SSE&lt;br&gt;/v1/models, /v1/embeddings, /health" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="477" y="241" width="250" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="android_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="785" y="195" width="250" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="android_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#10B981;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="785" y="195" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="android_title" value="&lt;b&gt;Android Module&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="807" y="203" width="140" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="android_tag" value="JNI" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#10B981;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="975" y="201" width="40" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="android_desc" value="android/omniinfer-server (Kotlin / JNI)" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8B82A7;" parent="1" vertex="1">
+      <mxGeometry x="807" y="224" width="190" height="16" as="geometry" />
+    </mxCell>
+    <mxCell id="android_body" value="Embedded localhost server&lt;br&gt;fully implemented Kotlin module" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="807" y="241" width="205" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="ios_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="1065" y="195" width="250" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="ios_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#14B8A6;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="1065" y="195" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="ios_title" value="&lt;b&gt;iOS Module&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="1087" y="203" width="120" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="ios_tag" value="SPM" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#14B8A6;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="1245" y="201" width="50" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="ios_desc" value="ios/OmniInferServer (Swift Package)" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8B82A7;" parent="1" vertex="1">
+      <mxGeometry x="1087" y="224" width="205" height="16" as="geometry" />
+    </mxCell>
+    <mxCell id="ios_body" value="In-process Hummingbird service&lt;br&gt;Swift Package facade for iOS inference" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="1087" y="241" width="210" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="flow_1" style="endArrow=classicThin;html=1;strokeColor=#9483B5;strokeWidth=2;rounded=1;" parent="1" edge="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="750" y="300" as="sourcePoint" />
+        <mxPoint x="750" y="330" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="flow_1_label" value="request dispatch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontColor=#6F5C93;align=center;verticalAlign=middle;" parent="1" vertex="1">
+      <mxGeometry x="780" y="306" width="110" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D8D1E9;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="335" width="1380" height="175" as="geometry" />
+    </mxCell>
+    <mxCell id="core_header" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5A3D84;gradientColor=#694992;gradientDirection=east;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="335" width="1380" height="42" as="geometry" />
+    </mxCell>
+    <mxCell id="core_title" value="&lt;b&gt;Core Engine&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontColor=#FFFFFF;" parent="1" vertex="1">
+      <mxGeometry x="84" y="343" width="145" height="26" as="geometry" />
+    </mxCell>
+    <mxCell id="core_subtitle" value="SERVICE ORCHESTRATION, BACKEND MANAGEMENT, AND RUNTIME CONTROL IN service_core/" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#DCCFF1;" parent="1" vertex="1">
+      <mxGeometry x="245" y="345" width="560" height="22" as="geometry" />
+    </mxCell>
+    <mxCell id="core_platform_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="87" y="395" width="206" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_platform_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7C5DB7;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="87" y="395" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_platform_title" value="&lt;b&gt;Platform Detection&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="109" y="408" width="150" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_platform_tag" value="DETECT" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#7C5DB7;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="224" y="399" width="54" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_platform_body" value="OS / hardware detection&lt;br&gt;memory and backend scan" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="109" y="432" width="160" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="core_backend_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="311" y="395" width="206" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_backend_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7C5DB7;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="311" y="395" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_backend_title" value="&lt;b&gt;Backend Management&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="333" y="408" width="170" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_backend_tag" value="CONTROL" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#7C5DB7;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="444" y="399" width="58" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_backend_body" value="backend specs / profiles&lt;br&gt;family-aware args" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="333" y="432" width="160" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="core_runtime_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="535" y="395" width="206" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_runtime_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7C5DB7;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="535" y="395" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_runtime_title" value="&lt;b&gt;Runtime Manager&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="557" y="408" width="145" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_runtime_tag" value="RUNTIME" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#7C5DB7;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="664" y="399" width="62" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_runtime_body" value="model lifecycle&lt;br&gt;request coordination" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="557" y="432" width="160" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="core_drivers_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="759" y="395" width="206" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_drivers_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7C5DB7;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="759" y="395" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_drivers_title" value="&lt;b&gt;Embedded Drivers&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="781" y="408" width="150" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_drivers_tag" value="EMBEDDED" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#7C5DB7;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="884" y="399" width="66" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_drivers_body" value="Python / JNI drivers&lt;br&gt;embedded native bridges" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="781" y="432" width="160" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="core_config_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="983" y="395" width="206" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_config_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7C5DB7;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="983" y="395" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="core_config_title" value="&lt;b&gt;Configuration&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=13;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="1005" y="408" width="120" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_config_tag" value="CONFIG" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#7C5DB7;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="1118" y="399" width="56" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="core_config_body" value="profiles, threads, offload&lt;br&gt;shared runtime settings" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="1005" y="432" width="160" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="catalog_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="1207" y="395" width="206" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="catalog_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F59E0B;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="1207" y="395" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="catalog_title" value="&lt;b&gt;Model Catalog&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="1229" y="408" width="140" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="catalog_tag" value="JSON" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#F59E0B;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="1350" y="399" width="48" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="catalog_desc" value="61 GGUF / 12 vendors" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8B82A7;" parent="1" vertex="1">
+      <mxGeometry x="1229" y="430" width="150" height="16" as="geometry" />
+    </mxCell>
+    <mxCell id="catalog_body" value="sources, presets,&lt;br&gt;mmproj metadata" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="1229" y="446" width="160" height="28" as="geometry" />
+    </mxCell>
+    <mxCell id="flow_2" style="endArrow=classicThin;html=1;strokeColor=#9483B5;strokeWidth=2;rounded=1;" parent="1" edge="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="750" y="510" as="sourcePoint" />
+        <mxPoint x="750" y="540" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="flow_2_label" value="platform binding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontColor=#6F5C93;align=center;verticalAlign=middle;" parent="1" vertex="1">
+      <mxGeometry x="780" y="516" width="110" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="platform_container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D8D1E9;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="545" width="1380" height="165" as="geometry" />
+    </mxCell>
+    <mxCell id="platform_header" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5A3D84;gradientColor=#694992;gradientDirection=east;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="545" width="1380" height="42" as="geometry" />
+    </mxCell>
+    <mxCell id="platform_title" value="&lt;b&gt;Platform Abstraction&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontColor=#FFFFFF;" parent="1" vertex="1">
+      <mxGeometry x="84" y="553" width="210" height="26" as="geometry" />
+    </mxCell>
+    <mxCell id="platform_subtitle" value="OS-SPECIFIC BACKEND MAPPINGS" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#DCCFF1;" parent="1" vertex="1">
+      <mxGeometry x="314" y="555" width="520" height="22" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_linux_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="90" y="605" width="252" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_linux_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA7A0;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="90" y="605" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_linux_title" value="&lt;b&gt;Linux&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="112" y="618" width="80" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_linux_body" value="llama.cpp-cpu / llama.cpp-cuda&lt;br&gt;llama.cpp-vulkan / OmniInfer-Native" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="112" y="646" width="210" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_win_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="357" y="605" width="252" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_win_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA7A0;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="357" y="605" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_win_title" value="&lt;b&gt;Windows&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="379" y="618" width="90" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_win_body" value="llama.cpp-cpu / llama.cpp-cuda&lt;br&gt;llama.cpp-vulkan / OmniInfer-Native" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="379" y="646" width="210" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_mac_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="624" y="605" width="252" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_mac_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA7A0;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="624" y="605" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_mac_title" value="&lt;b&gt;macOS&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="646" y="618" width="80" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_mac_body" value="llama.cpp-metal / mlx-mac&lt;br&gt;turboquant-mac / OmniInfer-Native" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="646" y="646" width="210" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_ios_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="891" y="605" width="252" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_ios_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA7A0;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="891" y="605" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_ios_title" value="&lt;b&gt;iOS&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="913" y="618" width="70" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_ios_body" value="llama.cpp-ios / mlx-ios&lt;br&gt;OmniInfer-Native" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="913" y="646" width="210" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_android_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="1158" y="605" width="252" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_android_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA7A0;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="1158" y="605" width="8" height="84" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_android_title" value="&lt;b&gt;Android&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="1180" y="618" width="90" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plat_android_body" value="llama.cpp / MNN / OmniInfer-Native" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="1180" y="646" width="210" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="flow_3" style="endArrow=classicThin;html=1;strokeColor=#9483B5;strokeWidth=2;rounded=1;" parent="1" edge="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="750" y="710" as="sourcePoint" />
+        <mxPoint x="750" y="740" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="flow_3_label" value="engine selection" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontColor=#6F5C93;align=center;verticalAlign=middle;" parent="1" vertex="1">
+      <mxGeometry x="780" y="716" width="110" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="engine_container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D8D1E9;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="745" width="1380" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="engine_header" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5A3D84;gradientColor=#694992;gradientDirection=east;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="745" width="1380" height="42" as="geometry" />
+    </mxCell>
+    <mxCell id="engine_title" value="&lt;b&gt;Inference Engines&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontColor=#FFFFFF;" parent="1" vertex="1">
+      <mxGeometry x="84" y="753" width="190" height="26" as="geometry" />
+    </mxCell>
+    <mxCell id="engine_subtitle" value="EXECUTION BACKENDS FOR TOKEN GENERATION AND MODEL SERVING" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#DCCFF1;" parent="1" vertex="1">
+      <mxGeometry x="295" y="755" width="515" height="22" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llama_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="90" y="805" width="620" height="110" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llama_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#8B5CF6;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="90" y="805" width="8" height="110" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llama_title" value="&lt;b&gt;OmniInfer-Native&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="112" y="818" width="220" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llama_tag" value="SELF-DEV" style="label;fontStyle=1;fontSize=8;fontColor=#FFFFFF;fillColor=#8B5CF6;rounded=1;arcSize=40;strokeColor=none;spacingLeft=6;spacingRight=6;" parent="1" vertex="1">
+      <mxGeometry x="288" y="820" width="74" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llama_body" value="Unified self-developed framework based on llama.cpp.&lt;br&gt;Cross-platform with Eagle3 and TurboQuant optimization.&lt;br&gt;On Qualcomm Android, ViT stays in llama.cpp NPU path and LLM decoding runs in ExecuTorch." style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="112" y="846" width="560" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llamacpp_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="730" y="805" width="190" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llamacpp_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#8B5CF6;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="730" y="805" width="8" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llamacpp_title" value="&lt;b&gt;llama.cpp&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="752" y="818" width="100" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_llamacpp_body" value="Open-source baseline backend&lt;br&gt;CPU / CUDA / Vulkan / Metal" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="752" y="846" width="150" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mnn_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="940" y="805" width="200" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mnn_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#8B5CF6;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="940" y="805" width="8" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mnn_title" value="&lt;b&gt;MNN&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="962" y="818" width="60" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mnn_body" value="Android-focused backend&lt;br&gt;efficient local streaming" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="962" y="846" width="150" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mlx_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="1160" y="805" width="250" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mlx_strip" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#8B5CF6;strokeColor=none;arcSize=20;" parent="1" vertex="1">
+      <mxGeometry x="1160" y="805" width="8" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mlx_title" value="&lt;b&gt;MLX&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#503572;" parent="1" vertex="1">
+      <mxGeometry x="1182" y="818" width="60" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="eng_mlx_body" value="Apple Silicon backend&lt;br&gt;mlx_lm driver path" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#3E3853;" parent="1" vertex="1">
+      <mxGeometry x="1182" y="846" width="170" height="30" as="geometry" />
+    </mxCell>
+    <mxCell id="flow_4" style="endArrow=classicThin;html=1;strokeColor=#9483B5;strokeWidth=2;rounded=1;" parent="1" edge="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="750" y="925" as="sourcePoint" />
+        <mxPoint x="750" y="955" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="flow_4_label" value="model coverage" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8E0F5;strokeColor=none;arcSize=30;fontSize=10;fontColor=#6F5C93;align=center;verticalAlign=middle;" parent="1" vertex="1">
+      <mxGeometry x="780" y="931" width="110" height="18" as="geometry" />
+    </mxCell>
+    <mxCell id="models_container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D8D1E9;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="965" width="1380" height="110" as="geometry" />
+    </mxCell>
+    <mxCell id="models_header" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5A3D84;gradientColor=#694992;gradientDirection=east;strokeColor=none;arcSize=12;" parent="1" vertex="1">
+      <mxGeometry x="60" y="965" width="1380" height="42" as="geometry" />
+    </mxCell>
+    <mxCell id="models_title" value="&lt;b&gt;Supported Models&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontColor=#FFFFFF;" parent="1" vertex="1">
+      <mxGeometry x="84" y="973" width="205" height="26" as="geometry" />
+    </mxCell>
+    <mxCell id="models_subtitle" value="REPRESENTATIVE FAMILIES SUPPORTED BY THE CURRENT ENGINE MATRIX" style="text;html=1;align=left;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#DCCFF1;" parent="1" vertex="1">
+      <mxGeometry x="310" y="975" width="560" height="22" as="geometry" />
+    </mxCell>
+    <mxCell id="models_card" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D9D0EB;strokeWidth=1;shadow=1;arcSize=14;" parent="1" vertex="1">
+      <mxGeometry x="90" y="1023" width="1320" height="34" as="geometry" />
+    </mxCell>
+    <mxCell id="models_text" value="&lt;b&gt;Qwen 3.5&lt;/b&gt; / &lt;b&gt;Qwen 3&lt;/b&gt; / &lt;b&gt;Gemma 4&lt;/b&gt; / &lt;b&gt;Gemma 3&lt;/b&gt; / &lt;b&gt;Llama 4&lt;/b&gt; / &lt;b&gt;Llama 3.x&lt;/b&gt; / &lt;b&gt;DeepSeek-R1&lt;/b&gt; / &lt;b&gt;Phi-4&lt;/b&gt; / &lt;b&gt;Mistral&lt;/b&gt; / &lt;b&gt;GLM-4&lt;/b&gt; / &lt;b&gt;Yi&lt;/b&gt; / ..." style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#4A445F;" parent="1" vertex="1">
+      <mxGeometry x="108" y="1030" width="1284" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="footer" value="Updated 2026-04-13" style="text;html=1;align=center;verticalAlign=middle;resizable=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#9B8EB6;" parent="1" vertex="1">
+      <mxGeometry x="680" y="1092" width="140" height="18" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>

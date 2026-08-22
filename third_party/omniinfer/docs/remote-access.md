@@ -1,0 +1,276 @@
+# Remote Access
+
+OmniInfer can expose the desktop inference API through Cloudflare Quick Tunnel for temporary remote access without router port forwarding, a public IP address, or a Cloudflare account. Cloudflare access can also run alongside LAN access from the same gateway process.
+
+Quick Tunnel is best for demos, testing, and short-lived personal access. Cloudflare assigns a random `trycloudflare.com` URL and does not guarantee uptime for this mode. For best compatibility, use non-streaming requests; streaming over Quick Tunnel is best-effort only.
+
+## Cloudflare Quick Tunnel
+
+Start the gateway with Cloudflare mode. If you already know the model path, use one command to start the gateway, open the tunnel, and load the model:
+
+```sh
+./omniinfer serve \
+  --cloudflare \
+  --backend llama.cpp-linux-cuda \
+  --model /path/to/model.gguf \
+  --ctx-size 8192 \
+  --api-key auto \
+  --detach
+```
+
+For foreground debugging, omit `--detach`. When `--api-key auto` is used, OmniInfer generates a session key and prints it in the startup summary.
+
+`--smoke-test` is an ephemeral lifecycle check, not a persistent-service flag.
+It runs one local inference check (and the public check when Cloudflare is
+enabled), then stops the tunnel, gateway, and backend, releases their ports,
+and exits. This remains true when combined with `--detach`. Start without
+`--smoke-test` when the detached service should remain available.
+
+When no model is supplied and the command runs in an interactive terminal, OmniInfer first asks you to choose a backend and model, then starts the gateway and tunnel:
+
+```sh
+./omniinfer serve --cloudflare
+```
+
+Windows:
+
+```powershell
+.\omniinfer.ps1 serve --cloudflare
+```
+
+OmniInfer will:
+
+- load the supplied `--model`, or ask for the backend and model when running interactively without `--model`
+- keep the local gateway bound to `127.0.0.1`, unless `--lan` or an explicit `--host` is used
+- download and update a managed `cloudflared` binary under `.local/tools/cloudflared`
+- require an API key for requests arriving through Cloudflare
+- generate a session API key when `--api-key` or `OMNIINFER_API_KEY` is not set
+- keep `/omni/*` management endpoints local-only
+- start `cloudflared tunnel --url http://127.0.0.1:<port>`
+- stop `cloudflared` when OmniInfer exits
+
+The startup output includes:
+
+```text
+Cloudflare Quick Tunnel: https://example.trycloudflare.com
+OpenAI Base URL: https://example.trycloudflare.com/v1
+Health URL: https://example.trycloudflare.com/health
+API key: oi_example
+```
+
+Use the OpenAI Base URL and API key in remote clients.
+
+Manage a detached gateway with:
+
+```sh
+./omniinfer serve status --port 9000
+./omniinfer serve stop --port 9000
+```
+
+OmniInfer keeps the gateway, backend, and Quick Tunnel under one managed serve
+record. Reusing the same port cleans up the verified previous record before a
+new service is published. A stale record with mismatched process identity is
+left untouched and reported as an error rather than risking an unrelated
+process.
+
+## LAN and Cloudflare Together
+
+Use both flags when you want trusted devices on the same LAN and temporary public HTTPS clients to share the same gateway, model, and backend:
+
+```sh
+./omniinfer serve --lan --cloudflare
+```
+
+In combined mode, OmniInfer:
+
+- binds the gateway to `0.0.0.0` for LAN clients
+- starts `cloudflared tunnel --url http://127.0.0.1:<port>` for Cloudflare clients
+- uses one API key for both remote entry points
+- treats Cloudflare proxy-header requests as remote clients even though `cloudflared` connects over loopback
+- keeps `/omni/*` management endpoints local-only by default
+
+This means LAN clients use `http://<lan-ip>:<port>/v1`, while Cloudflare clients use the printed `https://*.trycloudflare.com/v1` URL.
+
+## Fixed Hostname Behind a Reverse Proxy
+
+For a stable public hostname, run OmniInfer behind a trusted reverse proxy or tunnel such as nginx + frp. Keep OmniInfer bound to loopback, publish only the reverse proxy, and enable remote management with a separate admin key:
+
+```sh
+./omniinfer serve \
+  --backend llama.cpp-linux-cuda \
+  --public-model-root /path/to/public_models \
+  --api-key oi_inference_key \
+  --allow-remote-management \
+  --behind-proxy \
+  --no-restore-model \
+  --detach
+```
+
+For multiple admins, put named admin keys in `.local/config/admin_keys.json` instead of passing them on the command line.
+
+`--behind-proxy` tells OmniInfer to treat trusted proxy headers such as `X-Forwarded-For`, `X-Real-IP`, and `CF-Connecting-IP` as remote-client evidence. Use it only when requests come through a proxy you control; otherwise local loopback traffic could be misclassified.
+
+The public model root is the only model tree remote management requests may select from. Each selectable model uses a manifest:
+
+```json
+{
+  "id": "qwen3.5-4b-q4_k_m",
+  "aliases": ["qwen35-4b-q4_k_m"],
+  "display_name": "Qwen3.5 4B Q4_K_M",
+  "backend": "llama.cpp-linux-cuda",
+  "model": "Qwen3.5-4B-Q4_K_M.gguf",
+  "ctx_size": 8192,
+  "modalities": ["text"],
+  "quant": "Q4_K_M",
+  "launch_args": ["-ngl", "999"]
+}
+```
+
+List and switch public models through the fixed hostname:
+
+```sh
+curl -sS -H 'Authorization: Bearer oi_admin_key' \
+  https://omniinfer.example.com/omni/public-models
+
+curl -sS -H 'Authorization: Bearer oi_admin_key' \
+  -H 'Content-Type: application/json' \
+  https://omniinfer.example.com/omni/model/select \
+  -d '{"model":"qwen3.5-4b-q4_k_m"}'
+```
+
+Inference requests continue to use the inference API key:
+
+```sh
+curl -sS -H 'Authorization: Bearer oi_inference_key' \
+  -H 'Content-Type: application/json' \
+  https://omniinfer.example.com/v1/chat/completions \
+  -d '{"model":"omniinfer","messages":[{"role":"user","content":"Hello"}],"stream":false}'
+```
+
+## Managed cloudflared
+
+OmniInfer resolves `cloudflared` in this order:
+
+1. the path supplied with `--cloudflared-path`
+2. a valid managed helper under `.local/tools/cloudflared/`
+3. an executable `cloudflared` already in `PATH`
+4. an automatically downloaded helper from the pinned Cloudflare release
+
+Helper resolution completes before the gateway starts. A missing helper,
+unsupported platform, download failure, or checksum failure therefore exits
+without leaving a local gateway process behind.
+
+For automatic installation, OmniInfer selects the asset for the current
+operating system and CPU architecture and writes it to:
+
+```text
+.local/tools/cloudflared/
+```
+
+The download uses a static GitHub release URL instead of the anonymous GitHub
+releases API. OmniInfer reports progress every MiB, enforces a 128 MiB limit,
+verifies the archive SHA-256 digest, safely extracts only the regular
+`cloudflared` file from macOS tgz assets, and installs the helper atomically.
+The manifest records both archive and installed-binary SHA-256 digests. Later
+starts reuse the helper only when its platform, pinned release, executable bit,
+manifest, and binary digest still match.
+
+Supported automatic assets include:
+
+| System | Architecture | Asset |
+|---|---|---|
+| Linux | x86_64 / amd64 | `cloudflared-linux-amd64` |
+| Linux | aarch64 / arm64 | `cloudflared-linux-arm64` |
+| Linux | x86 / 386 | `cloudflared-linux-386` |
+| Linux | ARMv7 hard-float | `cloudflared-linux-armhf` |
+| Linux | other 32-bit ARM | `cloudflared-linux-arm` |
+| macOS | Apple Silicon | `cloudflared-darwin-arm64.tgz` |
+| macOS | Intel | `cloudflared-darwin-amd64.tgz` |
+| Windows | x64 / amd64 | `cloudflared-windows-amd64.exe` |
+| Windows | x86 / 386 | `cloudflared-windows-386.exe` |
+
+Advanced users can override helper discovery:
+
+Example:
+
+```sh
+./omniinfer serve --cloudflare --cloudflared-path /usr/local/bin/cloudflared
+```
+
+If automatic installation fails, the CLI prints the pinned asset URL and
+expected SHA-256 digest. It also prints the platform fallback. For macOS:
+
+```sh
+brew install cloudflared
+./omniinfer serve \
+  --cloudflare \
+  --cloudflared-path "$(command -v cloudflared)"
+```
+
+For Windows PowerShell:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+.\omniinfer.exe serve `
+  --cloudflare `
+  --cloudflared-path (Get-Command cloudflared).Source
+```
+
+Linux packages and standalone binaries are documented in the official
+[cloudflared downloads guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+
+If a default `~/.cloudflared/config.yaml` exists, Quick Tunnel may fail because account-managed tunnel configuration can conflict with account-less Quick Tunnel usage. OmniInfer warns about this but does not modify user Cloudflare files.
+
+## Remote Requests
+
+Health:
+
+```sh
+curl https://example.trycloudflare.com/health \
+  -H "Authorization: Bearer oi_example"
+```
+
+OpenAI-compatible chat:
+
+```sh
+curl https://example.trycloudflare.com/v1/chat/completions \
+  -H "Authorization: Bearer oi_example" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local",
+    "messages": [{"role": "user", "content": "Introduce OmniInfer in one sentence."}],
+    "stream": false,
+    "max_tokens": 64
+  }'
+```
+
+Tokenize or detokenize:
+
+```sh
+curl https://example.trycloudflare.com/tokenize \
+  -H "Authorization: Bearer oi_example" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Hello","with_pieces":false}'
+```
+
+You can also send the key as:
+
+```text
+x-api-key: oi_example
+```
+
+## Security Model
+
+Treat the Quick Tunnel URL as public. Anyone who has the URL can reach the gateway, so OmniInfer requires the API key for inference endpoints exposed through Cloudflare.
+
+Cloudflare terminates HTTPS for the public URL and forwards traffic to the local gateway. Do not describe this mode as end-to-end encrypted against Cloudflare.
+
+The following combinations are intentionally rejected:
+
+- `--cloudflare --host 0.0.0.0` without `--lan`
+- `--cloudflare --allow-insecure-lan`
+- `--cloudflare --allow-remote-management`
+
+## Streaming Boundary
+
+Cloudflare Quick Tunnel is intended for testing and has product limitations. Use non-streaming chat for the most reliable remote behavior. Standard OpenAI SSE and OmniInfer line streaming may work in some environments, but they are not guaranteed in Quick Tunnel mode.

@@ -1,0 +1,44 @@
+[package]
+name = "omniinfer-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "omniinfer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+crossterm.workspace = true
+flate2.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+omniinfer-core = { path = "../omniinfer-core" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+ureq.workspace = true
+url.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2.0"
+flate2.workspace = true
+predicates = "3.1"
+sha2.workspace = true
+tar.workspace = true
+zip.workspace = true

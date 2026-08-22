@@ -1,0 +1,56 @@
+#pragma once
+
+#include <atomic>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace omniinfer {
+
+struct InferenceMetrics {
+  int prompt_tokens = 0;
+  int generated_tokens = 0;
+  int64_t prefill_us = 0;
+  int64_t decode_us = 0;
+  int reasoning_tokens = 0;  // completion tokens before </think>
+  int image_tokens = 0;      // image tokens in prompt (multimodal only)
+  int cached_tokens = 0;     // KV cache prefix reuse count
+};
+
+class InferenceBackend {
+public:
+  virtual ~InferenceBackend() = default;
+
+  virtual bool load(const std::string& model_path, const std::string& config_json,
+                    const std::string& native_lib_dir, int n_threads, int n_ctx) = 0;
+
+  // on_token returns false to stop generation.
+  // graceful_stop: true when stopped via /v1/cancel (preserve KV cache),
+  //                false when stopped via client disconnect (invalidate cache).
+  virtual std::string generate(
+      const std::string& system_prompt,
+      const std::string& user_prompt,
+      bool thinking_enabled,
+      std::atomic<bool>& cancelled,
+      std::function<bool(const std::string& token)> on_token,
+      const std::string& tools_json,
+      const std::string& tool_choice,
+      const std::string& messages_json,
+      const std::vector<std::vector<uint8_t>>& images,
+      int max_tokens,
+      std::atomic<bool>& graceful_stop,
+      const std::string& sampling_json = "") = 0;
+
+  virtual bool load_history(
+      const std::vector<std::pair<std::string, std::string>>& messages) = 0;
+
+  virtual void reset() = 0;
+
+  virtual InferenceMetrics get_metrics() = 0;
+  virtual int n_threads() const = 0;
+
+  virtual const char* name() const = 0;
+};
+
+}  // namespace omniinfer

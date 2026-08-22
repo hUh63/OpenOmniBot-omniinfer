@@ -1,0 +1,39 @@
+
+[submodule "framework/llama.cpp"]
+	path = framework/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "framework/mlx"]
+	path = framework/mlx
+	url = https://github.com/ml-explore/mlx.git
+[submodule "framework/mnn"]
+	path = framework/mnn
+	url = https://github.com/alibaba/mnn.git
+[submodule "framework/OmniInfer-LLM"]
+	path = framework/OmniInfer-LLM
+	url = https://github.com/omnimind-ai/OmniInfer-LLM.git
+[submodule "framework/OmniInfer-VLM"]
+	path = framework/OmniInfer-VLM
+	url = https://github.com/omnimind-ai/OmniInfer-VLM.git
+[submodule "framework/OmniOp-NPU"]
+	path = framework/OmniOp-NPU
+	url = https://github.com/omnimind-ai/OmniOp-NPU.git
+[submodule "framework/llama-cpp-turboquant"]
+	path = framework/llama-cpp-turboquant
+	url = https://github.com/TheTom/llama-cpp-turboquant.git
+	branch = feature/turboquant-kv-cache
+[submodule "framework/executorch"]
+	path = framework/executorch
+	url = https://github.com/pytorch/executorch.git
+[submodule "framework/omniinfer-native"]
+	path = framework/omniinfer-native
+	url = https://github.com/36330/llama.git
+	branch = eagle3-sync-upstream
+[submodule "framework/ik_llama.cpp"]
+	path = framework/ik_llama.cpp
+	url = https://github.com/ikawrakow/ik_llama.cpp.git
+[submodule "framework/vllm"]
+	path = framework/vllm
+	url = https://github.com/vllm-project/vllm.git
+[submodule "framework/vla.cpp"]
+	path = framework/vla.cpp
+	url = https://github.com/VinRobotics/vla.cpp.git

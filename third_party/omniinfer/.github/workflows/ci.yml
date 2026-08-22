@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pr-fast-check:
+    name: PR Fast Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check
+          rustfmt --edition 2021 --check crates/omniinfer-cli/tests/fixtures/fake_llama_server.rs
+
+      - name: Run core unit tests
+        run: cargo test -p omniinfer-core
+
+      - name: Run gateway unit tests
+        run: "cargo test -p omniinfer-cli --bin omniinfer gateway::tests::"
+
+      - name: Run backend archive security tests
+        run: "cargo test -p omniinfer-cli --bin omniinfer backend_installer::tests::"
+
+      - name: Run Linux VLA example contract tests
+        run: python3 -m unittest tests/test_vla_libero.py
+
+      - name: Validate README product entry
+        run: python3 -m unittest tests/test_readme.py
+
+      - name: Test Unix installer contracts
+        run: |
+          bash tests/test_release_installer.sh
+          bash tests/test_source_installer.sh
+          bash tests/test_install_deps.sh
+          cargo run --locked -q -p omniinfer-cli -- --version
+
+  windows-desktop-contract:
+    name: Windows Desktop Contract
+    runs-on: windows-latest
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test desktop serve lifecycle
+        run: |
+          cargo test -p omniinfer-cli --test cli_smoke serve_explicit_roots_reach_gateway_model_load_lifecycle
+          cargo test -p omniinfer-cli --test cli_smoke successful_smoke_test_stops_gateway_backend_and_releases_ports
+
+      - name: Test Windows installer contracts
+        shell: powershell
+        run: |
+          .\tests\test_release_installer.ps1
+          .\tests\test_source_installer.ps1
+          cargo run --locked -q -p omniinfer-cli -- --version

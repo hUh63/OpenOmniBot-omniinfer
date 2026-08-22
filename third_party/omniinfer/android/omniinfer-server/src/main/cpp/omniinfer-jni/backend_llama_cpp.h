@@ -1,0 +1,1175 @@
+#pragma once
+
+#include "inference_backend.h"
+#include "soc_defaults.h"
+#include "thinking_tags.h"
+#include "tool_call_parser.h"
+
+#include "llama.h"
+#include "common.h"
+#include "chat.h"
+#include "sampling.h"
+#include "peg-parser.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
+#include "ggml.h"
+#include "ggml-backend.h"
+#include "ggml-cpu.h"
+
+#include <android/log.h>
+#include <chrono>
+#include <unistd.h>
+#include <sstream>
+#include <dirent.h>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <vector>
+#include <cstring>
+
+namespace omniinfer {
+
+class LlamaCppBackend : public InferenceBackend {
+public:
+  ~LlamaCppBackend() override { release(); }
+
+  bool load(const std::string& model_path, const std::string& config_json,
+            const std::string& native_lib_dir, int n_threads, int n_ctx) override {
+    std::string llama_device = extract_string(config_json, "llama_device");
+    if (llama_device.empty()) llama_device = extract_string(config_json, "device");
+    std::string accelerator = extract_string(config_json, "accelerator");
+    if (accelerator.empty()) accelerator = extract_string(config_json, "compute_unit");
+    std::string backend_type = extract_string(config_json, "backend_type");
+    const bool wants_htp = accelerator == "htp" || accelerator == "npu" ||
+                           backend_type == "npu";
+    if (llama_device.empty() && wants_htp) llama_device = "HTP0";
+    const bool wants_accelerator =
+        !llama_device.empty() && llama_device != "cpu" && llama_device != "none";
+    configure_hexagon_opfilter(config_json, wants_htp);
+
+    std::call_once(s_backend_init, [&]() {
+      // Route ggml logs to Android logcat so backend selection is visible.
+      ggml_log_set([](enum ggml_log_level level, const char* text, void*) {
+        int prio = (level == GGML_LOG_LEVEL_ERROR) ? ANDROID_LOG_ERROR :
+                   (level == GGML_LOG_LEVEL_WARN)  ? ANDROID_LOG_WARN  : ANDROID_LOG_INFO;
+        __android_log_print(prio, "GGML", "%s", text);
+      }, nullptr);
+
+      if (!native_lib_dir.empty()) {
+        setenv("ADSP_LIBRARY_PATH", native_lib_dir.c_str(), 1);
+        setenv("DSP_LIBRARY_PATH", native_lib_dir.c_str(), 1);
+        if (wants_accelerator) {
+          load_snapdragon_accelerators(native_lib_dir);
+        }
+        ggml_backend_load_all_from_path(native_lib_dir.c_str());
+      } else {
+        ggml_backend_load_all();
+      }
+      llama_backend_init();
+
+      log_ggml_backends("after load_all");
+    });
+
+    llama_model_params mp = llama_model_default_params();
+    std::vector<ggml_backend_dev_t> selected_devices;
+    if (wants_accelerator) {
+      auto* dev = ggml_backend_dev_by_name(llama_device.c_str());
+      if ((!dev || ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) &&
+          !native_lib_dir.empty()) {
+        load_snapdragon_accelerators(native_lib_dir);
+        log_ggml_backends("after explicit accelerator load");
+        dev = ggml_backend_dev_by_name(llama_device.c_str());
+      }
+      if (!dev || ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+        __android_log_print(ANDROID_LOG_ERROR, "OmniInferJni",
+            "llama.cpp device not available: %s", llama_device.c_str());
+        return false;
+      }
+      selected_devices.push_back(dev);
+      selected_devices.push_back(nullptr);
+      mp.devices = selected_devices.data();
+      mp.n_gpu_layers = extract_int(config_json, "n_gpu_layers", 99);
+      mp.use_mmap = extract_bool(config_json, "mmap", false);
+      __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+          "llama.cpp selected device=%s n_gpu_layers=%d mmap=%s",
+          llama_device.c_str(), mp.n_gpu_layers, mp.use_mmap ? "true" : "false");
+    }
+    model_ = llama_model_load_from_file(model_path.c_str(), mp);
+    if (!model_) return false;
+
+    int eff_threads = n_threads > 0 ? n_threads : get_soc_default_threads();
+
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx = n_ctx;
+    const int default_batch = wants_htp ? 1024 : 512;
+    int n_batch = extract_int_any(config_json, default_batch, "n_batch", "batch_size");
+    int n_ubatch = extract_int_any(config_json, n_batch, "n_ubatch", "ubatch_size");
+    n_batch = n_batch > 0 ? n_batch : default_batch;
+    n_ubatch = n_ubatch > 0 ? n_ubatch : n_batch;
+    cp.n_batch = static_cast<uint32_t>(n_batch);
+    cp.n_ubatch = static_cast<uint32_t>(n_ubatch);
+    cp.n_threads = eff_threads;
+    cp.n_threads_batch = eff_threads;
+    cp.type_k = GGML_TYPE_F16;                          // KV cache quantization: 50% memory reduction
+    cp.type_v = GGML_TYPE_F16;
+    cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;  // Flash attention: faster prefill, less memory
+    cp.no_perf = false;
+    cp.swa_full = false;  // Match llama.cpp common_params / CLI defaults.
+    ctx_ = llama_init_from_model(model_, cp);
+    if (!ctx_) { llama_model_free(model_); model_ = nullptr; return false; }
+
+    attach_threadpool(config_json, wants_htp, eff_threads);
+
+    sampler_ = common_sampler_init(model_, default_sampling_);
+
+    chat_templates_ = common_chat_templates_init(model_, "");
+    batch_ = llama_batch_init(n_batch, 0, 1);
+    n_ctx_ = n_ctx;
+    n_batch_ = n_batch;
+    n_threads_ = eff_threads;
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "llama.cpp context configured: ctx=%d batch=%d ubatch=%d threads=%d backend_type=%s accelerator=%s device=%s",
+        n_ctx, n_batch, n_ubatch, eff_threads, backend_type.c_str(),
+        accelerator.c_str(), llama_device.c_str());
+
+    // Auto-discover mmproj in same directory for multimodal models.
+    std::string mmproj_path = find_mmproj(model_path);
+    if (!mmproj_path.empty()) {
+      mtmd_context_params mparams = mtmd_context_params_default();
+      mparams.use_gpu = false;
+      mparams.n_threads = eff_threads;
+      media_marker_ = mparams.media_marker ? mparams.media_marker : "<__media__>";
+      mtmd_ctx_ = mtmd_init_from_file(mmproj_path.c_str(), model_, mparams);
+      if (mtmd_ctx_) {
+        __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+            "Loaded mmproj: %s", mmproj_path.c_str());
+      }
+    }
+
+    return true;
+  }
+
+  std::string generate(
+      const std::string& system_prompt,
+      const std::string& user_prompt,
+      bool thinking_enabled,
+      std::atomic<bool>& cancelled,
+      std::function<bool(const std::string& token)> on_token,
+      const std::string& tools_json,
+      const std::string& tool_choice,
+      const std::string& messages_json,
+      const std::vector<std::vector<uint8_t>>& images,
+      int max_tokens,
+      std::atomic<bool>& graceful_stop,
+      const std::string& sampling_json = "") override {
+
+    // Build full messages vector.
+    std::vector<common_chat_msg> messages;
+    if (!messages_json.empty()) {
+      messages = parse_messages(messages_json);
+    } else {
+      if (!system_prompt.empty()) {
+        common_chat_msg sys_msg;
+        sys_msg.role = "system";
+        sys_msg.content = system_prompt;
+        messages.push_back(std::move(sys_msg));
+      }
+      {
+        common_chat_msg user_msg;
+        user_msg.role = "user";
+        user_msg.content = user_prompt;
+        messages.push_back(std::move(user_msg));
+      }
+    }
+
+    bool is_multimodal = !images.empty() && mtmd_ctx_;
+
+    if (is_multimodal) {
+      // Replace <image> placeholders with media markers for mtmd.
+      // Kotlin inserts <image> at the exact position of each image_url in the content.
+      for (auto& msg : messages) {
+        size_t pos = 0;
+        while ((pos = msg.content.find("<image>", pos)) != std::string::npos) {
+          msg.content.replace(pos, 7, media_marker_ + "\n");
+          pos += media_marker_.size() + 1;
+        }
+      }
+    }
+
+    // Apply chat template with all messages at once.
+    common_chat_templates_inputs inputs;
+    inputs.messages = messages;
+    inputs.add_generation_prompt = true;
+    inputs.use_jinja = true;
+    inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+    inputs.enable_thinking = thinking_enabled;
+
+    // Parse and set tools if provided.
+    bool has_tools = false;
+    if (!tools_json.empty()) {
+      inputs.tools = parse_tools(tools_json);
+      has_tools = !inputs.tools.empty();
+      if (!tool_choice.empty()) {
+        if (tool_choice == "none") inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_NONE;
+        else if (tool_choice == "required") inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+        else inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
+      }
+    }
+
+    common_chat_params params = common_chat_templates_apply(chat_templates_.get(), inputs);
+    apply_sampling_params(sampling_json, params);
+    common_sampler_reset(sampler_);
+
+    // Build parser params for tool call detection.
+    common_chat_parser_params parser_params(params);
+    parser_params.parse_tool_calls = has_tools;
+    if (!params.parser.empty()) {
+      parser_params.parser.load(params.parser);
+    }
+
+    // Prefill with KV cache prefix reuse.
+    auto t_prefill_start = std::chrono::steady_clock::now();
+    int n_prompt_tokens = 0;
+    int n_cached_tokens = 0;
+    int n_image_tokens = 0;
+
+    if (is_multimodal) {
+      // Quick check: text tokens alone (excluding image) must fit in context.
+      auto text_check = common_tokenize(ctx_, params.prompt, true, true);
+      if ((int)text_check.size() > n_ctx_ - 4) {
+        std::ostringstream err;
+        err << R"({"error":"prompt_too_long","prompt_tokens":)" << (int)text_check.size()
+            << R"(,"max_context":)" << n_ctx_ << "}";
+        return err.str();
+      }
+
+      // Compare conversation history (without generation prompt) for KV cache reuse.
+      std::string conv_history = strip_generation_prompt(params.prompt);
+      bool reuse_mm = has_cache_ && !prev_eval_prompt_.empty() &&
+                      conv_history.size() > prev_eval_prompt_.size() &&
+                      conv_history.compare(0, prev_eval_prompt_.size(), prev_eval_prompt_) == 0;
+      std::string suffix;
+      if (reuse_mm) {
+        suffix = params.prompt.substr(prev_eval_prompt_.size());
+        if (suffix.find(media_marker_) != std::string::npos) reuse_mm = false;
+      }
+
+      if (reuse_mm) {
+        // Try KV cache reuse: trim old gen prompt + generated tokens, decode suffix.
+        n_cached_tokens = prev_eval_n_tokens_;
+        bool trimmed = llama_memory_seq_rm(llama_get_memory(ctx_), 0, prev_eval_n_tokens_, -1);
+        if (trimmed) {
+          auto suffix_toks = common_tokenize(ctx_, suffix, false, false);
+          if (decode_batched(suffix_toks, prev_eval_n_tokens_, true) != 0) {
+            reuse_mm = false;
+            n_cached_tokens = 0;
+          } else {
+            cur_pos_ = prev_eval_n_tokens_ + (int)suffix_toks.size();
+            n_prompt_tokens = cur_pos_;
+            auto conv_text_toks = common_tokenize(ctx_, prev_eval_prompt_, true, true);
+            n_image_tokens = prev_eval_n_tokens_ - (int)conv_text_toks.size();
+            if (n_image_tokens < 0) n_image_tokens = 0;
+            __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+                "Multimodal KV cache reuse: %d cached, %d new text tokens",
+                prev_eval_n_tokens_, (int)suffix_toks.size());
+          }
+        } else {
+          // seq_rm failed (SWA/hybrid models): fall through to full multimodal eval.
+          reuse_mm = false;
+          n_cached_tokens = 0;
+          __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+              "Multimodal KV cache: seq_rm failed (SWA model), full re-eval");
+        }
+      }
+
+      if (!reuse_mm) {
+        // Full multimodal eval (first request or new image).
+        cur_pos_ = 0;
+        llama_memory_clear(llama_get_memory(ctx_), false);
+
+        // Create bitmaps for all images.
+        std::vector<mtmd_bitmap*> bmps;
+        for (const auto& img : images) {
+          auto* bmp = mtmd_helper_bitmap_init_from_buf(mtmd_ctx_, img.data(), img.size(), false);
+          if (bmp) bmps.push_back(bmp);
+        }
+        if (bmps.empty()) return "";
+
+        mtmd_input_text text{params.prompt.c_str(), true, true};
+        mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+        std::vector<const mtmd_bitmap*> bmp_ptrs(bmps.begin(), bmps.end());
+        if (mtmd_tokenize(mtmd_ctx_, chunks, &text, bmp_ptrs.data(), bmp_ptrs.size()) != 0) {
+          for (auto* b : bmps) mtmd_bitmap_free(b);
+          mtmd_input_chunks_free(chunks);
+          return "";
+        }
+
+        llama_pos n_past = 0;
+        if (mtmd_helper_eval_chunks(mtmd_ctx_, ctx_, chunks, 0, 0, 512, true, &n_past) != 0) {
+          for (auto* b : bmps) mtmd_bitmap_free(b);
+          mtmd_input_chunks_free(chunks);
+          return "";
+        }
+
+        cur_pos_ = n_past;
+        n_prompt_tokens = (int)mtmd_helper_get_n_tokens(chunks);
+        auto text_toks = common_tokenize(ctx_, params.prompt, true, true);
+        n_image_tokens = n_prompt_tokens - (int)text_toks.size();
+        if (n_image_tokens < 0) n_image_tokens = 0;
+        for (auto* b : bmps) mtmd_bitmap_free(b);
+        mtmd_input_chunks_free(chunks);
+      }
+
+      // Save conversation history (stripped of generation prompt) and token count.
+      prev_eval_prompt_ = conv_history;
+      auto gen_prompt_toks = common_tokenize(ctx_, params.prompt.substr(conv_history.size()), false, false);
+      prev_eval_n_tokens_ = n_prompt_tokens - (int)gen_prompt_toks.size();
+      prev_prompt_tokens_.clear();
+      has_cache_ = true;
+    } else {
+      // Text-only path with KV cache prefix reuse.
+      auto prompt_toks = common_tokenize(ctx_, params.prompt, true, true);
+      n_prompt_tokens = (int)prompt_toks.size();
+
+      if (n_prompt_tokens > n_ctx_ - 4) {
+        std::ostringstream err;
+        err << R"({"error":"prompt_too_long","prompt_tokens":)" << n_prompt_tokens
+            << R"(,"max_context":)" << n_ctx_ << "}";
+        return err.str();
+      }
+
+      // Find common prefix length with previous prompt tokens.
+      int common_prefix = 0;
+      if (has_cache_ && !prev_prompt_tokens_.empty()) {
+        int max_common = std::min((int)prev_prompt_tokens_.size(), (int)prompt_toks.size());
+        while (common_prefix < max_common &&
+               prev_prompt_tokens_[common_prefix] == prompt_toks[common_prefix]) {
+          common_prefix++;
+        }
+      }
+
+      if (common_prefix > 0 && common_prefix == (int)prompt_toks.size()) {
+        // Exact match: trim generated tokens + last prompt token, re-decode 1 token for logits.
+        n_cached_tokens = common_prefix - 1;
+        if (!llama_memory_seq_rm(llama_get_memory(ctx_), 0, common_prefix - 1, -1)) {
+          // SWA model: can't trim tail. Full re-decode.
+          n_cached_tokens = 0;
+          goto full_prefill;
+        }
+        cur_pos_ = common_prefix - 1;
+        common_batch_clear(batch_);
+        common_batch_add(batch_, prompt_toks.back(), common_prefix - 1, {0}, true);
+        if (llama_decode(ctx_, batch_) != 0) {
+          goto full_prefill;
+        }
+        cur_pos_ = common_prefix;
+        __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+            "KV cache reuse: %d/%d tokens cached (exact, 1 re-decoded)",
+            common_prefix - 1, (int)prompt_toks.size());
+      } else if (common_prefix > 0) {
+        // Partial prefix match: remove old entries after common prefix, decode suffix.
+        n_cached_tokens = common_prefix;
+        bool trimmed = llama_memory_seq_rm(llama_get_memory(ctx_), 0, common_prefix, -1);
+        if (!trimmed) {
+          // SWA/hybrid model: can't trim tail. Full clear + re-decode.
+          n_cached_tokens = 0;
+          llama_memory_clear(llama_get_memory(ctx_), false);
+          cur_pos_ = 0;
+          if (decode_batched(prompt_toks, 0, true) != 0) goto full_prefill;
+          cur_pos_ = (int)prompt_toks.size();
+          __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+              "KV cache: seq_rm failed (SWA model), full re-decode %d tokens",
+              (int)prompt_toks.size());
+        } else {
+          // seq_rm succeeded: decode only suffix.
+          cur_pos_ = common_prefix;
+          std::vector<llama_token> suffix(prompt_toks.begin() + common_prefix, prompt_toks.end());
+          if (decode_batched(suffix, common_prefix, true) != 0) {
+            n_cached_tokens = 0;
+            goto full_prefill;
+          }
+          cur_pos_ = (int)prompt_toks.size();
+          __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+              "KV cache reuse: %d/%d tokens cached, %d new",
+              common_prefix, (int)prompt_toks.size(),
+              (int)prompt_toks.size() - common_prefix);
+        }
+      } else {
+full_prefill:
+        // No cache match (or fallback from failed seq_rm/decode): full clear + full prefill.
+        cur_pos_ = 0;
+        llama_memory_clear(llama_get_memory(ctx_), false);
+        if (decode_batched(prompt_toks, 0, true) != 0) return "";
+        cur_pos_ = (int)prompt_toks.size();
+      }
+
+      // Save tokens for next request's prefix matching.
+      prev_prompt_tokens_ = std::move(prompt_toks);
+      has_cache_ = true;
+    }
+
+    auto t_prefill_end = std::chrono::steady_clock::now();
+    int64_t prefill_us = std::chrono::duration_cast<std::chrono::microseconds>(t_prefill_end - t_prefill_start).count();
+
+    // Generate tokens.
+    common_sampler_reset(sampler_);
+    if (!is_multimodal) {
+      // Match llama.cpp CLI/server: prompt tokens participate in sampler history
+      // for repetition penalties, DRY, and other history-aware samplers, but do
+      // not trigger generation-only grammar handling.
+      for (llama_token tok : prev_prompt_tokens_) {
+        common_sampler_accept(sampler_, tok, false);
+      }
+    }
+    const llama_vocab* vocab = llama_model_get_vocab(model_);
+    std::string full_response;
+    int n_reasoning_tokens = 0;
+    int eff_max_tokens = max_tokens > 0 ? max_tokens : std::min(4096, n_ctx_ - n_prompt_tokens - 4);
+    bool counting_reasoning = thinking_enabled && params.supports_thinking;
+    std::string utf8_buf;
+
+    // Set up thinking tag normalization.
+    // All non-standard thinking tags (e.g. Gemma 4's <|channel>thought) are
+    // normalized to <think>/<​/think> so Kotlin only handles one format.
+    std::optional<thinking_tags::Normalizer> think_norm;
+
+    if (thinking_enabled && params.supports_thinking) {
+      auto* non_std = thinking_tags::find_non_standard(params.thinking_start_tag);
+      if (non_std) {
+        think_norm.emplace(*non_std);
+        if (on_token) on_token("<think>\n");
+      } else if (!params.thinking_start_tag.empty()) {
+        if (on_token) on_token(params.thinking_start_tag);
+      }
+    }
+
+    // Emit helper: passes through normalizer when active, otherwise direct.
+    auto emit = [&](const std::string& text) -> bool {
+      std::string out = think_norm ? think_norm->process(text) : text;
+      if (!out.empty()) {
+        full_response += out;
+        if (on_token && !on_token(out)) return false;
+      }
+      return true;
+    };
+
+    auto t_decode_start = std::chrono::steady_clock::now();
+
+    std::vector<llama_token> generated_toks;
+    int n_generated = 0;
+    while (!cancelled.load()) {
+      if (n_generated >= eff_max_tokens) break;
+      if (cur_pos_ >= n_ctx_ - 4) shift_context();
+
+      llama_token tok = common_sampler_sample(sampler_, ctx_, -1);
+      common_sampler_accept(sampler_, tok, true);
+
+      if (llama_vocab_is_eog(vocab, tok)) {
+        if (!utf8_buf.empty()) {
+          if (!emit(utf8_buf)) { cancelled.store(true); }
+          utf8_buf.clear();
+        }
+        break;
+      }
+
+      n_generated++;
+      generated_toks.push_back(tok);
+      if (counting_reasoning) n_reasoning_tokens++;
+
+      common_batch_clear(batch_);
+      common_batch_add(batch_, tok, cur_pos_, {0}, true);
+      if (llama_decode(ctx_, batch_) != 0) break;
+      cur_pos_++;
+
+      auto piece = common_token_to_piece(ctx_, tok);
+      utf8_buf += piece;
+
+      if (is_valid_utf8(utf8_buf.c_str())) {
+        if (!emit(utf8_buf)) { cancelled.store(true); break; }
+        utf8_buf.clear();
+        // Stop counting reasoning tokens once </think> appears in output.
+        if (counting_reasoning && full_response.find("</think>") != std::string::npos) {
+          counting_reasoning = false;
+        }
+      }
+    }
+
+    // Hard cancel (client disconnect): invalidate cache for clean state.
+    if (cancelled.load() && !graceful_stop.load()) {
+      cur_pos_ = 0;
+      llama_memory_clear(llama_get_memory(ctx_), false);
+      has_cache_ = false;
+      prev_prompt_tokens_.clear();
+      prev_eval_prompt_.clear();
+      prev_eval_n_tokens_ = 0;
+    }
+
+    // Append generated tokens to tracking for next request's prefix matching.
+    // This matches llama-server's slot behavior: input + generated tokens are
+    // stored together, so the next turn can prefix-match across the boundary
+    // (e.g. assistant response re-encoded through template still shares most
+    // tokens with the raw generation). Skipped when hard cancel cleared above.
+    if (!generated_toks.empty() && has_cache_) {
+      prev_prompt_tokens_.insert(prev_prompt_tokens_.end(),
+          generated_toks.begin(), generated_toks.end());
+    }
+
+    // Flush thinking normalizer buffer.
+    if (think_norm) {
+      auto remaining = think_norm->flush();
+      if (!remaining.empty()) {
+        full_response += remaining;
+        if (on_token) on_token(remaining);
+      }
+    }
+
+    // Strip template-specific stop sequences from output.
+    for (const auto& stop : params.additional_stops) {
+      auto pos = full_response.find(stop);
+      if (pos != std::string::npos) {
+        full_response = full_response.substr(0, pos);
+      }
+    }
+
+    // If tools were provided, parse output for tool calls.
+    // Wrapped in try-catch: llama.cpp's PEG parser throws std::runtime_error
+    // on certain multi-tool-call outputs that don't match its grammar.
+    if (has_tools && parser_params.format != COMMON_CHAT_FORMAT_CONTENT_ONLY) {
+      try {
+        common_chat_msg parsed = common_chat_parse(full_response, false, parser_params);
+        if (!parsed.tool_calls.empty()) {
+          full_response = format_tool_calls_json(parsed);
+        }
+      } catch (const std::exception& e) {
+        __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+            "PEG tool call parse failed, trying fallback parser: %s", e.what());
+        std::string fallback = tool_parser::parse_tool_calls(full_response);
+        if (!fallback.empty()) {
+          full_response = fallback;
+        } else {
+          __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+              "Both PEG and fallback parser failed. Raw output (first 200): %.200s",
+              full_response.c_str());
+        }
+      }
+    }
+
+    auto t_decode_end = std::chrono::steady_clock::now();
+    int64_t decode_us = std::chrono::duration_cast<std::chrono::microseconds>(t_decode_end - t_decode_start).count();
+    int n_prompt = n_prompt_tokens;
+    last_metrics_ = {n_prompt, n_generated, prefill_us, decode_us,
+                     n_reasoning_tokens, n_image_tokens, n_cached_tokens};
+    return full_response;
+  }
+
+  bool load_history(
+      const std::vector<std::pair<std::string, std::string>>& messages) override {
+    cur_pos_ = 0;
+    llama_memory_clear(llama_get_memory(ctx_), false);
+
+    std::vector<common_chat_msg> msgs;
+    for (const auto& m : messages) {
+      common_chat_msg msg;
+      msg.role = m.first;
+      msg.content = m.second;
+      msgs.push_back(std::move(msg));
+    }
+
+    common_chat_templates_inputs inputs;
+    inputs.messages = msgs;
+    inputs.add_generation_prompt = false;
+    inputs.use_jinja = true;
+
+    common_chat_params params = common_chat_templates_apply(chat_templates_.get(), inputs);
+    auto toks = common_tokenize(ctx_, params.prompt, true, true);
+    if (decode_batched(toks, 0) != 0) return false;
+    cur_pos_ = (int)toks.size();
+    return true;
+  }
+
+  void reset() override {
+    cur_pos_ = 0;
+    llama_memory_clear(llama_get_memory(ctx_), false);
+    common_sampler_reset(sampler_);
+    prev_prompt_tokens_.clear();
+    prev_eval_prompt_.clear();
+    prev_eval_n_tokens_ = 0;
+    has_cache_ = false;
+  }
+
+  InferenceMetrics get_metrics() override { return last_metrics_; }
+  int n_threads() const override { return n_threads_; }
+  const char* name() const override { return "llama.cpp"; }
+
+private:
+  void release() {
+    if (mtmd_ctx_) { mtmd_free(mtmd_ctx_); mtmd_ctx_ = nullptr; }
+    if (sampler_) { common_sampler_free(sampler_); sampler_ = nullptr; }
+    chat_templates_.reset();
+    llama_batch_free(batch_); batch_ = {};
+    if (ctx_) {
+      llama_detach_threadpool(ctx_);
+      llama_free(ctx_);
+      ctx_ = nullptr;
+    }
+    if (threadpool_free_fn_ && threadpool_) {
+      threadpool_free_fn_(threadpool_);
+      threadpool_ = nullptr;
+    }
+    if (threadpool_free_fn_ && threadpool_batch_) {
+      threadpool_free_fn_(threadpool_batch_);
+      threadpool_batch_ = nullptr;
+    }
+    threadpool_free_fn_ = nullptr;
+    if (model_) { llama_model_free(model_); model_ = nullptr; }
+  }
+
+  // Extract a numeric JSON value by key. Returns empty if not found.
+  static std::string json_num(const std::string& json, const char* key) {
+    std::string needle = std::string("\"") + key + "\"";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return "";
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos) return "";
+    pos++;
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    size_t end = pos;
+    while (end < json.size() && (std::isdigit(json[end]) || json[end] == '.' || json[end] == '-' || json[end] == 'e' || json[end] == 'E' || json[end] == '+'))
+      end++;
+    return (end > pos) ? json.substr(pos, end - pos) : "";
+  }
+
+  // Apply per-request sampling parameters.
+  void apply_sampling_params(const std::string& json, const common_chat_params& chat_params) {
+    common_params_sampling sp = default_sampling_;
+    sp.generation_prompt = chat_params.generation_prompt;
+    if (!chat_params.grammar.empty()) {
+      sp.grammar = {COMMON_GRAMMAR_TYPE_TOOL_CALLS, chat_params.grammar};
+    }
+    sp.grammar_lazy = chat_params.grammar_lazy;
+    sp.grammar_triggers = chat_params.grammar_triggers;
+    for (const auto& token_text : chat_params.preserved_tokens) {
+      auto ids = common_tokenize(llama_model_get_vocab(model_), token_text, false, true);
+      if (ids.size() == 1) {
+        sp.preserved_tokens.insert(ids[0]);
+      }
+    }
+    if (!chat_params.thinking_start_tag.empty()) {
+      sp.reasoning_budget_start =
+          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_start_tag, false, true);
+    }
+    if (!chat_params.thinking_end_tag.empty()) {
+      sp.reasoning_budget_end =
+          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tag, false, true);
+      sp.reasoning_budget_forced =
+          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tag, false, true);
+    }
+    auto f = [&](const char* key) -> std::optional<float> {
+      auto v = json_num(json, key);
+      return v.empty() ? std::nullopt : std::optional<float>(std::stof(v));
+    };
+    if (auto v = f("temperature"))       sp.temp = *v;
+    if (auto v = f("top_p"))             sp.top_p = *v;
+    if (auto v = f("min_p"))             sp.min_p = *v;
+    if (auto v = f("typical_p"))         sp.typ_p = *v;
+    if (auto v = f("repetition_penalty"))sp.penalty_repeat = *v;
+    if (auto v = f("repeat_penalty"))    sp.penalty_repeat = *v;
+    if (auto v = f("frequency_penalty")) sp.penalty_freq = *v;
+    if (auto v = f("presence_penalty"))  sp.penalty_present = *v;
+    auto tk = json_num(json, "top_k");
+    if (!tk.empty()) sp.top_k = std::stoi(tk);
+    auto seed = json_num(json, "seed");
+    if (!seed.empty()) sp.seed = static_cast<uint32_t>(std::stoll(seed));
+    auto repeat_last_n = json_num(json, "repeat_last_n");
+    if (!repeat_last_n.empty()) sp.penalty_last_n = std::stoi(repeat_last_n);
+    common_sampler_free(sampler_);
+    sampler_ = common_sampler_init(model_, sp);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "llama.cpp sampling overrides: seed=%u temp=%.3f top_k=%d top_p=%.3f min_p=%.3f typical_p=%.3f repeat_penalty=%.3f freq_penalty=%.3f presence_penalty=%.3f repeat_last_n=%d generation_prompt_bytes=%zu grammar=%s preserved=%zu triggers=%zu",
+        sp.seed, sp.temp, sp.top_k, sp.top_p, sp.min_p, sp.typ_p, sp.penalty_repeat,
+        sp.penalty_freq, sp.penalty_present, sp.penalty_last_n, sp.generation_prompt.size(),
+        sp.grammar.empty() ? "false" : "true", sp.preserved_tokens.size(), sp.grammar_triggers.size());
+  }
+
+  // Scan model directory for mmproj*.gguf file.
+  static std::string find_mmproj(const std::string& model_path) {
+    auto slash = model_path.find_last_of("/\\");
+    if (slash == std::string::npos) return "";
+    std::string dir = model_path.substr(0, slash);
+    DIR* dp = opendir(dir.c_str());
+    if (!dp) return "";
+    std::string result;
+    while (auto* entry = readdir(dp)) {
+      std::string name = entry->d_name;
+      if (name.find("mmproj") != std::string::npos &&
+          name.size() > 5 && name.substr(name.size() - 5) == ".gguf") {
+        result = dir + "/" + name;
+        break;
+      }
+    }
+    closedir(dp);
+    return result;
+  }
+
+  static int extract_int(const std::string& json, const std::string& key, int fallback) {
+    std::string pattern = "\"" + key + "\":";
+    size_t pos = json.find(pattern);
+    if (pos == std::string::npos) return fallback;
+    pos += pattern.size();
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '"')) pos++;
+    char* end = nullptr;
+    long v = strtol(json.c_str() + pos, &end, 10);
+    return end == json.c_str() + pos ? fallback : (int)v;
+  }
+
+  template <typename... Keys>
+  static int extract_int_any(const std::string& json, int fallback, Keys... keys) {
+    int value = fallback;
+    bool found = false;
+    (([&]() {
+      if (!found) {
+        int v = extract_int(json, keys, fallback);
+        if (v != fallback || json.find("\"" + std::string(keys) + "\":") != std::string::npos) {
+          value = v;
+          found = true;
+        }
+      }
+    }()), ...);
+    return value;
+  }
+
+  static bool extract_bool(const std::string& json, const std::string& key, bool fallback) {
+    std::string value = extract_string(json, key);
+    if (value == "true" || value == "1") return true;
+    if (value == "false" || value == "0") return false;
+    std::string pattern = "\"" + key + "\":";
+    size_t pos = json.find(pattern);
+    if (pos == std::string::npos) return fallback;
+    pos += pattern.size();
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    if (json.compare(pos, 4, "true") == 0) return true;
+    if (json.compare(pos, 5, "false") == 0) return false;
+    return fallback;
+  }
+
+  static std::string extract_string(const std::string& json, const std::string& key) {
+    std::string pattern = "\"" + key + "\":\"";
+    size_t pos = json.find(pattern);
+    if (pos == std::string::npos) return "";
+    pos += pattern.size();
+    std::string out;
+    bool esc = false;
+    for (; pos < json.size(); ++pos) {
+      char ch = json[pos];
+      if (esc) {
+        out.push_back(ch == 'n' ? '\n' : ch == 't' ? '\t' : ch);
+        esc = false;
+        continue;
+      }
+      if (ch == '\\') {
+        esc = true;
+        continue;
+      }
+      if (ch == '"') break;
+      out.push_back(ch);
+    }
+    return out;
+  }
+
+  static void log_ggml_backends(const char* phase) {
+    size_t n = ggml_backend_reg_count();
+    for (size_t i = 0; i < n; i++) {
+      auto reg = ggml_backend_reg_get(i);
+      __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+          "GGML backend [%zu] %s: %s", i, phase, ggml_backend_reg_name(reg));
+    }
+    size_t nd = ggml_backend_dev_count();
+    for (size_t i = 0; i < nd; i++) {
+      auto* dev = ggml_backend_dev_get(i);
+      __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+          "GGML device [%zu] %s: %s (%s)", i, phase,
+          ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
+    }
+  }
+
+  static bool has_backend(const char* name) {
+    size_t n = ggml_backend_reg_count();
+    for (size_t i = 0; i < n; i++) {
+      auto reg = ggml_backend_reg_get(i);
+      if (std::strcmp(ggml_backend_reg_name(reg), name) == 0) return true;
+    }
+    return false;
+  }
+
+  static bool has_device(const char* name) {
+    return ggml_backend_dev_by_name(name) != nullptr;
+  }
+
+  static void configure_hexagon_opfilter(const std::string& config_json, bool wants_htp) {
+    if (!wants_htp) return;
+    std::string opfilter = extract_string(config_json, "hexagon_opfilter");
+    if (opfilter.empty()) opfilter = extract_string(config_json, "ggml_hexagon_opfilter");
+    if (opfilter.empty()) opfilter = extract_string(config_json, "GGML_HEXAGON_OPFILTER");
+    if (opfilter.empty()) return;
+
+    const char* current = getenv("GGML_HEXAGON_OPFILTER");
+    if (current && std::strcmp(current, opfilter.c_str()) != 0) {
+      __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+          "overriding GGML_HEXAGON_OPFILTER from %s to %s before HTP backend init",
+          current, opfilter.c_str());
+    }
+    setenv("GGML_HEXAGON_OPFILTER", opfilter.c_str(), 1);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "GGML_HEXAGON_OPFILTER=%s configured before HTP backend load",
+        opfilter.c_str());
+  }
+
+  static void load_snapdragon_accelerators(const std::string& native_lib_dir) {
+    if (native_lib_dir.empty()) return;
+    const std::string opencl = native_lib_dir + "/libggml-opencl.so";
+    const std::string hexagon = native_lib_dir + "/libggml-hexagon.so";
+
+    if (!has_backend("OpenCL")) {
+      ggml_backend_load(opencl.c_str());
+      if (!has_backend("OpenCL")) {
+        load_legacy_backend(opencl, "ggml_backend_opencl_reg");
+      }
+    }
+
+    if (!has_backend("HTP") && !has_device("HTP0")) {
+      ggml_backend_load(hexagon.c_str());
+      if (!has_backend("HTP") && !has_device("HTP0")) {
+        load_legacy_backend(hexagon, "ggml_backend_hexagon_reg");
+      }
+    }
+  }
+
+  static void load_legacy_backend(const std::string& path, const char* reg_symbol) {
+    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+      __android_log_print(ANDROID_LOG_ERROR, "OmniInferJni",
+          "legacy backend dlopen failed: %s: %s", path.c_str(), dlerror());
+      return;
+    }
+    using reg_fn_t = ggml_backend_reg_t (*)();
+    auto* sym = dlsym(handle, reg_symbol);
+    if (!sym) {
+      __android_log_print(ANDROID_LOG_ERROR, "OmniInferJni",
+          "legacy backend symbol missing: %s in %s", reg_symbol, path.c_str());
+      dlclose(handle);
+      return;
+    }
+    auto reg_fn = reinterpret_cast<reg_fn_t>(sym);
+    ggml_backend_reg_t reg = reg_fn();
+    if (!reg) {
+      __android_log_print(ANDROID_LOG_ERROR, "OmniInferJni",
+          "legacy backend returned null: %s", reg_symbol);
+      dlclose(handle);
+      return;
+    }
+    ggml_backend_register(reg);
+    legacy_backend_handles().push_back(handle);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "legacy backend registered: %s from %s", ggml_backend_reg_name(reg), path.c_str());
+  }
+
+  static std::vector<void*>& legacy_backend_handles() {
+    static std::vector<void*> handles;
+    return handles;
+  }
+
+  void attach_threadpool(const std::string& config_json,
+                         bool is_npu,
+                         int eff_threads) {
+    const bool wants_threadpool =
+        is_npu ||
+        config_json.find("\"poll\"") != std::string::npos ||
+        config_json.find("\"cpu_mask\"") != std::string::npos ||
+        config_json.find("\"cpu_strict\"") != std::string::npos;
+    if (!wants_threadpool) return;
+
+    struct ggml_threadpool_params tpp;
+    ggml_threadpool_params_init(&tpp, eff_threads);
+    tpp.poll = static_cast<uint32_t>(extract_int(config_json, "poll", 50));
+    std::string mask = extract_string(config_json, "cpu_mask");
+    if (mask.empty() && is_npu) mask = "0xfc";
+    if (!mask.empty()) {
+      parse_cpu_mask(mask, tpp.cpumask);
+    }
+    tpp.strict_cpu = extract_bool(config_json, "cpu_strict", is_npu);
+
+    struct ggml_threadpool_params tpp_batch = tpp;
+    if (config_json.find("\"poll_batch\"") != std::string::npos) {
+      tpp_batch.poll = static_cast<uint32_t>(extract_int(config_json, "poll_batch", tpp.poll));
+    }
+
+    auto* cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (!cpu_dev) {
+      __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+          "llama.cpp CPU backend unavailable; using implicit threadpool");
+      return;
+    }
+    auto* reg = ggml_backend_dev_backend_reg(cpu_dev);
+    auto* threadpool_new_fn =
+        (decltype(ggml_threadpool_new)*) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_new");
+    threadpool_free_fn_ =
+        (decltype(ggml_threadpool_free)*) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_free");
+    if (!threadpool_new_fn || !threadpool_free_fn_) {
+      __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+          "llama.cpp threadpool functions unavailable; using implicit threadpool");
+      return;
+    }
+
+    threadpool_ = threadpool_new_fn(&tpp);
+    if (!threadpool_) {
+      __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+          "llama.cpp threadpool create failed; using implicit threadpool");
+      return;
+    }
+    if (!ggml_threadpool_params_match(&tpp, &tpp_batch)) {
+      threadpool_batch_ = threadpool_new_fn(&tpp_batch);
+      if (!threadpool_batch_) {
+        __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+            "llama.cpp batch threadpool create failed; sharing main threadpool");
+      }
+    }
+    llama_attach_threadpool(ctx_, threadpool_, threadpool_batch_);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "llama.cpp threadpool attached: threads=%d poll=%u poll_batch=%u strict=%s mask=%s",
+        eff_threads, tpp.poll, tpp_batch.poll, tpp.strict_cpu ? "true" : "false",
+        mask.empty() ? "<default>" : mask.c_str());
+  }
+
+  static void parse_cpu_mask(const std::string& mask, bool out[GGML_MAX_N_THREADS]) {
+    std::memset(out, 0, GGML_MAX_N_THREADS * sizeof(bool));
+    if (mask.empty()) return;
+    if (mask.rfind("0x", 0) == 0 || mask.rfind("0X", 0) == 0) {
+      unsigned long long bits = std::strtoull(mask.c_str(), nullptr, 16);
+      for (int i = 0; i < 64 && i < GGML_MAX_N_THREADS; i++) {
+        out[i] = ((bits >> i) & 1ULL) != 0;
+      }
+      return;
+    }
+    size_t pos = 0;
+    while (pos < mask.size()) {
+      while (pos < mask.size() && (mask[pos] == ',' || mask[pos] == ' ')) pos++;
+      char* end = nullptr;
+      long idx = std::strtol(mask.c_str() + pos, &end, 10);
+      if (end == mask.c_str() + pos) break;
+      if (idx >= 0 && idx < GGML_MAX_N_THREADS) out[idx] = true;
+      pos = static_cast<size_t>(end - mask.c_str());
+    }
+  }
+
+  // Parse messages JSON array into common_chat_msg vector.
+  // Input: [{"role":"system","content":"..."},{"role":"user","content":"..."},...]
+  static std::vector<common_chat_msg> parse_messages(const std::string& json) {
+    std::vector<common_chat_msg> msgs;
+    size_t pos = 0;
+    while (pos < json.size()) {
+      // Find next object.
+      size_t obj_start = json.find('{', pos);
+      if (obj_start == std::string::npos) break;
+      std::string obj = extract_json_object(json, obj_start);
+      if (obj == "{}") { pos = obj_start + 1; continue; }
+
+      common_chat_msg msg;
+      size_t role_key = obj.find("\"role\"");
+      if (role_key != std::string::npos) msg.role = extract_json_string_value(obj, role_key);
+      size_t content_key = obj.find("\"content\"");
+      if (content_key != std::string::npos) msg.content = extract_json_string_value(obj, content_key);
+
+      if (!msg.role.empty()) msgs.push_back(std::move(msg));
+      pos = obj_start + obj.size();
+    }
+    return msgs;
+  }
+
+  // Parse OpenAI tools JSON array into common_chat_tool vector.
+  // Input: [{"type":"function","function":{"name":"...","description":"...","parameters":{...}}}]
+  static std::vector<common_chat_tool> parse_tools(const std::string& json) {
+    std::vector<common_chat_tool> tools;
+    // Minimal JSON array parsing — extract function objects.
+    // Find each {"type":"function","function":{...}} block.
+    size_t pos = 0;
+    while ((pos = json.find("\"function\"", pos)) != std::string::npos) {
+      // Find the nested object after "function":
+      size_t colon = json.find(':', pos + 10);
+      if (colon == std::string::npos) break;
+      size_t obj_start = json.find('{', colon);
+      if (obj_start == std::string::npos) break;
+
+      // Extract name
+      std::string name, description, parameters;
+      size_t name_key = json.find("\"name\"", obj_start);
+      if (name_key != std::string::npos) {
+        name = extract_json_string_value(json, name_key);
+      }
+      size_t desc_key = json.find("\"description\"", obj_start);
+      if (desc_key != std::string::npos) {
+        description = extract_json_string_value(json, desc_key);
+      }
+      // Extract parameters as raw JSON object
+      size_t params_key = json.find("\"parameters\"", obj_start);
+      if (params_key != std::string::npos) {
+        size_t params_colon = json.find(':', params_key + 12);
+        if (params_colon != std::string::npos) {
+          size_t params_obj = json.find('{', params_colon);
+          if (params_obj != std::string::npos) {
+            parameters = extract_json_object(json, params_obj);
+          }
+        }
+      }
+
+      if (!name.empty()) {
+        common_chat_tool tool;
+        tool.name = name;
+        tool.description = description;
+        tool.parameters = parameters;
+        tools.push_back(std::move(tool));
+      }
+      pos = colon + 1;
+    }
+    return tools;
+  }
+
+  // Extract a JSON string value after a key position.
+  static std::string extract_json_string_value(const std::string& json, size_t key_pos) {
+    size_t colon = json.find(':', key_pos);
+    if (colon == std::string::npos) return "";
+    size_t quote1 = json.find('"', colon + 1);
+    if (quote1 == std::string::npos) return "";
+    size_t quote2 = quote1 + 1;
+    while (quote2 < json.size()) {
+      if (json[quote2] == '"' && json[quote2 - 1] != '\\') break;
+      quote2++;
+    }
+    return json.substr(quote1 + 1, quote2 - quote1 - 1);
+  }
+
+  // Extract a balanced JSON object starting at pos.
+  static std::string extract_json_object(const std::string& json, size_t pos) {
+    if (pos >= json.size() || json[pos] != '{') return "{}";
+    int depth = 0;
+    bool in_string = false;
+    size_t start = pos;
+    for (size_t i = pos; i < json.size(); i++) {
+      char c = json[i];
+      if (in_string) {
+        if (c == '"' && json[i - 1] != '\\') in_string = false;
+        continue;
+      }
+      if (c == '"') { in_string = true; continue; }
+      if (c == '{') depth++;
+      else if (c == '}') { depth--; if (depth == 0) return json.substr(start, i - start + 1); }
+    }
+    return "{}";
+  }
+
+  // Strip trailing generation prompt from formatted chat template output.
+  static std::string strip_generation_prompt(const std::string& formatted) {
+    size_t cut = std::string::npos;
+    for (const char* marker : {"<|im_start|>assistant", "<start_of_turn>model", "<|turn>model"}) {
+      auto pos = formatted.rfind(marker);
+      if (pos != std::string::npos && (cut == std::string::npos || pos > cut)) cut = pos;
+    }
+    return (cut != std::string::npos) ? formatted.substr(0, cut) : formatted;
+  }
+
+  // Format parsed tool calls as JSON for the HTTP layer.
+  // Returns: {"tool_calls":[{"id":"call_xxx","type":"function","function":{"name":"...","arguments":"..."}}],"content":"..."}
+  static std::string format_tool_calls_json(const common_chat_msg& msg) {
+    std::ostringstream ss;
+    ss << "{\"tool_calls\":[";
+    for (size_t i = 0; i < msg.tool_calls.size(); i++) {
+      if (i > 0) ss << ",";
+      const auto& tc = msg.tool_calls[i];
+      std::string id = tc.id.empty() ? ("call_" + std::to_string(i)) : tc.id;
+      ss << "{\"id\":\"" << id << "\","
+         << "\"type\":\"function\","
+         << "\"function\":{\"name\":\"" << tc.name << "\","
+         << "\"arguments\":" << tc.arguments << "}}";
+    }
+    ss << "]";
+    if (!msg.content.empty()) {
+      ss << ",\"content\":\"";
+      // Escape content for JSON
+      for (char c : msg.content) {
+        if (c == '"') ss << "\\\"";
+        else if (c == '\\') ss << "\\\\";
+        else if (c == '\n') ss << "\\n";
+        else if (c == '\r') ss << "\\r";
+        else if (c == '\t') ss << "\\t";
+        else ss << c;
+      }
+      ss << "\"";
+    }
+    ss << "}";
+    return ss.str();
+  }
+
+  void shift_context() {
+    int n_discard = cur_pos_ / 2;
+    if (n_discard <= 0) return;
+    llama_memory_seq_rm(llama_get_memory(ctx_), 0, 0, n_discard);
+    llama_memory_seq_add(llama_get_memory(ctx_), 0, n_discard, cur_pos_, -n_discard);
+    cur_pos_ -= n_discard;
+    // Invalidate cache — positions shifted, prefix matching no longer valid.
+    prev_prompt_tokens_.clear();
+    prev_eval_prompt_.clear();
+    prev_eval_n_tokens_ = 0;
+    has_cache_ = false;
+  }
+
+  int decode_batched(const std::vector<llama_token>& toks, llama_pos start, bool last_logit = false) {
+    for (int i = 0; i < (int)toks.size(); i += n_batch_) {
+      int n = std::min((int)toks.size() - i, n_batch_);
+      common_batch_clear(batch_);
+      if (start + i + n >= n_ctx_ - 4) shift_context();
+      for (int j = 0; j < n; j++) {
+        bool want = last_logit && (i + j == (int)toks.size() - 1);
+        common_batch_add(batch_, toks[i + j], start + i + j, {0}, want);
+      }
+      if (llama_decode(ctx_, batch_) != 0) return 1;
+    }
+    return 0;
+  }
+
+  static bool is_valid_utf8(const char* s) {
+    if (!s) return true;
+    const auto* b = reinterpret_cast<const unsigned char*>(s);
+    while (*b) {
+      int n = (*b & 0x80) == 0 ? 1 : (*b & 0xE0) == 0xC0 ? 2 : (*b & 0xF0) == 0xE0 ? 3 : (*b & 0xF8) == 0xF0 ? 4 : 0;
+      if (!n) return false;
+      b++;
+      for (int i = 1; i < n; i++) { if ((*b & 0xC0) != 0x80) return false; b++; }
+    }
+    return true;
+  }
+
+  static std::once_flag s_backend_init;
+  llama_model* model_ = nullptr;
+  llama_context* ctx_ = nullptr;
+  common_params_sampling default_sampling_;
+  common_sampler* sampler_ = nullptr;
+  common_chat_templates_ptr chat_templates_;
+  llama_batch batch_ = {};
+  llama_pos cur_pos_ = 0;
+  int n_ctx_ = 4096;
+  int n_batch_ = 512;
+  int n_threads_ = 4;
+  ggml_threadpool_t threadpool_ = nullptr;
+  ggml_threadpool_t threadpool_batch_ = nullptr;
+  void (*threadpool_free_fn_)(ggml_threadpool_t) = nullptr;
+  mtmd_context* mtmd_ctx_ = nullptr;
+  std::string media_marker_;
+  InferenceMetrics last_metrics_;
+  // KV cache prefix reuse state.
+  std::vector<llama_token> prev_prompt_tokens_;  // text-only token comparison
+  std::string prev_eval_prompt_;                 // multimodal string prefix comparison
+  int prev_eval_n_tokens_ = 0;                   // total tokens from last multimodal eval
+  bool has_cache_ = false;
+};
+
+std::once_flag LlamaCppBackend::s_backend_init;
+
+}  // namespace omniinfer

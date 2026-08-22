@@ -1,0 +1,44 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+out/
+target/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# AI assistant context
+AGENTS.md
+QWEN.md
+
+# Local environment files
+.env
+.env.*
+
+# OmniInfer local runtime, config, logs, and toolchains
+/\.local/
+/platform
+
+/tmp
+CLAUDE.md
+CODEX.md
+QWEN.md
+tmp_gateway_*.log
+release.zip
+
+/release
+# Android build artifacts
+android/omniinfer-server/.cxx/
+android/omniinfer-server/build/
+android/omniinfer-server/src/main/jniLibs/
+*.aar
+local.properties
