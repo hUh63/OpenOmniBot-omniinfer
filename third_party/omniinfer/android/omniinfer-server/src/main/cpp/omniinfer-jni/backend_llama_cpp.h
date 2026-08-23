@@ -88,10 +88,9 @@ public:
       selected_devices.push_back(nullptr);
       mp.devices = selected_devices.data();
       mp.n_gpu_layers = extract_int(config_json, "n_gpu_layers", 99);
-      mp.use_mmap = extract_bool(config_json, "mmap", false);
       __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
-          "llama.cpp selected device=%s n_gpu_layers=%d mmap=%s",
-          llama_device.c_str(), mp.n_gpu_layers, mp.use_mmap ? "true" : "false");
+          "llama.cpp selected device=%s n_gpu_layers=%d",
+          llama_device.c_str(), mp.n_gpu_layers);
     }
     model_ = llama_model_load_from_file(model_path.c_str(), mp);
     if (!model_) return false;
@@ -289,8 +288,8 @@ public:
         // Create bitmaps for all images.
         std::vector<mtmd_bitmap*> bmps;
         for (const auto& img : images) {
-          auto* bmp = mtmd_helper_bitmap_init_from_buf(mtmd_ctx_, img.data(), img.size(), false);
-          if (bmp) bmps.push_back(bmp);
+          auto bmp = mtmd_helper_bitmap_init_from_buf(mtmd_ctx_, img.data(), img.size(), false);
+          if (bmp.bitmap) bmps.push_back(bmp.bitmap);
         }
         if (bmps.empty()) return "";
 
@@ -657,11 +656,11 @@ private:
       sp.reasoning_budget_start =
           common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_start_tag, false, true);
     }
-    if (!chat_params.thinking_end_tag.empty()) {
+    if (!chat_params.thinking_end_tags.empty()) {
       sp.reasoning_budget_end =
-          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tag, false, true);
+          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tags[0], false, true);
       sp.reasoning_budget_forced =
-          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tag, false, true);
+          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tags[0], false, true);
     }
     auto f = [&](const char* key) -> std::optional<float> {
       auto v = json_num(json, key);
