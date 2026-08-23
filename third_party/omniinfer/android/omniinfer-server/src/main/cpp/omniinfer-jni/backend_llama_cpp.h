@@ -657,8 +657,8 @@ private:
           common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_start_tag, false, true);
     }
     if (!chat_params.thinking_end_tags.empty()) {
-      sp.reasoning_budget_end =
-          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tags[0], false, true);
+      sp.reasoning_budget_end = {
+          common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tags[0], false, true) };
       sp.reasoning_budget_forced =
           common_tokenize(llama_model_get_vocab(model_), chat_params.thinking_end_tags[0], false, true);
     }
