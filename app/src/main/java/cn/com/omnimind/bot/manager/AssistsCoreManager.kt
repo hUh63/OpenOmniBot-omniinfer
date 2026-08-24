@@ -640,6 +640,18 @@ class AssistsCoreManager(private val context: Context) : OnMessagePushListener {
         private fun isSummaryTask(taskId: String): Boolean {
             return taskId.startsWith(SUMMARY_TASK_PREFIX_TASK)
         }
+
+        fun dispatchAgentAiConfigChanged(source: String, path: String) {
+            val payload = mapOf(
+                "source" to source,
+                "path" to path
+            )
+            runCatching {
+                mainEngineChannel?.invokeMethod("onAgentAiConfigChanged", payload)
+            }.onFailure {
+                OmniLog.w("[AssistsCoreManager]", "dispatchAgentAiConfigChanged failed: ${it.message}")
+            }
+        }
     }
 
     init {

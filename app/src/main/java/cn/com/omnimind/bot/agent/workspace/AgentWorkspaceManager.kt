@@ -113,6 +113,14 @@ class AgentWorkspaceManager(
             return File(rootDirectory(context), INTERNAL_DIR)
         }
 
+        fun modelsDirectory(context: Context): File {
+            return File(internalRootDirectory(context), "models")
+        }
+
+        fun modelsLiteRtDirectory(context: Context): File {
+            return File(modelsDirectory(context), "OmniInfer-litert")
+        }
+
         /** 语音合成 wav 缓存目录：workspace/.omnibot/audio */
         fun audioDirectory(context: Context): File {
             return File(internalRootDirectory(context), DIR_AUDIO)
@@ -554,6 +562,25 @@ class AgentWorkspaceManager(
         } else {
             "$SHELL_ROOT_PATH/$relative"
         }
+    }
+
+    fun soulMarkdownFile(): File {
+        ensureRuntimeDirectories()
+        return File(agentDirectory(), "SOUL.md")
+    }
+
+    fun chatMarkdownFile(): File {
+        ensureRuntimeDirectories()
+        return File(agentDirectory(), "CHAT.md")
+    }
+
+    fun agentConfigFile(): File {
+        ensureRuntimeDirectories()
+        return File(agentDirectory(), "config.json")
+    }
+
+    private fun agentDirectory(): File {
+        return File(internalDir, "agent")
     }
 
     fun androidPathForShell(shellPath: String): File? {
