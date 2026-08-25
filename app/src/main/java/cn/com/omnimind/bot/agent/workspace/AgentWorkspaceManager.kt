@@ -117,6 +117,18 @@ class AgentWorkspaceManager(
             return File(internalRootDirectory(context), "models")
         }
 
+        fun modelsMnnDirectory(context: Context): File {
+            return File(modelsDirectory(context), "OmniInfer-mnn")
+        }
+
+        fun modelsQnnDirectory(context: Context): File {
+            return File(modelsDirectory(context), "OmniInfer-qnn")
+        }
+
+        fun modelsLlamaDirectory(context: Context): File {
+            return File(modelsDirectory(context), "OmniInfer-llama")
+        }
+
         fun modelsLiteRtDirectory(context: Context): File {
             return File(modelsDirectory(context), "OmniInfer-litert")
         }
