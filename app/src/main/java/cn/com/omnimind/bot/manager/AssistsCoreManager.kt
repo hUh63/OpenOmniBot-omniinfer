@@ -6866,9 +6866,12 @@ class AssistsCoreManager(private val context: Context) : OnMessagePushListener {
     ) {
         mainJob.launch {
             try {
-                AssistsUtil.Core.createCompanionTask(
-                    context, this@AssistsCoreManager
-                )
+                if (!Settings.canDrawOverlays(context)) {
+                    throw PermissionException("请先开启悬浮窗权限!")
+                }
+                AssistsCore.startTask(TaskParams.CompanionTaskParams {
+                    this@AssistsCoreManager.onTaskFinish()
+                })
                 withContext(Dispatchers.Main) {
                     result.success("SUCCESS")
                 }
@@ -6888,7 +6891,7 @@ class AssistsCoreManager(private val context: Context) : OnMessagePushListener {
     ) {
         mainJob.launch {
             try {
-                AssistsUtil.Core.finishTask(context)
+                AssistsCore.finishCompanionTask()
                 withContext(Dispatchers.Main) {
                     result.success("SUCCESS")
                 }
@@ -6906,7 +6909,7 @@ class AssistsCoreManager(private val context: Context) : OnMessagePushListener {
     ) {
         mainJob.launch {
             try {
-                var isRunning = AssistsUtil.Core.isCompanionTaskRunning()
+                val isRunning = AssistsCore.isCompanionTaskRunning()
                 withContext(Dispatchers.Main) {
                     result.success(isRunning)
                 }
