@@ -182,6 +182,15 @@
             </intent-filter>
         </receiver>
         <receiver
+            android:name=".im.ImChannelBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <receiver
             android:name=".quicklog.QuickLogWidgetProvider"
             android:enabled="true"
             android:exported="false">
@@ -211,6 +220,11 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <service
+            android:name=".im.ImChannelForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <activity
             android:name="cn.com.omnimind.bot.agent.BrowserFileChooserRequestActivity"
             android:exported="false"

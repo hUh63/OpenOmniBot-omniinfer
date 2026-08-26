@@ -1,6 +1,7 @@
 package cn.com.omnimind.assists
 
 import android.content.Context
+import cn.com.omnimind.accessibility.service.AssistsService
 import cn.com.omnimind.assists.api.bean.TaskParams
 
 /**
@@ -18,6 +19,8 @@ object AssistsCore {
     fun isStateMachineInitialized(): Boolean {
         return stateMachine?.isInitialized() == true
     }
+
+    fun isAccessibilityServiceEnabled(): Boolean = AssistsService.instance != null
 
     fun startTask(params: TaskParams) {
         stateMachine?.startTask(params)

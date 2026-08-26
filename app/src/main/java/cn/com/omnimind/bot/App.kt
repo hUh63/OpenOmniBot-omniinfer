@@ -140,6 +140,7 @@ class App : BaseApplication() {
 
         initSDKsAfterPrivacyConsent()
         McpServerManager.restoreIfEnabled(this)
+        cn.com.omnimind.bot.im.ImChannelManager.restoreIfEnabled(this)
         CoroutineScope(Dispatchers.IO).launch {
             runCatching {
                 EmbeddedTerminalRuntime.warmup(this@App)

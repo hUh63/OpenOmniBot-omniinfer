@@ -136,6 +136,19 @@ class PermissionRegistry {
         openMethod: 'openInstalledAppsSettings',
         checkMethod: 'isInstalledAppsPermissionGranted',
       ),
+      PermissionSpec(
+        id: 'accessibility',
+        iconPath: 'assets/welcome/permission_accessibility.svg',
+        iconWidth: 30.0,
+        iconHeight: 30.0,
+        name: LegacyTextLocalizer.isEnglish ? 'Accessibility' : '无障碍辅助权限',
+        description: LegacyTextLocalizer.isEnglish
+            ? 'Persistent automation for complex tasks'
+            : '持久化自动操作，轻松完成复杂任务',
+        openMethod: 'openAccessibilitySettings',
+        checkMethod: 'isAccessibilityServiceEnabled',
+        infoLabel: LegacyTextLocalizer.isEnglish ? 'Persistent' : '持久化',
+      ),
     ];
     final optionalPermissions = <PermissionSpec>[
       PermissionSpec(
@@ -226,7 +239,12 @@ class PermissionRegistry {
     PermissionLevel.companionAutomation: [
       'overlay',
     ],
-    PermissionLevel.fullExecution: ['overlay', 'battery', 'installed_apps'],
+    PermissionLevel.fullExecution: [
+      'overlay',
+      'battery',
+      'installed_apps',
+      'accessibility',
+    ],
   };
 
   /// 根据权限层级获取权限规格列表

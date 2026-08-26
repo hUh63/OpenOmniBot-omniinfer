@@ -23,6 +23,9 @@ class AssistsUtil {
 
         fun isInitialized(): Boolean = AssistsCore.isStateMachineInitialized()
 
+        fun isAccessibilityServiceEnabled(): Boolean =
+            AssistsCore.isAccessibilityServiceEnabled()
+
         fun cancelChatTask(taskId: String? = null) {
             AssistsCore.cancelChatTask(taskId)
         }
@@ -136,6 +139,14 @@ class AssistsUtil {
                     "package:${context.packageName}".toUri()
                 )
             )
+        }
+
+        fun openAccessibilitySettings(context: Context) {
+            val intent =
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            context.startActivity(intent)
         }
 
         fun isInstalledAppsPermissionGranted(context: Context): Boolean {
