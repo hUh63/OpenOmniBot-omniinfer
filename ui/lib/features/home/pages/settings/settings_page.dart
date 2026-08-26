@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_switch/flutter_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
+import 'package:ui/features/local_model/local_model_feature.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/mcp_server_service.dart';
 import 'package:ui/services/special_permission.dart';
@@ -294,6 +295,15 @@ class _SettingsPageState extends State<SettingsPage> {
               GoRouterManager.push('/home/scene_model_setting');
             },
           ),
+          if (localModelFeature.enabled)
+            _SettingItem(
+              icon: LucideIcons.cpu,
+              title: context.l10n.localModelsTitle,
+              subtitle: context.l10n.localModelsServiceControlDesc,
+              onTap: () {
+                GoRouterManager.push('/home/local_models?tab=service');
+              },
+            ),
           _SettingItem(
             icon: LucideIcons.database,
             title: context.l10n.settingsWorkspaceMemoryTitle,
