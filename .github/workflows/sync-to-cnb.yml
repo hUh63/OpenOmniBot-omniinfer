@@ -28,7 +28,7 @@ jobs:
             exit 1
           fi
           CNB_BASIC_AUTH="$(printf 'cnb:%s' "${CNB_SYNC_TOKEN}" | base64)"
-          REMOTE_URL="https://cnb.cool/o.a/OpenOmniBot"
+          REMOTE_URL="https://cnb.cool/OpenOmniBot-omniinfer/OpenOmniBot-omniinfer.git"
           if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
             git -c http.extraheader="Authorization: Basic ${CNB_BASIC_AUTH}" \
               push --force "${REMOTE_URL}" "HEAD:refs/heads/${GITHUB_REF_NAME}"
