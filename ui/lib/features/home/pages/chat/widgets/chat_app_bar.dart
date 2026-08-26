@@ -234,16 +234,21 @@ class ChatAppBar extends StatelessWidget {
                   ? _kChatAppBarMenuButtonSize + _kChatAppBarAccessoryGap
                   : _kChatAppBarAccessoryGap;
               final accessoryRightEdge = islandLeft - _kChatAppBarAccessoryGap;
+              final companionActionWidth = onCompanionTap != null
+                  ? _kChatAppBarAccessoryButtonSize
+                  : 0.0;
+              final totalAccessoryWidth =
+                  leftActionRowWidth + companionActionWidth;
               final accessoryAvailableWidth = math
                   .max(0, accessoryRightEdge - accessoryLeftEdge)
                   .toDouble();
               final accessoryMaxLeft = math.max(
                 accessoryLeftEdge,
-                accessoryRightEdge - leftActionRowWidth,
+                accessoryRightEdge - totalAccessoryWidth,
               );
               final accessoryRowLeft =
                   (accessoryLeftEdge +
-                          ((accessoryAvailableWidth - leftActionRowWidth) / 2)
+                          ((accessoryAvailableWidth - totalAccessoryWidth) / 2)
                               .clamp(0, double.infinity))
                       .clamp(accessoryLeftEdge, accessoryMaxLeft)
                       .toDouble();
@@ -298,10 +303,10 @@ class ChatAppBar extends StatelessWidget {
                     ),
                   if (onCompanionTap != null)
                     Positioned(
-                      left: accessoryRowLeft + (showPetButton ? leftActionRowWidth : 0),
+                      left: accessoryRowLeft + leftActionRowWidth,
                       top: 0,
                       bottom: 0,
-                      width: leftActionRowWidth,
+                      width: companionActionWidth,
                       child: _ChatAppBarCompanionButton(
                         isEnabled: isCompanionModeEnabled,
                         isLoading: isCompanionToggleLoading,
