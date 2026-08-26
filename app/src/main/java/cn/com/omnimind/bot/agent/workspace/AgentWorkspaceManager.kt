@@ -103,7 +103,6 @@ class AgentWorkspaceManager(
         private const val FILE_MEMORY = "MEMORY.md"
         private const val DIR_SHORT_MEMORIES = "short-memories"
         private const val DIR_MEMORY_INDEX = "index"
-        private const val DIR_AUDIO = "audio"
 
         fun rootDirectory(context: Context): File {
             return File(context.applicationInfo.dataDir, ROOT_DIR_NAME)
@@ -131,11 +130,6 @@ class AgentWorkspaceManager(
 
         fun modelsLiteRtDirectory(context: Context): File {
             return File(modelsDirectory(context), "OmniInfer-litert")
-        }
-
-        /** 语音合成 wav 缓存目录：workspace/.omnibot/audio */
-        fun audioDirectory(context: Context): File {
-            return File(internalRootDirectory(context), DIR_AUDIO)
         }
 
         fun androidRootPath(context: Context): String {

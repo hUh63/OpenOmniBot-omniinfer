@@ -193,7 +193,24 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
       return <Map<String, dynamic>>[_buildReasoningEffortCommandCard()];
     }
 
-    final commands = <Map<String, dynamic>>[];
+    final commands = <Map<String, dynamic>>[
+      <String, dynamic>{
+        'cardId': 'slash-command-record',
+        'toolName': '/record',
+        'toolTitle': '/record',
+        'displayName': '/record',
+        'toolType': 'command',
+        'toolTypeLabel': LegacyTextLocalizer.isEnglish ? 'Recording' : '录制',
+        'status': 'running',
+        'statusLabel': LegacyTextLocalizer.isEnglish ? 'Action' : '操作',
+        'summary': LegacyTextLocalizer.isEnglish
+            ? 'Manually record a reusable operation flow'
+            : '手动录制可复用的操作流程',
+        'progress': LegacyTextLocalizer.isEnglish
+            ? 'Start recording from the floating control'
+            : '通过悬浮控件开始录制',
+      },
+    ];
     if (_supportsManualContextCompaction) {
       commands.add(<String, dynamic>{
         'cardId': 'slash-command-compact',
@@ -479,6 +496,11 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         .toString()
         .trim();
     switch (command) {
+      case '/record':
+        _messageController.clear();
+        _hideSlashCommandPanel();
+        unawaited(_startManualRecordingCommand('/record'));
+        break;
       case '/compact':
         unawaited(_executeManualContextCompactionCommand());
         break;
@@ -1332,9 +1354,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                       onCancelTask: _onCancelTask,
                       onPopupVisibilityChanged: _onPopupVisibilityChanged,
                       onTerminalTap: _handleTerminalToolTap,
-                      onManualRecordingTap: _activeMode == ChatPageMode.normal
-                          ? () => _startManualRecordingCommand('手动录制')
-                          : null,
                       useLargeComposerStyle: true,
                       useAttachmentPickerForPlus: true,
                       onPickAttachment: _pickAttachments,
@@ -1568,6 +1587,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     return ChatMessageAnchorBar(
       messages: messages,
       activeAgentTaskIds: activeTaskIds,
+      conversationAgentId: mode == ChatPageMode.agent
+          ? _activeAcpAgentId
+          : null,
       conversationSignature:
           '${mode.name}:${_modeState(mode).currentConversationId ?? ''}',
       bottomInset: bottomInset,
@@ -1924,19 +1946,26 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         return ValueListenableBuilder<AppBackgroundVisualProfile>(
           valueListenable: AppBackgroundService.visualProfileNotifier,
           builder: (context, visualProfile, _) {
+            final handlesBackLocally =
+                _isFirstUseTourActive ||
+                _conversationModelSelectorHandle != null ||
+                (isHdPadLandscape &&
+                    !_hdPadRightPaneCollapsed &&
+                    _workspaceBrowserCanGoUp);
             return PopScope(
-              canPop: false,
+              // Predictive back requires the framework to declare whether it can
+              // pop before the gesture starts. At the root, let Android own the
+              // gesture so it can animate the app window back to the launcher.
+              canPop: !handlesBackLocally,
               onPopInvokedWithResult: (didPop, _) {
                 if (didPop) return;
                 if (_isFirstUseTourActive) {
                   _handleFirstUseTourBack();
                   return;
                 }
-                // 模型选择器是 OverlayEntry，不在 Navigator 栈里，普通 pop
-                // 不会关掉它；这里手动关，让系统返回手势先吃掉它再走原本的退出逻辑。
+                // 模型选择器是 OverlayEntry，不在 Navigator 栈里，由页面先关闭。
                 if (_conversationModelSelectorHandle != null) {
                   unawaited(_conversationModelSelectorHandle?.dismiss());
-                  _conversationModelSelectorHandle = null;
                   return;
                 }
                 if (isHdPadLandscape &&
@@ -1954,12 +1983,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                 if (_isWorkspaceSurface && _workspaceBrowserCanGoUp) {
                   return;
                 }
-                unawaited(saveConversationWithSummary());
-                if (GoRouterManager.canPop()) {
-                  GoRouterManager.pop();
-                  return;
-                }
-                unawaited(AppStateService.exitApp());
               },
               child: Scaffold(
                 key: _scaffoldKey,

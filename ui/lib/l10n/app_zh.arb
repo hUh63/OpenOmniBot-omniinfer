@@ -329,12 +329,6 @@
       "error": {}
     }
   },
-  "sceneVoiceSaveFailed": "保存语音配置失败：{error}",
-  "@sceneVoiceSaveFailed": {
-    "placeholders": {
-      "error": {}
-    }
-  },
   "modelsNoAvailableModels": "暂无可用模型",
   "alarmSaved": "闹钟设置已保存",
   "alarmRingtoneSource": "铃声来源",

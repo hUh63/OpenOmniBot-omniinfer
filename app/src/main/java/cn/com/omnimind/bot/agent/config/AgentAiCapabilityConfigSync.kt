@@ -8,8 +8,6 @@ import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import cn.com.omnimind.baselib.llm.SceneModelBindingEntry
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
-import cn.com.omnimind.baselib.llm.SceneVoiceConfig
-import cn.com.omnimind.baselib.llm.SceneVoiceConfigStore
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.manager.AssistsCoreManager
 import com.google.gson.Gson
@@ -25,8 +23,7 @@ import kotlinx.coroutines.launch
 private data class AgentAiCapabilityConfigSnapshot(
     val currentProviderId: String = "",
     val providers: List<AgentAiCapabilityProviderSnapshot> = emptyList(),
-    val sceneModels: Map<String, AgentAiCapabilitySceneModelSnapshot> = emptyMap(),
-    val sceneSettings: Map<String, AgentAiCapabilitySceneSettingsSnapshot> = emptyMap()
+    val sceneModels: Map<String, AgentAiCapabilitySceneModelSnapshot> = emptyMap()
 )
 
 private data class AgentAiCapabilityProviderSnapshot(
@@ -44,22 +41,12 @@ private data class AgentAiCapabilitySceneModelSnapshot(
     val model: String = ""
 )
 
-private data class AgentAiCapabilitySceneSettingsSnapshot(
-    val autoPlay: Boolean = false,
-    val voiceId: String = SceneVoiceConfigStore.VOICE_DEFAULT_ZH,
-    val stylePreset: String = SceneVoiceConfigStore.STYLE_DEFAULT,
-    val customStyle: String = "",
-    val ttsMode: String = SceneVoiceConfigStore.TTS_MODE_BUILTIN,
-    val customCurlCommand: String = ""
-)
-
 private data class AgentAiCapabilityConfigPartial(
     val currentProviderId: String? = null,
     val editingProfileId: String? = null,
     val providers: List<AgentAiCapabilityProviderPartial>? = null,
     val profiles: List<AgentAiCapabilityProviderPartial>? = null,
     val sceneModels: JsonElement? = null,
-    val sceneSettings: JsonElement? = null,
     val modelProviders: AgentAiCapabilityModelProvidersPartial? = null
 )
 
@@ -304,10 +291,7 @@ class AgentAiCapabilityConfigSync private constructor(
         return AgentAiCapabilityConfigSnapshot(
             currentProviderId = ModelProviderConfigStore.getEditingProfileId(),
             providers = providers,
-            sceneModels = sceneModels,
-            sceneSettings = linkedMapOf(
-                SceneVoiceConfigStore.SCENE_ID to SceneVoiceConfigStore.getConfig().toSnapshot()
-            )
+            sceneModels = sceneModels
         )
     }
 
@@ -345,9 +329,6 @@ class AgentAiCapabilityConfigSync private constructor(
                 )
             }
         )
-        snapshot.sceneSettings[SceneVoiceConfigStore.SCENE_ID]?.let { settings ->
-            SceneVoiceConfigStore.saveConfig(settings.toSceneVoiceConfig())
-        }
 
         val after = buildSnapshotFromStoresLocked()
         return after != before
@@ -385,9 +366,6 @@ class AgentAiCapabilityConfigSync private constructor(
         val sceneModels = partial.sceneModels
             ?.let { resolveSceneModels(it) }
             ?: fallback.sceneModels
-        val sceneSettings = partial.sceneSettings
-            ?.let { resolveSceneSettings(it) }
-            ?: fallback.sceneSettings
 
         return AgentAiCapabilityConfigSnapshot(
             currentProviderId = currentProviderId,
@@ -402,8 +380,7 @@ class AgentAiCapabilityConfigSync private constructor(
                     wireApi = OpenAiWireApi.normalize(provider.wireApi)
                 )
             } ?: fallback.providers,
-            sceneModels = sceneModels,
-            sceneSettings = sceneSettings
+            sceneModels = sceneModels
         )
     }
 
@@ -551,43 +528,6 @@ class AgentAiCapabilityConfigSync private constructor(
         return resolved
     }
 
-    private fun resolveSceneSettings(
-        element: JsonElement
-    ): Map<String, AgentAiCapabilitySceneSettingsSnapshot>? {
-        if (!element.isJsonObject) {
-            return null
-        }
-        val obj = element.asJsonObject
-        val resolved = linkedMapOf<String, AgentAiCapabilitySceneSettingsSnapshot>()
-        obj.entrySet()
-            .sortedBy { it.key }
-            .forEach { (sceneId, rawSettings) ->
-                if (sceneId.trim() != SceneVoiceConfigStore.SCENE_ID || !rawSettings.isJsonObject) {
-                    return@forEach
-                }
-                val settingsObj = rawSettings.asJsonObject
-                val autoPlay = runCatching {
-                    settingsObj.get("autoPlay")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
-                }.getOrDefault(false)
-                val voiceId = settingsObj.readString("voiceId")
-                val stylePreset = settingsObj.readString("stylePreset")
-                val customStyle = settingsObj.readString("customStyle")
-                val ttsMode = settingsObj.readString("ttsMode")
-                val customCurlCommand = settingsObj.readString("customCurlCommand")
-                resolved[SceneVoiceConfigStore.SCENE_ID] = SceneVoiceConfigStore.normalize(
-                    SceneVoiceConfig(
-                        autoPlay = autoPlay,
-                        voiceId = voiceId,
-                        stylePreset = stylePreset,
-                        customStyle = customStyle,
-                        ttsMode = ttsMode,
-                        customCurlCommand = customCurlCommand
-                    )
-                ).toSnapshot()
-            }
-        return resolved
-    }
-
     private fun firstNonBlank(vararg values: String?): String {
         return values.firstOrNull { !it.isNullOrBlank() }?.trim().orEmpty()
     }
@@ -608,28 +548,6 @@ class AgentAiCapabilityConfigSync private constructor(
     private fun JsonObject.getAsJsonObjectOrNull(name: String): JsonObject? {
         val value = get(name) ?: return null
         return if (value.isJsonObject) value.asJsonObject else null
-    }
-
-    private fun SceneVoiceConfig.toSnapshot(): AgentAiCapabilitySceneSettingsSnapshot {
-        return AgentAiCapabilitySceneSettingsSnapshot(
-            autoPlay = autoPlay,
-            voiceId = voiceId,
-            stylePreset = stylePreset,
-            customStyle = customStyle,
-            ttsMode = ttsMode,
-            customCurlCommand = customCurlCommand
-        )
-    }
-
-    private fun AgentAiCapabilitySceneSettingsSnapshot.toSceneVoiceConfig(): SceneVoiceConfig {
-        return SceneVoiceConfig(
-            autoPlay = autoPlay,
-            voiceId = voiceId,
-            stylePreset = stylePreset,
-            customStyle = customStyle,
-            ttsMode = ttsMode,
-            customCurlCommand = customCurlCommand
-        )
     }
 
     private fun writeSnapshotToFileLocked(snapshot: AgentAiCapabilityConfigSnapshot) {

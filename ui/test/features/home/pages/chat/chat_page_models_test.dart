@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/mixins/agent_stream_handler.dart';
@@ -5,6 +7,30 @@ import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_c
 import 'package:ui/models/chat_message_model.dart';
 
 void main() {
+  test('model selector ignores repeated opens during a slow refresh', () async {
+    final guard = ConversationModelSelectorOpeningGuard();
+    final release = Completer<void>();
+
+    Future<bool> open() async {
+      if (!guard.tryBegin()) return false;
+      try {
+        await release.future;
+        return true;
+      } finally {
+        guard.finish();
+      }
+    }
+
+    final first = open();
+    expect(guard.isOpening, isTrue);
+    expect(await open(), isFalse);
+    release.complete();
+    expect(await first, isTrue);
+    expect(guard.isOpening, isFalse);
+    expect(guard.tryBegin(), isTrue);
+    guard.finish();
+  });
+
   group('ChatConversationRuntimeCoordinator.replaceConversationSnapshot '
       'preserveLiveStreamingState', () {
     final coordinator = ChatConversationRuntimeCoordinator.instance;
@@ -125,6 +151,30 @@ void main() {
         expect(structuralNotifications, 0);
       },
     );
+
+    test('snapshot keeps one latest row for each message id', () {
+      const conversationId = 0xD56;
+      const mode = kChatRuntimeModeAgent;
+      coordinator.replaceConversationSnapshot(
+        conversationId: conversationId,
+        mode: mode,
+        messages: <ChatMessageModel>[
+          ChatMessageModel.assistantMessage('old', id: 'same-id'),
+          ChatMessageModel.assistantMessage('other', id: 'other-id'),
+          ChatMessageModel.assistantMessage('latest', id: 'same-id'),
+        ],
+      );
+
+      final messages = coordinator
+          .runtimeFor(conversationId: conversationId, mode: mode)!
+          .messages;
+      expect(messages, hasLength(2));
+      expect(messages.map((message) => message.id), <String>[
+        'same-id',
+        'other-id',
+      ]);
+      expect(messages.first.text, 'latest');
+    });
   });
 
   group('shouldReloadConversationMessagesChanged', () {
@@ -352,7 +402,9 @@ void main() {
 
     test('operator []= records content-kind mutation', () {
       list.insert(0, ChatMessageModel.assistantMessage('hi', id: 'm-1'));
-      list[0] = ChatMessageModel.assistantMessage('hi there', id: 'm-1');
+      list[0] = list[0].copyWith(
+        content: <String, dynamic>{'text': 'hi there', 'id': 'm-1'},
+      );
       expect(list.lastMutationKind, ChatMessageListMutationKind.content);
     });
 
@@ -368,6 +420,17 @@ void main() {
       list[0] = ChatMessageModel.assistantMessage('hi there', id: 'm-1');
       expect(perItemNotifyCount, 1);
       expect(lastObserved?.text, 'hi there');
+    });
+
+    test('inserting an existing id updates its row without adding a slot', () {
+      list.insert(0, ChatMessageModel.assistantMessage('old', id: 'm-1'));
+      final notifier = list.listenableAt(0);
+
+      list.insert(1, ChatMessageModel.assistantMessage('latest', id: 'm-1'));
+
+      expect(list, hasLength(1));
+      expect(list.single.text, 'latest');
+      expect(list.listenableAt(0), same(notifier));
     });
   });
 }
