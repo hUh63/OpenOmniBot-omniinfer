@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.ui.channel
 
 import android.content.Context
+import cn.com.omnimind.bot.localmodel.LocalModelFeature
 import io.flutter.embedding.engine.FlutterEngine
 
 /**
@@ -65,6 +66,7 @@ class ChannelManager {
         omniLinkPluginChannel.setChannel(flutterEngine)
         accountChannel.setChannel(flutterEngine)
         imChannel.setChannel(flutterEngine)
+        LocalModelFeature.setChannel(flutterEngine)
     }
 
     fun onCreate(context: Context) {
@@ -85,6 +87,7 @@ class ChannelManager {
         pluginPlatformChannel.onCreate(context)
         omniLinkPluginChannel.onCreate(context)
         imChannel.onCreate(context)
+        LocalModelFeature.onChannelManagerCreate(context)
     }
 
     fun clearChannel() {
@@ -111,6 +114,7 @@ class ChannelManager {
         omniLinkPluginChannel.clear()
         accountChannel.clear()
         imChannel.clear()
+        LocalModelFeature.clearChannel()
     }
 
 

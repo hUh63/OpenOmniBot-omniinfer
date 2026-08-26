@@ -72,9 +72,6 @@ class ChatAppBar extends StatelessWidget {
   final VoidCallback? onPetTap;
   final bool isPetOpening;
   final bool isPetShowing;
-  final VoidCallback? onCompanionTap;
-  final bool isCompanionModeEnabled;
-  final bool isCompanionToggleLoading;
   final VoidCallback? onOmniAiTap;
   final VoidCallback? onPureChatToggleTap;
   final VoidCallback? onAgentTap;
@@ -120,9 +117,6 @@ class ChatAppBar extends StatelessWidget {
     this.onPetTap,
     this.isPetOpening = false,
     this.isPetShowing = false,
-    this.onCompanionTap,
-    this.isCompanionModeEnabled = false,
-    this.isCompanionToggleLoading = false,
     this.onOmniAiTap,
     this.onPureChatToggleTap,
     this.onAgentTap,
@@ -234,21 +228,16 @@ class ChatAppBar extends StatelessWidget {
                   ? _kChatAppBarMenuButtonSize + _kChatAppBarAccessoryGap
                   : _kChatAppBarAccessoryGap;
               final accessoryRightEdge = islandLeft - _kChatAppBarAccessoryGap;
-              final companionActionWidth = onCompanionTap != null
-                  ? _kChatAppBarAccessoryButtonSize
-                  : 0.0;
-              final totalAccessoryWidth =
-                  leftActionRowWidth + companionActionWidth;
               final accessoryAvailableWidth = math
                   .max(0, accessoryRightEdge - accessoryLeftEdge)
                   .toDouble();
               final accessoryMaxLeft = math.max(
                 accessoryLeftEdge,
-                accessoryRightEdge - totalAccessoryWidth,
+                accessoryRightEdge - leftActionRowWidth,
               );
               final accessoryRowLeft =
                   (accessoryLeftEdge +
-                          ((accessoryAvailableWidth - totalAccessoryWidth) / 2)
+                          ((accessoryAvailableWidth - leftActionRowWidth) / 2)
                               .clamp(0, double.infinity))
                       .clamp(accessoryLeftEdge, accessoryMaxLeft)
                       .toDouble();
@@ -299,20 +288,6 @@ class ChatAppBar extends StatelessWidget {
                           selectedColor: palette.accentPrimary,
                           onTap: onPetTap!,
                         ),
-                      ),
-                    ),
-                  if (onCompanionTap != null)
-                    Positioned(
-                      left: accessoryRowLeft + leftActionRowWidth,
-                      top: 0,
-                      bottom: 0,
-                      width: companionActionWidth,
-                      child: _ChatAppBarCompanionButton(
-                        isEnabled: isCompanionModeEnabled,
-                        isLoading: isCompanionToggleLoading,
-                        iconTint: iconTint,
-                        selectedColor: palette.accentPrimary,
-                        onTap: onCompanionTap!,
                       ),
                     ),
                   Center(
@@ -1405,48 +1380,6 @@ class _ChatSingleModePill extends StatelessWidget {
                     ),
                   ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ChatAppBarCompanionButton extends StatelessWidget {
-  const _ChatAppBarCompanionButton({
-    required this.isEnabled,
-    required this.isLoading,
-    required this.iconTint,
-    required this.selectedColor,
-    required this.onTap,
-  });
-
-  final bool isEnabled;
-  final bool isLoading;
-  final Color iconTint;
-  final Color selectedColor;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = isEnabled ? selectedColor : iconTint;
-    return GestureDetector(
-      key: const ValueKey('chat-app-companion-button'),
-      onTap: isLoading ? null : onTap,
-      behavior: HitTestBehavior.opaque,
-      child: SizedBox(
-        width: _kChatAppBarAccessoryButtonSize,
-        height: _kChatAppBarAccessoryButtonSize,
-        child: Center(
-          child: isLoading
-              ? SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(color),
-                  ),
-                )
-              : Icon(LucideIcons.userRound, size: 20, color: color),
         ),
       ),
     );

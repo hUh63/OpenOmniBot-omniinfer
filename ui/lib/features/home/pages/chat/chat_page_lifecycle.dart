@@ -707,8 +707,17 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         brand: 'other',
         level: PermissionLevel.overlayDisplay,
       );
+      final accessibilitySpecs = PermissionRegistry.getPermissions(
+        brand: 'other',
+      ).where((spec) => spec.id == kAccessibilityPermissionId);
+      final checkedSpecs = <PermissionSpec>[
+        ...overlaySpecs,
+        ...accessibilitySpecs.where(
+          (spec) => overlaySpecs.every((item) => item.id != spec.id),
+        ),
+      ];
       final permissionDataList = PermissionService.specsToPermissionData(
-        overlaySpecs,
+        checkedSpecs,
         context: context,
       );
       await PermissionService.checkPermissions(permissionDataList);
@@ -727,7 +736,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         _setPetOverlayOpening(false);
         final shouldShowPet = await PetOverlayPermissionSheet.show(
           context,
-          permission: overlayPermission,
+          permissions: permissionDataList,
         );
         if (!mounted || !shouldShowPet) {
           return;

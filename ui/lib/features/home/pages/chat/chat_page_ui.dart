@@ -1261,11 +1261,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
               },
               isPetOpening: _isPetOverlayOpening,
               isPetShowing: _isPetOverlayShowing,
-              onCompanionTap: () {
-                unawaited(_toggleCompanionMode());
-              },
-              isCompanionModeEnabled: _isCompanionModeEnabled,
-              isCompanionToggleLoading: _isCompanionToggleLoading,
               onOmniAiTap: () {
                 unawaited(_handleAgentModeShortcutTap());
               },
