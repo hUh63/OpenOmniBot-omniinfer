@@ -44,6 +44,7 @@ class MnnLocalModelsChannel {
         private var pendingImportResult: MethodChannel.Result? = null
         @Volatile
         private var pendingImportBackend: String = DEFAULT_BACKEND
+        private var importTimeoutRunnable: Runnable? = null
 
         fun onActivityResult(
             activity: Activity,
@@ -59,6 +60,8 @@ class MnnLocalModelsChannel {
             val backend = pendingImportBackend
             pendingImportResult = null
             pendingImportBackend = DEFAULT_BACKEND
+            importTimeoutRunnable?.let { importHandler.removeCallbacks(it) }
+            importTimeoutRunnable = null
             if (result == null) return true
 
             if (resultCode != Activity.RESULT_OK || data?.data == null) {
@@ -172,10 +175,24 @@ class MnnLocalModelsChannel {
                     return
                 }
                 if (pendingImportResult != null) {
-                    result.error(ERROR_CODE, "Another import is already in progress", null)
-                    return
+                    // 上一次导入可能因文件选择器被系统回收/用户放弃而残留，
+                    // 释放旧的挂起结果（返回 cancelled），接受新的导入请求。
+                    pendingImportResult?.success(mapOf("success" to false, "error" to "cancelled"))
+                    pendingImportResult = null
+                    pendingImportBackend = DEFAULT_BACKEND
+                    importTimeoutRunnable?.let { importHandler.removeCallbacks(it) }
+                    importTimeoutRunnable = null
                 }
                 pendingImportResult = result
+                // 文件选择器不应长时间无响应；超时后自动释放挂起状态，
+                // 避免后续导入一直被 "Another import is already in progress" 阻塞。
+                importTimeoutRunnable = Runnable {
+                    pendingImportResult?.success(mapOf("success" to false, "error" to "cancelled"))
+                    pendingImportResult = null
+                    pendingImportBackend = DEFAULT_BACKEND
+                    importTimeoutRunnable = null
+                }
+                importHandler.postDelayed(importTimeoutRunnable!!, 120_000L)
                 try {
                     val backend = getSelectedBackend()
                     pendingImportBackend = backend
