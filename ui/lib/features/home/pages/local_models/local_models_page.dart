@@ -81,7 +81,9 @@ class _LocalModelsPageState extends State<LocalModelsPage>
 
   bool _importing = false;
   double _importProgress = 0.0;
+  bool _importProgressUnknown = false;
   String _importModelId = '';
+  int _importCopiedBytes = 0;
 
   @override
   void initState() {
@@ -430,10 +432,14 @@ class _LocalModelsPageState extends State<LocalModelsPage>
         final importModelId = (event.payload['modelId'] ?? '').toString();
         final importProgress =
             (event.payload['progress'] as num?)?.toDouble() ?? 0.0;
+        final copiedBytes =
+            (event.payload['copiedSize'] as num?)?.toInt() ?? 0;
         if (mounted) {
           setState(() {
-            _importProgress = importProgress;
+            _importProgressUnknown = importProgress < 0;
+            _importProgress = importProgress < 0 ? 0.0 : importProgress;
             _importModelId = importModelId;
+            _importCopiedBytes = copiedBytes;
             if (importProgress >= 1.0) {
               _importing = false;
               _refreshInstalled(silent: true);
@@ -743,6 +749,8 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     setState(() {
       _importing = true;
       _importProgress = 0.0;
+      _importProgressUnknown = false;
+      _importCopiedBytes = 0;
       _importModelId = '';
     });
 
@@ -1667,7 +1675,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
                   ClipRRect(
                     borderRadius: BorderRadius.circular(999),
                     child: LinearProgressIndicator(
-                      value: _importProgress,
+                      value: _importProgressUnknown ? null : _importProgress,
                       minHeight: 8,
                       backgroundColor: _alpha(_secondaryTextColor, 0.14),
                       valueColor: AlwaysStoppedAnimation<Color>(
@@ -1677,7 +1685,9 @@ class _LocalModelsPageState extends State<LocalModelsPage>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '${(_importProgress * 100).toStringAsFixed(1)}%',
+                    _importProgressUnknown
+                        ? '${_formatBytes(_importCopiedBytes)}'
+                        : '${(_importProgress * 100).toStringAsFixed(1)}%',
                     style: TextStyle(
                       fontSize: 12,
                       color: _secondaryTextColor,
@@ -2658,4 +2668,16 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       ),
     );
   }
+}
+
+String _formatBytes(int bytes) {
+  if (bytes <= 0) return '0 B';
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) {
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
 }

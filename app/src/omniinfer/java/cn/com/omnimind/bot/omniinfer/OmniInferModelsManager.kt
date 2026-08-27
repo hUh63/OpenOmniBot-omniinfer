@@ -636,7 +636,9 @@ object OmniInferModelsManager {
                             val now = System.currentTimeMillis()
                             if (now - lastEmitTime > 300) {
                                 lastEmitTime = now
-                                val progress = if (fileSize > 0) copiedSize.toDouble() / fileSize else 0.0
+                                // fileSize 可能为 0（部分 provider 不提供 SIZE 列），
+                                // 无法计算百分比时用 -1 标记未知，UI 显示已复制字节数。
+                                val progress = if (fileSize > 0) copiedSize.toDouble() / fileSize else -1.0
                                 emitEvent("import_progress", mapOf(
                                     "modelId" to modelId,
                                     "progress" to progress,
@@ -721,7 +723,9 @@ object OmniInferModelsManager {
                             val now = System.currentTimeMillis()
                             if (now - lastEmitTime > 300) {
                                 lastEmitTime = now
-                                val progress = if (fileSize > 0) copiedSize.toDouble() / fileSize else 0.0
+                                // fileSize 可能为 0（部分 provider 不提供 SIZE 列），
+                                // 无法计算百分比时用 -1 标记未知，UI 显示已复制字节数。
+                                val progress = if (fileSize > 0) copiedSize.toDouble() / fileSize else -1.0
                                 emitEvent("import_progress", mapOf(
                                     "modelId" to modelId,
                                     "progress" to progress,

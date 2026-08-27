@@ -586,8 +586,9 @@ class _ChatAppBarModeShortcutButtonState
     final canSelectPureChat =
         widget.isAgentSelected ||
         (!widget.isPureChatToggleLocked && widget.onPureChatToggleTap != null);
+    // 展示全部预制 agent（含未安装的），未安装/离线的置灰，便于用户知晓可用的 agent 模式。
     final acpAgentModes = widget.acpAgentModes
-        .where((agent) => agent.isAvailable)
+        .where((agent) => agent.enabled)
         .toList(growable: false);
     final popupAnchor = Rect.fromLTWH(anchor.left, anchor.top, anchor.width, 0);
 
@@ -627,6 +628,7 @@ class _ChatAppBarModeShortcutButtonState
                         agent.id == widget.activeAcpAgentId,
                     enabled:
                         !isAgentLoading &&
+                        agent.isAvailable &&
                         (widget.onAcpAgentTap != null ||
                             widget.onAgentTap != null),
                     iconSize: _chatAppBarModeMenuAgentIconSize(agent.id),
