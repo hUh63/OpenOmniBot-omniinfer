@@ -289,6 +289,10 @@ jobs:
         if: steps.release_ref.outputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          # GITHUB_TOKEN can create releases but is denied updating an existing
+          # published release ("Resource not accessible by integration").
+          # Use a PAT (RELEASE_TOKEN) so re-runs can update the same tag release.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           tag_name: ${{ steps.release_ref.outputs.release_tag_name }}
           target_commitish: ${{ github.sha }}
           draft: ${{ steps.release_mode.outputs.draft == 'true' }}
