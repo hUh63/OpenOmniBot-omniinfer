@@ -1,0 +1,36 @@
+name: Import source tree
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download source tarball
+        run: |
+          curl -sS -m 600 -L \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/543101183" \
+            -o /tmp/src_full.tar.gz
+          ls -la /tmp/src_full.tar.gz
+
+      - name: Extract over worktree
+        run: |
+          tar xzf /tmp/src_full.tar.gz -C .
+          ls -la | head -30
+
+      - name: Commit and push to omniinfer-apk
+        run: |
+          git config user.email "hUh63@users.noreply.github.com"
+          git config user.name "hUh63"
+          git add -A
+          git commit -m "Import synced source: v0.6.0.3 + v0.3.27, framework vendored, omniinfer edition wired, HTP libs"
+          git push origin HEAD:refs/heads/omniinfer-apk --force
