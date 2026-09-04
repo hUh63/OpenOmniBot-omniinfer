@@ -1,0 +1,72 @@
+name: Build OmniInfer Edition APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.38.7
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.7'
+          channel: stable
+          cache: true
+
+      - name: Install NDK 28.2.13676358
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
+
+      - name: Flutter pub get
+        working-directory: ui
+        run: flutter pub get --enforce-lockfile
+
+      - name: Gradle assembleProductionOmniinferDebug
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --build-cache --max-workers=4 \
+            assembleProductionOmniinferDebug \
+            -Ptarget=lib/main_omniinfer.dart
+
+      - name: Collect APK
+        run: |
+          mkdir -p apk-out
+          find app/build/outputs/apk -name "*.apk" -exec cp {} apk-out/ \;
+          ls -la apk-out
+
+      - name: Push APK to apk-build branch
+        run: |
+          git config user.email "hUh63@users.noreply.github.com"
+          git config user.name "hUh63"
+          git checkout --orphan apk-build
+          git rm -rf . -q || true
+          cp apk-out/*.apk .
+          for f in *.apk; do
+            gzip -k "$f" 2>/dev/null || true
+          done
+          git add -f *.apk
+          git commit -m "APK build $(date -u +%Y%m%d%H%M%S)"
+          git push origin apk-build --force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniinfer-apk
+          path: apk-out/*.apk
+          if-no-files-found: error
