@@ -24,7 +24,7 @@ jobs:
 
       - name: Extract over worktree
         run: |
-          tar xzf /tmp/src_full.tar.gz -C . --exclude=./.github/workflows/build-apk.yml
+          tar xzf /tmp/src_full.tar.gz -C . --exclude=./.github/workflows
 
       - name: Commit and push to omniinfer-apk
         run: |
