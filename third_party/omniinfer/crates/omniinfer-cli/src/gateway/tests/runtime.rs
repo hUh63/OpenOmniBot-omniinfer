@@ -39,6 +39,24 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     assert_eq!(load_body["backend_port"], backend_port);
     assert!(load_body["backend_pid"].as_u64().unwrap() > 0);
     assert_eq!(load_body["route_state"], "ready");
+    if backend_id.contains("cuda") {
+        assert_eq!(load_body["runtime_placement"]["policy"], "auto");
+        assert_eq!(load_body["runtime_placement"]["mode"], "partial");
+        assert_eq!(load_body["runtime_placement"]["offloaded_layers"], 2);
+        assert_eq!(load_body["runtime_placement"]["total_layers"], 4);
+        assert!(
+            load_body["runtime_placement"]["reconciled_budget"]["domains_bytes"]["host"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+        );
+        assert!(
+            load_body["runtime_placement"]["reconciled_budget"]["domains_bytes"]
+                .as_object()
+                .is_some_and(|domains| domains.iter().any(|(domain, bytes)| {
+                    domain.starts_with("cuda:") && bytes.as_u64().is_some_and(|bytes| bytes > 0)
+                }))
+        );
+    }
     let first_generation = load_body["generation"].as_u64().unwrap();
     assert!(first_generation > 0);
     assert!(load_body["allocation_id"].as_u64().unwrap() > 0);
@@ -61,6 +79,14 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     );
     assert!(launch_command.contains(&"--cache-idle-slots"));
     assert!(launch_command.windows(2).any(|args| args == ["-np", "5"]));
+    if backend_id.contains("cuda") {
+        assert!(!launch_command.iter().any(|arg| {
+            matches!(*arg, "-ngl" | "--gpu-layers")
+                || arg.starts_with("-ngl=")
+                || arg.starts_with("--gpu-layers=")
+        }));
+        assert!(launch_command.windows(2).any(|args| args == ["-lv", "4"]));
+    }
     let cache_ram_values = launch_command
         .windows(2)
         .filter(|args| args[0] == "--cache-ram")
@@ -68,13 +94,21 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
         .collect::<Vec<_>>();
     assert_eq!(cache_ram_values, vec!["8192", "2048"]);
 
+    let thinking_response = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/thinking/select"))
+            .send_json(json!({"enabled": true}))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(thinking_response.status().as_u16(), 200);
+
     let chat_response = tokio::task::spawn_blocking(move || {
         ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
             .send_json(json!({
                 "model": "local",
                 "messages": [{"role": "user", "content": "Hello"}],
-                "stream": false,
-                "think": false
+                "stream": false
             }))
             .unwrap()
     })
@@ -86,6 +120,7 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
         chat_body["choices"][0]["message"]["content"],
         "fake backend"
     );
+    assert_eq!(chat_body["enable_thinking_echo"], true);
 
     let anthropic_response = tokio::task::spawn_blocking(move || {
         ureq::post(format!("http://127.0.0.1:{port}/v1/messages"))
@@ -141,6 +176,8 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     assert_eq!(cache_response.status().as_u16(), 200);
     let cache_body: Value = cache_response.into_body().read_json().unwrap();
     assert_eq!(cache_body["ok"], true);
+    assert_eq!(cache_body["cache_policy"], "cleared_each_run");
+    assert_eq!(cache_body["cleared_slots"], json!([0, 1]));
 
     let props_response = tokio::task::spawn_blocking(move || {
         ureq::get(format!("http://127.0.0.1:{port}/omni/backend/props"))
@@ -220,6 +257,159 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
 
     gateway.stop().await;
     upstream.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[tokio::test]
+async fn partial_offload_reconciliation_failure_cleans_runtime_and_ledger() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("partial-offload-reconciliation-rollback");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let placement_mode = temp
+        .join(".local")
+        .join("runtime")
+        .join(test_runtime_platform_dir())
+        .join(backend_id)
+        .join("bin")
+        .join("placement-mode");
+    std::fs::write(placement_mode, "oversized").unwrap();
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let gateway = spawn_test_gateway_with_options(GatewayAccessPolicy::default(), None).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let response = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/load"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "ctx_size": 512,
+                "backend_port": backend_port
+            }))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 502);
+    let body: Value = response.into_body().read_json().unwrap();
+    assert!(
+        body.to_string()
+            .contains("placement exceeds safe reconciled capacity"),
+        "unexpected failure response: {body}"
+    );
+    assert!(body.to_string().contains("log:"));
+
+    let state = gateway_state(port).await;
+    assert_eq!(resource_total(&state, "reserved_bytes"), 0);
+    assert_eq!(resource_total(&state, "committed_bytes"), 0);
+    assert!(state["loaded_models"].as_array().unwrap().is_empty());
+    assert_eq!(state["backend_ready"], false);
+    for _ in 0..40 {
+        if std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err());
+
+    gateway.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[tokio::test]
+async fn explicit_full_offload_keeps_strict_cuda_admission() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("explicit-full-offload-admission");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let gateway = spawn_test_gateway_with_options(GatewayAccessPolicy::default(), None).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let response = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/load"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "ctx_size": 512,
+                "backend_port": backend_port,
+                "launch_args": ["-ngl", "999"],
+                "resource_budget_bytes": 2_u64 * 1024 * 1024 * 1024 * 1024
+            }))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 502);
+
+    let state = gateway_state(port).await;
+    assert_eq!(resource_total(&state, "reserved_bytes"), 0);
+    assert_eq!(resource_total(&state, "committed_bytes"), 0);
+    assert!(state["loaded_models"].as_array().unwrap().is_empty());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err());
+
+    gateway.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[tokio::test]
+async fn partial_offload_rejects_disabled_startup_logs_before_launch() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("partial-offload-disabled-logs");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let gateway = spawn_test_gateway_with_options(GatewayAccessPolicy::default(), None).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let response = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/load"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "ctx_size": 512,
+                "backend_port": backend_port,
+                "launch_args": ["--log-disable"]
+            }))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 502);
+    let body: Value = response.into_body().read_json().unwrap();
+    assert!(body.to_string().contains("remove --log-disable"));
+
+    let state = gateway_state(port).await;
+    assert_eq!(resource_total(&state, "reserved_bytes"), 0);
+    assert_eq!(resource_total(&state, "committed_bytes"), 0);
+    assert!(state["loaded_models"].as_array().unwrap().is_empty());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err());
+
+    gateway.stop().await;
     std::fs::remove_dir_all(temp).ok();
 }
 
@@ -368,6 +558,78 @@ async fn runtime_request_defaults_merge_without_restarting_backend() {
 }
 
 #[tokio::test]
+async fn direct_gateway_no_mmproj_load_persists_and_reports_restore_choice() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("runtime-no-mmproj-persistence");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let upstream = spawn_test_upstream().await;
+    let gateway = spawn_test_gateway(upstream.port, GatewayAccessPolicy::default()).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let request = json!({
+        "backend": backend_id,
+        "model": model.display().to_string(),
+        "ctx_size": 512,
+        "backend_port": backend_port,
+        "no_mmproj": true,
+    });
+    let load = tokio::task::spawn_blocking({
+        let request = request.clone();
+        move || {
+            ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+                .send_json(request)
+                .unwrap()
+                .into_body()
+                .read_json::<Value>()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(load["selected_mmproj"], Value::Null);
+
+    let state = gateway_state(port).await;
+    assert_eq!(state["restore_selection"]["no_mmproj"], true);
+    assert_eq!(state["restore_selection"]["mmproj"], Value::Null);
+    let persisted = omniinfer_core::local_state::load_state().unwrap();
+    assert!(persisted.selected_model.unwrap().no_mmproj);
+
+    let repeat = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "ctx_size": 512,
+                "no_mmproj": true,
+            }))
+            .unwrap()
+            .into_body()
+            .read_json::<Value>()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(repeat["already_loaded"], true);
+    assert!(
+        omniinfer_core::local_state::load_state()
+            .unwrap()
+            .selected_model
+            .unwrap()
+            .no_mmproj
+    );
+
+    gateway.stop().await;
+    upstream.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn runtime_load_rolls_back_when_local_state_commit_fails() {
     let _env_lock = TEST_ENV_LOCK.lock().await;
     let temp = temp_root("rust-gateway-state-rollback");
@@ -492,6 +754,185 @@ async fn vla_runtime_exposes_zmq_contract_and_rejects_openai_proxying() {
             format!("tcp://127.0.0.1:{backend_port}")
         );
     }
+
+    let diffusion_response = tokio::task::spawn_blocking(move || {
+        ureq::get(format!("http://127.0.0.1:{port}/sdcpp/v1/capabilities"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(diffusion_response.status().as_u16(), 422);
+    let body: Value = diffusion_response.into_body().read_json().unwrap();
+    assert_eq!(body["error"]["code"], "backend_protocol_not_supported");
+
+    gateway.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn diffusion_runtime_proxies_native_async_api_and_rejects_chat() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("diffusion-runtime-protocol-contract");
+    std::fs::create_dir_all(&temp).unwrap();
+    let model = temp.join("minimax_h3_fl2va_pruned-Q4_K.gguf");
+    let llm = temp.join("qwen3vl_32b_minimax_h3-Q4_K_M.gguf");
+    let vae = temp.join("minimax_h3_video_vae_fp16.safetensors");
+    let audio_vae = temp.join("minimax_h3_audio_vae_fp32.safetensors");
+    for path in [&model, &llm, &vae, &audio_vae] {
+        std::fs::write(path, b"test").unwrap();
+    }
+    install_fake_stable_diffusion_server(&temp);
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let gateway = spawn_test_gateway_with_options(GatewayAccessPolicy::default(), None).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let load = tokio::task::spawn_blocking({
+        let model = model.clone();
+        let llm = llm.clone();
+        let vae = vae.clone();
+        let audio_vae = audio_vae.clone();
+        move || {
+            ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+                .send_json(json!({
+                    "backend": "stable-diffusion.cpp-linux-vulkan",
+                    "model": model.display().to_string(),
+                    "backend_port": backend_port,
+                    "launch_args": [
+                        "--llm", llm.display().to_string(),
+                        "--vae", vae.display().to_string(),
+                        "--audio-vae", audio_vae.display().to_string(),
+                        "--cfg-scale", "1.0",
+                        "--diffusion-fa",
+                        "--backend", "te=cpu"
+                    ]
+                }))
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(load.status().as_u16(), 200);
+    let load: Value = load.into_body().read_json().unwrap();
+    assert_eq!(
+        load["external_server_protocol"],
+        "stable-diffusion.cpp-server"
+    );
+    assert_eq!(load["openai_compatible"], false);
+    assert_eq!(
+        load["client_endpoint"],
+        format!("http://127.0.0.1:{backend_port}")
+    );
+
+    let capabilities = tokio::task::spawn_blocking(move || {
+        ureq::get(format!(
+            "http://127.0.0.1:{port}/sdcpp/v1/capabilities?detail=1"
+        ))
+        .call()
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(capabilities.status().as_u16(), 200);
+    assert_eq!(
+        capabilities
+            .headers()
+            .get("x-sdcpp-test")
+            .and_then(|value| value.to_str().ok()),
+        Some("passthrough")
+    );
+    let capabilities: Value = capabilities.into_body().read_json().unwrap();
+    assert_eq!(capabilities["backend"], "fake-sdcpp");
+    assert_eq!(capabilities["path"], "/sdcpp/v1/capabilities?detail=1");
+
+    let submit = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/sdcpp/v1/vid_gen"))
+            .send_json(json!({
+                "prompt": "a silver tabby surfing",
+                "width": 640,
+                "height": 384,
+                "video_frames": 25,
+                "steps": 4
+            }))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(submit.status().as_u16(), 202);
+    let submit: Value = submit.into_body().read_json().unwrap();
+    assert_eq!(submit["id"], "job-42");
+    assert_eq!(submit["request"]["steps"], 4);
+
+    let poll = tokio::task::spawn_blocking(move || {
+        ureq::get(format!("http://127.0.0.1:{port}/sdcpp/v1/jobs/job-42"))
+            .call()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(poll.status().as_u16(), 200);
+    let poll: Value = poll.into_body().read_json().unwrap();
+    assert_eq!(poll["status"], "completed");
+
+    let cancel = tokio::task::spawn_blocking(move || {
+        ureq::post(format!(
+            "http://127.0.0.1:{port}/sdcpp/v1/jobs/job-42/cancel"
+        ))
+        .send_json(json!({}))
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(cancel.status().as_u16(), 200);
+    let cancel: Value = cancel.into_body().read_json().unwrap();
+    assert_eq!(cancel["status"], "cancelled");
+
+    for endpoint in ["/v1/chat/completions", "/v1/messages"] {
+        let chat = tokio::task::spawn_blocking(move || {
+            ureq::post(format!("http://127.0.0.1:{port}{endpoint}"))
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send_json(json!({
+                    "model": "omniinfer",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "Hello"}]
+                }))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(chat.status().as_u16(), 422);
+        let chat: Value = chat.into_body().read_json().unwrap();
+        assert_eq!(chat["error"]["code"], "backend_protocol_not_supported");
+        assert_eq!(
+            chat["error"]["external_server_protocol"],
+            "stable-diffusion.cpp-server"
+        );
+    }
+
+    let too_large = tokio::task::spawn_blocking(move || {
+        let payload = json!({"prompt": "x".repeat(16 * 1024 * 1024)});
+        ureq::post(format!("http://127.0.0.1:{port}/sdcpp/v1/vid_gen"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(payload)
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(too_large.status().as_u16(), 413);
+    let too_large: Value = too_large.into_body().read_json().unwrap();
+    assert_eq!(
+        too_large["error"]["message"],
+        "diffusion request body exceeds 16 MiB"
+    );
 
     gateway.stop().await;
     std::fs::remove_dir_all(temp).ok();

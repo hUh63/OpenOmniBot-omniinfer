@@ -2,6 +2,8 @@ enum AgentSlashSubmitKind {
   none,
   openModelPicker,
   selectModel,
+  openReasoningEffortPicker,
+  selectReasoningEffort,
   startReview,
   startInit,
   togglePlan,
@@ -34,6 +36,24 @@ AgentSlashSubmitIntent resolveAgentSlashSubmitIntent(String messageText) {
     return AgentSlashSubmitIntent(
       AgentSlashSubmitKind.selectModel,
       value: modelId,
+    );
+  }
+
+  if (normalized == '/effort') {
+    return const AgentSlashSubmitIntent(
+      AgentSlashSubmitKind.openReasoningEffortPicker,
+    );
+  }
+  if (normalized.startsWith('/effort ')) {
+    final effort = trimmed.substring('/effort'.length).trim();
+    if (effort.isEmpty) {
+      return const AgentSlashSubmitIntent(
+        AgentSlashSubmitKind.openReasoningEffortPicker,
+      );
+    }
+    return AgentSlashSubmitIntent(
+      AgentSlashSubmitKind.selectReasoningEffort,
+      value: effort,
     );
   }
 

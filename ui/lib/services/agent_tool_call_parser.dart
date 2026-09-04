@@ -48,7 +48,9 @@ AgentToolCallInfo normalizeAgentToolCall(
   );
   final toolType = _inferToolType(
     itemType: type,
-    explicitToolType: _firstString([raw['toolType'], raw['tool_type']]),
+    explicitToolType: _visualToolType(
+      _firstString([raw['toolType'], raw['tool_type']]),
+    ),
     fallbackToolType: fallbackToolType,
     toolName: rawToolName,
     arguments: arguments,
@@ -147,39 +149,34 @@ String normalizeAgentToolStatus(
   Map<String, dynamic> raw, {
   String fallbackStatus = 'running',
 }) {
-  if (raw['error'] != null) {
-    return 'error';
-  }
-  final success = raw['success'];
-  if (success == false) {
-    return 'error';
-  }
-  final exitCode = _asInt(raw['exitCode'] ?? raw['exit_code']);
+  // ACP ToolCallStatus is the only lifecycle source of truth. rawOutput and
+  // rawResult are opaque tool data; reading status-like fields from them
+  // creates a second lifecycle and was the cause of the success/failure split
+  // in the command transcript.
   final explicit = _firstString([raw['status'], raw['state']]);
   final normalized = explicit?.trim().toLowerCase();
   if (normalized != null && normalized.isNotEmpty) {
-    if (normalized == 'running' ||
-        normalized == 'pending' ||
+    if (normalized == 'pending') {
+      return 'pending';
+    }
+    if (normalized == 'in_progress' ||
+        normalized == 'running' ||
         normalized == 'progress' ||
         normalized == 'inprogress' ||
-        normalized == 'in_progress' ||
         normalized == 'executing' ||
         normalized == 'started') {
       return 'running';
     }
-    if (normalized == 'success' ||
+    if (normalized == 'completed' ||
+        normalized == 'success' ||
         normalized == 'succeeded' ||
-        normalized == 'completed' ||
         normalized == 'complete' ||
         normalized == 'applied' ||
         normalized == 'done') {
-      if (exitCode != null && exitCode != 0) {
-        return 'error';
-      }
       return 'success';
     }
-    if (normalized == 'error' ||
-        normalized == 'failed' ||
+    if (normalized == 'failed' ||
+        normalized == 'error' ||
         normalized == 'failure' ||
         normalized == 'rejected') {
       return 'error';
@@ -195,10 +192,17 @@ String normalizeAgentToolStatus(
       return 'timeout';
     }
   }
+  // Non-ACP item snapshots do not always carry a status. Keep their
+  // compatibility projection based on fields at the item boundary only;
+  // never inspect rawOutput/rawResult for a lifecycle decision.
+  if (raw['error'] != null || raw['success'] == false) {
+    return 'error';
+  }
+  final exitCode = _asInt(raw['exitCode'] ?? raw['exit_code']);
   if (exitCode != null && exitCode != 0) {
     return 'error';
   }
-  if (success == true) {
+  if (raw['success'] == true) {
     return 'success';
   }
   return fallbackStatus;
@@ -525,6 +529,17 @@ String? _resolveToolName(Map<String, dynamic> raw, {required String itemType}) {
   ]);
 }
 
+/// Some adapters use `context` as a result-envelope name rather than a UI
+/// capability. Keep that protocol detail out of every event source and infer
+/// the actual shared card route from the tool's concrete facts instead.
+String? _visualToolType(String? value) {
+  final normalized = value?.trim();
+  if (normalized == null || normalized.isEmpty) {
+    return null;
+  }
+  return normalized.toLowerCase() == 'context' ? null : normalized;
+}
+
 String _inferToolType({
   required String itemType,
   required String? explicitToolType,
@@ -574,6 +589,12 @@ String _inferToolType({
   final fullName = (toolName ?? '').trim().toLowerCase();
   final shortName = _shortToolName(fullName).toLowerCase();
   final name = '$fullName $shortName';
+  // Subagent dispatch is a distinct collaboration capability. Resolve it
+  // before generic read/file/name heuristics so labels such as
+  // `subagent_dispatch` can never be rendered as a file or workspace tool.
+  if (_containsAny(name, const ['subagent', 'sub_agent', 'delegate_agent'])) {
+    return 'subagent';
+  }
   final commandToolType = _inferToolTypeFromCommand(arguments);
   if (commandToolType != null && _looksLikeCommandToolName(name)) {
     return commandToolType;
@@ -624,11 +645,17 @@ String _inferToolType({
   if (_containsAny(name, const ['image', 'screenshot', 'view_image'])) {
     return 'image';
   }
-  if (_containsAny(name, const ['task', 'subagent', 'agent'])) {
-    return 'subagent';
-  }
   if (_containsAny(name, const ['memory'])) {
     return 'memory';
+  }
+  if (_containsAny(name, const ['alarm', 'reminder'])) {
+    return 'alarm';
+  }
+  if (_containsAny(name, const ['schedule', 'scheduled', 'timer'])) {
+    return 'schedule';
+  }
+  if (_containsAny(name, const ['calendar', 'calendar_event'])) {
+    return 'calendar';
   }
   if (canonicalItemType == 'mcpToolCall') {
     return 'mcp';

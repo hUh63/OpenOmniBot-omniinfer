@@ -6,13 +6,14 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.25"
+version = "0.3.28"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/omnimind-ai/OmniInfer"
 
 [workspace.dependencies]
 anyhow = "1.0"
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 axum = "0.8"
 base64 = "0.22"
 bytes = "1.0"

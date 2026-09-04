@@ -164,7 +164,8 @@ class ChatInputArea extends StatefulWidget {
   final FutureOr<void> Function()? onAgentRunSettingsOpened;
   final AgentPermissionMode? agentPermissionMode;
   final List<AgentPermissionMode> agentPermissionModes;
-  final ValueChanged<AgentPermissionMode>? onAgentPermissionModeChanged;
+  final FutureOr<void> Function(AgentPermissionMode)?
+  onAgentPermissionModeChanged;
   final bool useIndependentSendButton;
 
   const ChatInputArea({
@@ -489,7 +490,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _inputHeightReportScheduled = false;
       if (!mounted) return;
-      final renderBox = context.findRenderObject() as RenderBox?;
+      final renderBox = findActiveRenderObject(context) as RenderBox?;
       if (renderBox == null || !renderBox.hasSize) return;
       final height = renderBox.size.height;
       if ((height - _lastReportedInputHeight).abs() < 0.5) return;

@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ui/features/home/state/habitual_hand_controller.dart';
 import 'package:ui/features/home/widgets/conversation_slidable.dart';
 import 'package:ui/features/home/widgets/home_drawer.dart';
+import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
 import 'package:ui/l10n/app_language_mode.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
@@ -17,6 +20,7 @@ import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/models/habitual_hand.dart';
 import 'package:ui/services/scheduled_task_storage_service.dart';
 import 'package:ui/services/storage_service.dart';
+import 'package:ui/widgets/agent_brand_icon.dart';
 
 class _SvgTestAssetBundle extends CachingAssetBundle {
   static final Uint8List _svgBytes = Uint8List.fromList(
@@ -35,6 +39,21 @@ class _SvgTestAssetBundle extends CachingAssetBundle {
   @override
   Future<String> loadString(String key, {bool cache = true}) async {
     return utf8.decode(_svgBytes);
+  }
+
+  @override
+  Future<T> loadStructuredBinaryData<T>(
+    String key,
+    FutureOr<T> Function(ByteData data) parser,
+  ) {
+    // Image.asset uses the manifest to resolve the default Xiaowan avatar.
+    // Keep the test bundle's SVG stub for normal assets, but use Flutter's
+    // real manifest so the image provider does not try to decode SVG bytes as
+    // AssetManifest.bin.
+    if (key == 'AssetManifest.bin') {
+      return rootBundle.loadStructuredBinaryData(key, parser);
+    }
+    return super.loadStructuredBinaryData(key, parser);
   }
 }
 
@@ -111,7 +130,7 @@ void main() {
     await tester.tap(find.text('开始对话'));
     await tester.pumpAndSettle();
 
-    expect(selectedMode, ConversationMode.normal);
+    expect(selectedMode, ConversationMode.agent);
   });
 
   testWidgets('shows the restored trajectory footer shortcut', (tester) async {
@@ -133,6 +152,46 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byTooltip('轨迹'), findsOneWidget);
+  });
+
+  testWidgets('shows Kimi and DSH Web shortcuts when provided', (tester) async {
+    var kimiTaps = 0;
+    var deepSeekTaps = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: DefaultAssetBundle(
+          bundle: _SvgTestAssetBundle(),
+          child: _buildProviderScope(
+            child: Scaffold(
+              body: SizedBox(
+                width: 360,
+                height: 720,
+                child: HomeDrawer(
+                  embedded: true,
+                  closeOnNavigate: false,
+                  onLaunchKimiWeb: () => kimiTaps += 1,
+                  onLaunchDeepSeekWeb: () => deepSeekTaps += 1,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final kimi = find.byKey(const ValueKey('home-drawer-web-kimi-code-acp'));
+    final deepSeek = find.byKey(
+      const ValueKey('home-drawer-web-deepseek-harness-acp'),
+    );
+    expect(kimi, findsOneWidget);
+    expect(deepSeek, findsOneWidget);
+
+    await tester.tap(kimi);
+    await tester.tap(deepSeek);
+    expect(kimiTaps, 1);
+    expect(deepSeekTaps, 1);
   });
 
   testWidgets(
@@ -371,7 +430,7 @@ void main() {
         matching: find.byType(ConversationSlidable),
       ),
     );
-    expect(scheduledChildSlidable.actions, hasLength(2));
+    expect(scheduledChildSlidable.actions, hasLength(3));
   });
 
   testWidgets('unfocuses search field when tapping outside', (tester) async {
@@ -539,7 +598,8 @@ void main() {
 
     expect(find.text('Scheduled tasks'), findsOneWidget);
     expect(find.text('Pinned conversations'), findsOneWidget);
-    expect(find.text('OmniAi'), findsOneWidget);
+    // The default OmniAI/Xiaowan history has no redundant section header.
+    expect(find.text('OmniAi'), findsNothing);
     expect(find.text('Omnibot Guide'), findsNothing);
   });
 
@@ -617,9 +677,8 @@ void main() {
 
     final sectionHeaderLeft = tester.getTopLeft(find.text('定时任务')).dx;
 
-    // 顶层区块标题（定时任务/置顶会话/小万）左对齐；置顶条目与标题共用缩进。
+    // 顶层区块标题（定时任务/置顶会话）左对齐；置顶条目与标题共用缩进。
     expect(tester.getTopLeft(find.text('置顶会话')).dx, sectionHeaderLeft);
-    expect(tester.getTopLeft(find.text('小万')).dx, sectionHeaderLeft);
     expect(tester.getTopLeft(find.text('重点对话')).dx, sectionHeaderLeft);
 
     // 定时任务、置顶区块与历史记录在同一个滚动列表内，上滑时随列表一起
@@ -865,9 +924,16 @@ void main() {
       (widget) => widget is TextField && widget.controller?.text == '主会话',
     );
     expect(titleField, findsOneWidget);
+    final titleEditor = tester.widget<TextField>(titleField);
 
     await tester.enterText(titleField, '主会话改名');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    titleEditor.onSubmitted?.call('主会话改名');
+    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      for (var attempt = 0; attempt < 20 && renamedTitle == null; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+    });
     await tester.pumpAndSettle();
 
     expect(renamedTitle, '主会话改名');
@@ -1002,7 +1068,7 @@ void main() {
     );
     expect(rawState, contains('__home_drawer_scheduled__'));
     expect(rawState, contains('__home_drawer_pinned__'));
-    expect(rawState, contains('__home_drawer_scheduled_normal:1'));
+    expect(rawState, contains('__home_drawer_scheduled_agent:1'));
     expect(rawState, contains(dateKey));
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -1019,7 +1085,7 @@ void main() {
     expect(find.text('普通会话').hitTestable(), findsNothing);
   });
 
-  testWidgets('splits Agent, OmniAi and pure chat histories into sections', (
+  testWidgets('keeps default history flat and identifies each Agent Harness', (
     tester,
   ) async {
     // 相对时间标签依赖 LegacyTextLocalizer 的解析语言，固定为中文保证断言稳定。
@@ -1031,6 +1097,7 @@ void main() {
         'id': 11,
         'title': '修复登录问题',
         'mode': ConversationMode.agent.storageValue,
+        'agentId': 'codex-acp',
         'agentCwd': '/root/blog',
         'summary': null,
         'status': 0,
@@ -1043,6 +1110,7 @@ void main() {
         'id': 12,
         'title': '写周报脚本',
         'mode': ConversationMode.agent.storageValue,
+        'agentId': 'codex-acp',
         'agentCwd': '/root/blog/',
         'summary': null,
         'status': 0,
@@ -1055,6 +1123,7 @@ void main() {
         'id': 13,
         'title': '优化首页响应式',
         'mode': ConversationMode.agent.storageValue,
+        'agentId': 'codex-acp',
         'agentCwd': '/root/CoffeeMux',
         'summary': null,
         'status': 0,
@@ -1067,6 +1136,7 @@ void main() {
         'id': 14,
         'title': 'Agent 会话',
         'mode': ConversationMode.normal.storageValue,
+        'agentId': 'xiaowan-acp',
         'summary': null,
         'status': 0,
         'lastMessage': null,
@@ -1101,35 +1171,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // 三个模式区块并列展示。
-    expect(find.text('Agent'), findsOneWidget);
-    expect(find.text('小万'), findsOneWidget);
+    // Agent/Xiaowan histories share the default history timeline; no
+    // redundant Xiaowan section header is rendered.
+    expect(find.text('Agent'), findsNothing);
+    expect(find.text('小万'), findsNothing);
     expect(find.text('纯聊天'), findsOneWidget);
-    final agentSectionIcon = tester.widget<SvgPicture>(
-      find.byKey(
-        const ValueKey('home-drawer-section-icon-__home_drawer_agent__'),
-      ),
-    );
-    final omniAiSectionIcon = tester.widget<SvgPicture>(
-      find.byKey(
-        const ValueKey('home-drawer-section-icon-__home_drawer_omni_ai__'),
-      ),
-    );
-    expect(
-      agentSectionIcon.bytesLoader.toString(),
-      contains('assets/home/chat/agent.svg'),
-    );
-    expect(
-      omniAiSectionIcon.bytesLoader.toString(),
-      contains('assets/home/avatar.svg'),
-    );
 
-    // Agent 区块内按项目名分组，且项目按最近活跃排序。
-    expect(find.text('blog'), findsOneWidget);
-    expect(find.text('CoffeeMux'), findsOneWidget);
+    // 每条 Agent 会话直接显示具体 Harness，不再显示 Workspace 分组。
+    expect(find.text('blog'), findsNothing);
+    expect(find.text('CoffeeMux'), findsNothing);
     expect(
-      tester.getTopLeft(find.text('blog')).dy,
-      lessThan(tester.getTopLeft(find.text('CoffeeMux')).dy),
+      find.byWidgetPredicate(
+        (widget) => widget is AgentBrandIcon && widget.agentId == 'codex-acp',
+      ),
+      findsNWidgets(3),
     );
     expect(find.text('修复登录问题').hitTestable(), findsOneWidget);
     expect(find.text('写周报脚本').hitTestable(), findsOneWidget);
@@ -1137,35 +1192,103 @@ void main() {
     expect(find.text('Agent 会话').hitTestable(), findsOneWidget);
     expect(find.text('闲聊会话'), findsOneWidget);
 
-    // 日期分组下的会话标题不再缩进：与区块标题、日期分组行共用同一左缘。
-    expect(
-      tester.getTopLeft(find.text('Agent 会话')).dx,
-      tester.getTopLeft(find.text('小万')).dx,
-    );
-
-    // Agent 条目展示相对时间标签而非日期分组。
-    expect(find.text('1 周'), findsNWidgets(3));
-
-    // 折叠单个项目只隐藏该项目下的会话。
-    await tester.tap(find.text('blog'));
-    await tester.pumpAndSettle();
-    expect(find.text('修复登录问题').hitTestable(), findsNothing);
-    expect(find.text('写周报脚本').hitTestable(), findsNothing);
-    expect(find.text('优化首页响应式').hitTestable(), findsOneWidget);
-
-    // 折叠整个 Agent 区块后项目行一并隐藏。
-    await tester.tap(find.text('Agent'));
-    await tester.pumpAndSettle();
-    expect(find.text('blog').hitTestable(), findsNothing);
-    expect(find.text('CoffeeMux').hitTestable(), findsNothing);
-    expect(find.text('优化首页响应式').hitTestable(), findsNothing);
-
     // 折叠纯聊天区块只影响纯聊天历史。
     await tester.tap(find.text('纯聊天'));
     await tester.pumpAndSettle();
     expect(find.text('闲聊会话').hitTestable(), findsNothing);
     expect(find.text('Agent 会话').hitTestable(), findsOneWidget);
   });
+
+  testWidgets('marks an active Xiaowan conversation with a running dot', (
+    tester,
+  ) async {
+    final coordinator = ChatConversationRuntimeCoordinator.instance;
+    coordinator.resetForTest();
+    coordinator.ensureInitialized();
+    addTearDown(coordinator.resetForTest);
+    nativeConversations = <Map<String, Object?>>[
+      <String, Object?>{
+        'id': 60,
+        'title': '正在处理',
+        'mode': ConversationMode.agent.storageValue,
+        'summary': null,
+        'status': 0,
+        'lastMessage': null,
+        'messageCount': 0,
+        'createdAt': 1,
+        'updatedAt': 2,
+      },
+    ];
+    coordinator.beginAcpTurn(
+      taskId: 'running-xiaowan-task',
+      conversationId: 60,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: DefaultAssetBundle(
+          bundle: _SvgTestAssetBundle(),
+          child: _buildProviderScope(
+            child: const Scaffold(
+              body: SizedBox(width: 360, height: 720, child: HomeDrawer()),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('home-drawer-running-agent:60')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'marks a completed Xiaowan conversation with a completion circle',
+    (tester) async {
+      LegacyTextLocalizer.setResolvedLocale(const Locale('zh'));
+      addTearDown(LegacyTextLocalizer.clearResolvedLocale);
+      final coordinator = ChatConversationRuntimeCoordinator.instance;
+      coordinator.resetForTest();
+      coordinator.ensureInitialized();
+      addTearDown(coordinator.resetForTest);
+      nativeConversations = <Map<String, Object?>>[
+        <String, Object?>{
+          'id': 61,
+          'title': '已完成任务',
+          'mode': ConversationMode.agent.storageValue,
+          'summary': null,
+          'status': 1,
+          'lastMessage': '完成',
+          'messageCount': 2,
+          'createdAt': 1,
+          'updatedAt': 2,
+        },
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DefaultAssetBundle(
+            bundle: _SvgTestAssetBundle(),
+            child: _buildProviderScope(
+              child: const Scaffold(
+                body: SizedBox(width: 360, height: 720, child: HomeDrawer()),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('home-drawer-completed-agent:61')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('小万 · 已完成'), findsOneWidget);
+    },
+  );
 }
 
 Widget _buildProviderScope({required Widget child}) {

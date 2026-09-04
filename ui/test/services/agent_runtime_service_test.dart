@@ -13,16 +13,187 @@ void main() {
     messenger.setMockMethodCallHandler(channel, null);
   });
 
-  test('startTurn forwards codex permission payload', () async {
+  test('accepts the local ACP cancellation acknowledgement', () {
+    expect(
+      isAgentCancellationSuccessful(<String, dynamic>{'ok': true}),
+      isTrue,
+    );
+    expect(
+      isAgentCancellationSuccessful(<String, dynamic>{'cancelled': true}),
+      isTrue,
+    );
+    expect(
+      isAgentCancellationSuccessful(<String, dynamic>{'status': 'cancelled'}),
+      isTrue,
+    );
+    expect(
+      isAgentCancellationSuccessful(<String, dynamic>{'ok': false}),
+      isFalse,
+    );
+  });
+
+  test('initialize stays on the shared ACP boundary', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'protocolVersion': 1};
+    });
+
+    await AgentRuntimeService.initialize(agentId: 'xiaowan-acp');
+
+    expect(capturedCall?.method, 'initialize');
+    expect(capturedCall?.arguments, {'agentId': 'xiaowan-acp'});
+  });
+
+  test('launchAgentWeb uses the native Web surface boundary', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{
+        'ok': true,
+        'code': 'OPENED',
+        'packageId': 'kimi',
+      };
+    });
+
+    final result = await AgentRuntimeService.launchAgentWeb('kimi-code-acp');
+
+    expect(capturedCall?.method, 'agent/web/launch');
+    expect(capturedCall?.arguments, {'agentId': 'kimi-code-acp'});
+    expect(result['code'], 'OPENED');
+  });
+
+  test('launchAgentWeb forwards the selected thinking effort', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'ok': true, 'code': 'OPENED'};
+    });
+
+    await AgentRuntimeService.launchAgentWeb('kimi-code-acp', effort: 'high');
+
+    expect(capturedCall?.arguments, {
+      'agentId': 'kimi-code-acp',
+      'effort': 'high',
+    });
+  });
+
+  test('ensureSession reserves a session before a new prompt', () async {
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return <String, dynamic>{'sessionId': 'session-created'};
+    });
+
+    final sessionId = await AgentRuntimeService.ensureSession(
+      conversationId: 42,
+      model: 'model-1',
+      conversationMode: 'agent',
+    );
+
+    expect(sessionId, 'session-created');
+    expect(calls.map((call) => call.method), ['session/new']);
+    expect((calls.single.arguments as Map)['conversationId'], 42);
+    expect((calls.single.arguments as Map)['model'], 'model-1');
+  });
+
+  test(
+    'ensureSession reuses an existing official session without a call',
+    () async {
+      var callCount = 0;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        callCount += 1;
+        return <String, dynamic>{'sessionId': 'unexpected'};
+      });
+
+      final sessionId = await AgentRuntimeService.ensureSession(
+        sessionId: '  session-existing  ',
+        conversationId: 42,
+      );
+
+      expect(sessionId, 'session-existing');
+      expect(callCount, 0);
+    },
+  );
+
+  test('request cancellation is not encoded as session cancellation', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'ok': true, 'cancelled': true};
+    });
+
+    await AgentRuntimeService.cancelRequest(
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      agentId: 'xiaowan-acp',
+    );
+
+    expect(capturedCall?.method, '\$/cancel_request');
+    expect(capturedCall?.arguments, {
+      'requestId': 'request-1',
+      'sessionId': 'session-1',
+      'agentId': 'xiaowan-acp',
+    });
+  });
+
+  test('parses the live status bundled with an agent switch response', () {
+    final catalog = AcpAgentCatalog.fromMap(<String, dynamic>{
+      'selectedAgentId': 'claude-code',
+      'connected': true,
+      'ready': true,
+      'runtime': 'local',
+      'activeAgentId': 'claude-code',
+      'activeAgentName': 'Claude Code',
+      'agents': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'id': 'claude-code',
+          'name': 'Claude Code',
+          'command': 'claude-code-acp',
+          'enabled': true,
+        },
+      ],
+    });
+
+    expect(catalog.runtimeStatus?.connected, isTrue);
+    expect(catalog.runtimeStatus?.ready, isTrue);
+    expect(catalog.runtimeStatus?.activeAgentId, 'claude-code');
+  });
+
+  test(
+    'cancelPrompt forwards the OmniFlow run id when stopping a GUI task',
+    () async {
+      MethodCall? capturedCall;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        capturedCall = call;
+        return <String, dynamic>{'ok': true, 'cancelled': true};
+      });
+
+      await AgentRuntimeService.cancelPrompt(
+        sessionId: 'session-1',
+        promptId: 'turn-1',
+        runId: 'gui-run-1',
+      );
+
+      expect(capturedCall?.method, 'session/cancel');
+      expect(capturedCall?.arguments, <String, dynamic>{
+        'sessionId': 'session-1',
+        'promptId': 'turn-1',
+        'runId': 'gui-run-1',
+      });
+    },
+  );
+
+  test('promptSession forwards ACP permission payload', () async {
     MethodCall? capturedCall;
     messenger.setMockMethodCallHandler(channel, (call) async {
       capturedCall = call;
       return <String, dynamic>{'ok': true};
     });
 
-    await AgentRuntimeService.startTurn(
+    await AgentRuntimeService.promptSession(
       conversationId: 42,
-      threadId: 'thread-1',
+      sessionId: 'thread-1',
       text: 'hello',
       attachments: const <Map<String, dynamic>>[
         <String, dynamic>{
@@ -39,14 +210,17 @@ void main() {
       model: 'gpt-5-codex',
       effort: 'high',
       collaborationMode: 'plan',
+      terminalEnvironment: const <String, String>{
+        'API_ENDPOINT': 'https://example.test',
+      },
     );
 
-    expect(capturedCall?.method, 'turn/start');
+    expect(capturedCall?.method, 'session/prompt');
     final args = Map<String, dynamic>.from(
       (capturedCall?.arguments as Map).cast<String, dynamic>(),
     );
     expect(args['conversationId'], 42);
-    expect(args['threadId'], 'thread-1');
+    expect(args['sessionId'], 'thread-1');
     expect(args['text'], 'hello');
     expect(args['attachments'], const <Map<String, dynamic>>[
       <String, dynamic>{
@@ -65,6 +239,9 @@ void main() {
     expect(args['model'], 'gpt-5-codex');
     expect(args['effort'], 'high');
     expect(args['collaborationMode'], 'plan');
+    expect(args['terminalEnvironment'], const <String, String>{
+      'API_ENDPOINT': 'https://example.test',
+    });
   });
 
   test('startReview forwards codex review payload', () async {
@@ -100,6 +277,52 @@ void main() {
     expect(args['collaborationMode'], 'plan');
   });
 
+  test('session prompt forwards the turn idempotency key', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'sessionId': 'session-1', 'promptId': 'turn-1'};
+    });
+
+    await AgentRuntimeService.promptSession(
+      conversationId: 42,
+      requestId: 'prompt-1',
+      text: 'hello',
+    );
+
+    expect(capturedCall?.method, 'session/prompt');
+    expect((capturedCall?.arguments as Map)['requestId'], 'prompt-1');
+  });
+
+  test(
+    'pure chat remains canonical ACP without selecting a Harness agent',
+    () async {
+      MethodCall? capturedCall;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        capturedCall = call;
+        return <String, dynamic>{
+          'sessionId': 'xiaowan-chat-session',
+          'promptId': 'turn-1',
+        };
+      });
+
+      await AgentRuntimeService.promptSession(
+        conversationId: 42,
+        text: 'hello',
+        conversationMode: 'chat_only',
+        model: 'selected-provider-model',
+      );
+
+      expect(capturedCall?.method, 'session/prompt');
+      final args = Map<String, dynamic>.from(
+        (capturedCall?.arguments as Map).cast<String, dynamic>(),
+      );
+      expect(args['conversationMode'], 'chat_only');
+      expect(args['model'], 'selected-provider-model');
+      expect(args.containsKey('agentId'), isFalse);
+    },
+  );
+
   test('lists codex models, collaboration modes, and config', () async {
     final calls = <MethodCall>[];
     messenger.setMockMethodCallHandler(channel, (call) async {
@@ -110,16 +333,61 @@ void main() {
     await AgentRuntimeService.listModels();
     await AgentRuntimeService.listCollaborationModes();
     await AgentRuntimeService.readConfig();
-    await AgentRuntimeService.listLoadedThreads();
+    await AgentRuntimeService.listLoadedSessions();
 
     expect(calls.map((call) => call.method), [
       'model/list',
       'collaborationMode/list',
       'config/read',
-      'thread/loaded/list',
+      'session/list',
     ]);
     expect(calls.first.arguments, {'limit': 100});
   });
+
+  test('sets a Harness-owned ACP config option', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'ok': true};
+    });
+
+    await AgentRuntimeService.setConfigOption(
+      threadId: 'thread-1',
+      configId: 'mode',
+      value: 'agent-full-access',
+    );
+
+    expect(capturedCall?.method, 'session/set_config_option');
+    expect(capturedCall?.arguments, {
+      'threadId': 'thread-1',
+      'configId': 'mode',
+      'value': 'agent-full-access',
+    });
+  });
+
+  test(
+    'sets an ACP config option for the active Agent without conversation binding',
+    () async {
+      MethodCall? capturedCall;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        capturedCall = call;
+        return <String, dynamic>{'ok': true};
+      });
+
+      await AgentRuntimeService.setSessionConfigOption(
+        agentId: 'custom-agent',
+        configId: 'model',
+        value: 'provider-model',
+      );
+
+      expect(capturedCall?.method, 'session/set_config_option');
+      expect(capturedCall?.arguments, {
+        'agentId': 'custom-agent',
+        'configId': 'model',
+        'value': 'provider-model',
+      });
+    },
+  );
 
   test('ACP model extraction keeps config categories separate', () {
     final response = <String, dynamic>{
@@ -290,19 +558,102 @@ void main() {
     });
   });
 
-  test('readThread requests turns by default', () async {
+  test('elicitation responses preserve ACP content types', () async {
     MethodCall? capturedCall;
     messenger.setMockMethodCallHandler(channel, (call) async {
       capturedCall = call;
       return <String, dynamic>{'ok': true};
     });
 
-    await AgentRuntimeService.readThread(threadId: 'thread-1');
+    await AgentRuntimeService.respondToElicitation(
+      requestId: 'elicitation-1',
+      content: <String, dynamic>{'name': 'demo', 'count': 3, 'enabled': false},
+    );
 
-    expect(capturedCall?.method, 'thread/read');
+    expect(capturedCall?.method, 'respondToServerRequest');
     expect(capturedCall?.arguments, {
-      'threadId': 'thread-1',
-      'includeTurns': true,
+      'requestId': 'elicitation-1',
+      'response': {
+        'action': 'accept',
+        'content': {'name': 'demo', 'count': 3, 'enabled': false},
+      },
+    });
+  });
+
+  test('elicitation cancellation uses the ACP cancel action', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'ok': true};
+    });
+
+    await AgentRuntimeService.cancelElicitation(requestId: 'elicitation-1');
+
+    expect(capturedCall?.arguments, {
+      'requestId': 'elicitation-1',
+      'response': {'action': 'cancel'},
+    });
+  });
+
+  test('user input response carries its host routing identity', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'ok': true};
+    });
+
+    await AgentRuntimeService.respondToUserInput(
+      requestId: 'request-1',
+      questionId: 'answer',
+      answers: <String>['继续'],
+      sessionId: 'dsh-session-1',
+      agentId: 'deepseek-harness-acp',
+      conversationId: 42,
+    );
+
+    expect(capturedCall?.arguments, {
+      'requestId': 'request-1',
+      'agentId': 'deepseek-harness-acp',
+      'conversationId': 42,
+      'sessionId': 'dsh-session-1',
+      'response': {
+        'answers': {
+          'answer': {
+            'answers': <String>['继续'],
+          },
+        },
+      },
+    });
+  });
+
+  test('server response is not considered submitted without an ACP ACK', () {
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      return <String, dynamic>{};
+    });
+
+    expect(
+      AgentRuntimeService.respondToUserInput(
+        requestId: 'request-1',
+        questionId: 'answer',
+        answers: <String>['继续'],
+      ),
+      throwsStateError,
+    );
+  });
+
+  test('readSession requests history by default', () async {
+    MethodCall? capturedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      capturedCall = call;
+      return <String, dynamic>{'ok': true};
+    });
+
+    await AgentRuntimeService.readSession(sessionId: 'thread-1');
+
+    expect(capturedCall?.method, 'session/load');
+    expect(capturedCall?.arguments, {
+      'sessionId': 'thread-1',
+      'includeHistory': true,
     });
   });
 
@@ -441,6 +792,36 @@ void main() {
     expect(agent.managedAdapter, isTrue);
   });
 
+  test('deduplicates legacy Xiaowan Bot entries in the ACP catalog', () {
+    final catalog = AcpAgentCatalog.fromMap(<String, dynamic>{
+      'selectedAgentId': 'xiaowan-acp',
+      'agents': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'id': 'xiaowan-acp',
+          'name': '小万',
+          'command': 'omnibot-xiaowan-acp',
+          'builtIn': true,
+        },
+        <String, dynamic>{
+          'id': 'legacy-xiaowan-bot',
+          'name': '小万 Bot',
+          'command': 'legacy-xiaowan',
+        },
+        <String, dynamic>{
+          'id': 'codex-acp',
+          'name': 'Codex',
+          'command': 'codex-acp',
+        },
+      ],
+    });
+
+    expect(catalog.agents.map((agent) => agent.id), [
+      'xiaowan-acp',
+      'codex-acp',
+    ]);
+    expect(catalog.selectedAgent?.name, '小万');
+  });
+
   test('local Agent requests use the selected ACP model', () {
     final model = selectAgentRequestModel(
       status: const AgentRuntimeStatus(
@@ -450,11 +831,120 @@ void main() {
       ),
       overrideModel: null,
       activeModel: 'input-selected',
-      scopedModel: 'api-scoped',
       activeModelSourceMatches: true,
     );
 
     expect(model, 'input-selected');
+  });
+
+  test('shared Agent requests use the verified active Provider model', () {
+    final model = selectAgentRequestModel(
+      status: const AgentRuntimeStatus(
+        connected: true,
+        ready: true,
+        runtime: 'local',
+      ),
+      overrideModel: null,
+      activeModel: 'DeepSeek-V4-Pro',
+      activeModelSourceMatches: true,
+    );
+
+    expect(model, 'DeepSeek-V4-Pro');
+  });
+
+  test('Agent switch falls back to an existing persisted Provider binding', () {
+    final selection = resolveSharedAgentProviderSelection(
+      effectiveProviderProfileId: null,
+      effectiveModel: null,
+      boundProviderProfileId: 'debug-provider',
+      boundModel: 'GLM-5.1',
+    );
+
+    expect(selection, const <String, String>{
+      'providerProfileId': 'debug-provider',
+      'modelId': 'GLM-5.1',
+    });
+  });
+
+  test('Agent switch rejects a stale or unconfigured Provider binding', () {
+    const selection = <String, String>{
+      'providerProfileId': 'deleted-provider',
+      'modelId': 'GLM-5.1',
+    };
+
+    expect(
+      isSharedAgentProviderSelectionReady(
+        selection: selection,
+        configuredProviderIds: const <String>{'active-provider'},
+      ),
+      isFalse,
+    );
+    expect(
+      isSharedAgentProviderSelectionReady(
+        selection: selection,
+        configuredProviderIds: const <String>{'deleted-provider'},
+      ),
+      isTrue,
+    );
+  });
+
+  test('namespace tool incompatibility has an actionable error', () {
+    final message = formatAgentRuntimeErrorForUser(
+      '{"error":{"message":"tools[8].type: unknown variant namespace, '
+      'expected one of function, web_search_preview, code_interpreter, mcp"}}',
+    );
+
+    expect(message, contains('Responses Provider'));
+    expect(message, contains('MCP'));
+    expect(message, isNot(contains('{"error"')));
+  });
+
+  test('incomplete tool calls are mapped to an actionable user error', () {
+    final message = formatAgentRuntimeErrorForUser(
+      PlatformException(
+        code: 'AGENT_RUNTIME_CALL_FAILED',
+        message: 'tool_call[1] missing function.name',
+        details: <String, dynamic>{
+          'failureKind': 'provider_tool_call_incomplete',
+        },
+      ),
+    );
+
+    expect(message, contains('不完整的工具调用'));
+    expect(message, isNot(contains('missing function.name')));
+  });
+
+  test(
+    'provider stream idle timeout is mapped to an actionable user error',
+    () {
+      final message = formatAgentRuntimeErrorForUser(
+        PlatformException(
+          code: 'AGENT_RUNTIME_CALL_FAILED',
+          message: 'chat completion stream idle timeout after 90000ms',
+          details: <String, dynamic>{
+            'failureKind': 'provider_stream_idle_timeout',
+          },
+        ),
+      );
+
+      expect(message, contains('长时间没有返回新的流式更新'));
+      expect(message, isNot(contains('90000ms')));
+    },
+  );
+
+  test('Harness preparation contention is actionable and non-blocking', () {
+    final message = formatAgentRuntimeErrorForUser(
+      PlatformException(
+        code: 'AGENT_RUNTIME_CALL_FAILED',
+        message: 'Harness preparation is already running',
+        details: <String, dynamic>{
+          'failureKind': 'harness_preparation_in_progress',
+        },
+      ),
+    );
+
+    expect(message, contains('当前切换不会等待'));
+    expect(message, isNot(contains('Harness preparation is already running')));
   });
 
   test('local Agent requests do not read a separate Codex API model', () {
@@ -466,7 +956,6 @@ void main() {
       ),
       overrideModel: null,
       activeModel: null,
-      scopedModel: null,
       activeModelSourceMatches: true,
     );
 

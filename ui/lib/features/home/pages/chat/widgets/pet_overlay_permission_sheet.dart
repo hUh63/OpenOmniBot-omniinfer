@@ -5,17 +5,17 @@ import 'package:ui/l10n/legacy_text_localizer.dart';
 
 /// Pet overlay permission prompt backed by the shared glass permission card.
 class PetOverlayPermissionSheet extends StatelessWidget {
-  const PetOverlayPermissionSheet({super.key, required this.permissions});
+  const PetOverlayPermissionSheet({super.key, required this.permission});
 
-  final List<PermissionData> permissions;
+  final PermissionData permission;
 
   static Future<bool> show(
     BuildContext context, {
-    required List<PermissionData> permissions,
+    required PermissionData permission,
   }) {
     return PermissionPromptSheet.show(
       context,
-      permissions: permissions,
+      permissions: <PermissionData>[permission],
       actionLabel: LegacyTextLocalizer.localize('唤起宠物'),
       actionKey: const ValueKey('pet-overlay-permission-continue-button'),
     );
@@ -24,7 +24,7 @@ class PetOverlayPermissionSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return PermissionPromptSheet(
-      permissions: permissions,
+      permissions: <PermissionData>[permission],
       actionLabel: LegacyTextLocalizer.localize('唤起宠物'),
       actionKey: const ValueKey('pet-overlay-permission-continue-button'),
     );

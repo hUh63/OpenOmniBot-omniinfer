@@ -1,7 +1,7 @@
 package cn.com.omnimind.bot.ui.channel
 
 import android.content.Context
-import cn.com.omnimind.bot.localmodel.LocalModelFeature
+import cn.com.omnimind.bot.App
 import io.flutter.embedding.engine.FlutterEngine
 
 /**
@@ -33,7 +33,7 @@ class ChannelManager {
     private var pluginPlatformChannel: PluginPlatformChannel = PluginPlatformChannel()
     private var omniLinkPluginChannel: OmniLinkPluginChannel = OmniLinkPluginChannel()
     private var accountChannel: AccountChannel = AccountChannel()
-    private var imChannel: ImChannel = ImChannel()
+    private var voicePlaybackChannel: VoicePlaybackChannel = VoicePlaybackChannel()
     fun getUIRouterChannel(): UIRouterChannel {
         return uiRouterChannel
     }
@@ -65,8 +65,11 @@ class ChannelManager {
         pluginPlatformChannel.setChannel(flutterEngine)
         omniLinkPluginChannel.setChannel(flutterEngine)
         accountChannel.setChannel(flutterEngine)
-        imChannel.setChannel(flutterEngine)
-        LocalModelFeature.setChannel(flutterEngine)
+        // Flutter may configure the engine before Activity.onCreate reaches
+        // ChannelManager.onCreate.  Ensure the voice manager exists in either
+        // lifecycle order so the event channel is never silently unbound.
+        voicePlaybackChannel.onCreate(App.instance)
+        voicePlaybackChannel.setChannel(flutterEngine)
     }
 
     fun onCreate(context: Context) {
@@ -86,8 +89,7 @@ class ChannelManager {
         agentRuntimeChannel.onCreate(context)
         pluginPlatformChannel.onCreate(context)
         omniLinkPluginChannel.onCreate(context)
-        imChannel.onCreate(context)
-        LocalModelFeature.onChannelManagerCreate(context)
+        voicePlaybackChannel.onCreate(context)
     }
 
     fun clearChannel() {
@@ -113,8 +115,7 @@ class ChannelManager {
         pluginPlatformChannel.clear()
         omniLinkPluginChannel.clear()
         accountChannel.clear()
-        imChannel.clear()
-        LocalModelFeature.clearChannel()
+        voicePlaybackChannel.clear()
     }
 
 

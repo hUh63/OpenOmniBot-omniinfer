@@ -5,10 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_switch/flutter_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
-import 'package:ui/features/local_model/local_model_feature.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/mcp_server_service.dart';
-import 'package:ui/services/special_permission.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/services/workspace_memory_service.dart';
 import 'package:ui/theme/app_colors.dart';
@@ -295,15 +293,6 @@ class _SettingsPageState extends State<SettingsPage> {
               GoRouterManager.push('/home/scene_model_setting');
             },
           ),
-          if (localModelFeature.enabled)
-            _SettingItem(
-              icon: LucideIcons.cpu,
-              title: context.l10n.localModelsTitle,
-              subtitle: context.l10n.localModelsServiceControlDesc,
-              onTap: () {
-                GoRouterManager.push('/home/local_models?tab=service');
-              },
-            ),
           _SettingItem(
             icon: LucideIcons.database,
             title: context.l10n.settingsWorkspaceMemoryTitle,
@@ -335,14 +324,6 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: context.l10n.settingsAlpineSubtitle,
             onTap: () {
               GoRouterManager.push('/home/termux_setting');
-            },
-          ),
-          _SettingItem(
-            icon: LucideIcons.messageSquare,
-            title: 'IMessage',
-            subtitle: context.trLegacy('微信与 Telegram 消息渠道'),
-            onTap: () {
-              GoRouterManager.push('/home/imessage_setting');
             },
           ),
           _SettingItem(
@@ -398,23 +379,6 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: context.trLegacy('查看并配置悬浮窗、后台运行、Shizuku 等权限'),
             onTap: () {
               GoRouterManager.push('/home/authorize_setting');
-            },
-          ),
-          _SettingItem(
-            icon: LucideIcons.shield,
-            title: context.trLegacy('陪伴权限'),
-            subtitle: context.trLegacy('查看并配置陪伴功能权限'),
-            onTap: () async {
-              try {
-                final granted = await ensureInstalledAppsPermission();
-                if (granted == true) {
-                  GoRouterManager.push('/home/companion_setting');
-                }
-              } catch (e) {
-                debugPrint('Failed to request installed apps permission: $e');
-                if (!mounted) return;
-                showToast(context.trLegacy('获取已安装应用权限失败'));
-              }
             },
           ),
           _SettingItem(

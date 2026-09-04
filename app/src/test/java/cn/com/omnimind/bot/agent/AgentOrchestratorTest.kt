@@ -120,6 +120,45 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    fun repeatedFailedToolRoundsDoNotRunUnboundedByDefault() = runBlocking {
+        val llmClient = FakeLlmClient(
+            turns = List(20) { index ->
+                assistantTurn(
+                    toolCalls = listOf(
+                        toolCall(
+                            name = "file_read",
+                            arguments = "{\"path\":\"/workspace/missing.txt\"}",
+                            id = "call-file-read-$index"
+                        )
+                    )
+                )
+            }
+        )
+        val toolExecutor = FakeToolExecutor(
+            results = mapOf(
+                "file_read" to List(20) {
+                    ToolExecutionResult.Error("file_read", "文件不存在")
+                }
+            )
+        )
+        val callback = RecordingCallback()
+
+        val result = createOrchestrator(llmClient, toolExecutor).run(
+            AgentOrchestrator.Input(
+                callback = callback,
+                initialMessages = initialMessages("读取文件"),
+                executionEnv = FakeExecutionEnvironment("读取文件")
+            )
+        )
+
+        assertTrue(result is AgentResult.Error)
+        assertEquals(DEFAULT_AGENT_MAX_MODEL_ROUNDS, toolExecutor.executeCalls.size)
+        assertTrue(
+            callback.errors.last().contains("$DEFAULT_AGENT_MAX_MODEL_ROUNDS 轮模型调用上限")
+        )
+    }
+
+    @Test
     fun promptCacheKeyIsStableAcrossAgentModelRounds() = runBlocking {
         val llmClient = FakeLlmClient(
             turns = listOf(
@@ -598,6 +637,29 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    fun noneReasoningEffortDisablesThinkingOnTheWire() = runBlocking {
+        val llmClient = FakeLlmClient(
+            turns = listOf(assistantTurn(content = "你好"))
+        )
+
+        createOrchestrator(llmClient, FakeToolExecutor()).run(
+            AgentOrchestrator.Input(
+                callback = RecordingCallback(),
+                initialMessages = initialMessages("hello"),
+                executionEnv = FakeExecutionEnvironment(
+                    "hello",
+                    reasoningEffort = "none"
+                )
+            )
+        )
+
+        val request = llmClient.requests.single()
+        assertEquals(false, request.enableThinking)
+        assertEquals(null, request.reasoningEffort)
+        assertEquals("disabled", request.thinking?.type)
+    }
+
+    @Test
     fun longReasoningUpdatesAreNotTruncated() = runBlocking {
         val longReasoning = buildString {
             repeat(900) { index ->
@@ -935,6 +997,29 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    fun borrowedToolExecutorIsNotDisposedByChildOrchestrator() = runBlocking {
+        val toolExecutor = FakeToolExecutor()
+        val orchestrator = AgentOrchestrator(
+            llmClient = FakeLlmClient(listOf(assistantTurn(content = "子任务完成"))),
+            toolRegistry = FakeToolCatalog(),
+            toolRouter = toolExecutor,
+            eventAdapter = AgentEventAdapter(eventJson),
+            model = "test-model",
+            ownsToolRouter = false
+        )
+
+        orchestrator.run(
+            AgentOrchestrator.Input(
+                callback = RecordingCallback(),
+                initialMessages = initialMessages("执行子任务"),
+                executionEnv = FakeExecutionEnvironment("执行子任务")
+            )
+        )
+
+        assertEquals(0, toolExecutor.disposeCalls)
+    }
+
+    @Test
     fun exclusiveToolBackfillsRemainingToolCallIds() = runBlocking {
         val llmClient = FakeLlmClient(
             turns = listOf(
@@ -1134,7 +1219,7 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    fun `retries transient stream failures before succeeding`() = runBlocking {
+    fun `surfaces transient stream failure without replaying the logical turn`() = runBlocking {
         val llmClient = FakeLlmClient(
             turns = listOf(assistantTurn(content = "已在重连后成功完成。")),
             failures = listOf(
@@ -1158,15 +1243,47 @@ class AgentOrchestratorTest {
             )
         )
 
-        assertTrue(result is AgentResult.Success)
-        assertEquals(1, callback.retryingEvents.size)
-        assertEquals("已在重连后成功完成。", callback.finalChatMessages().last())
-        assertTrue(callback.errors.isEmpty())
-        assertFalse(callback.lastErrorRetryable)
+        assertTrue(result is AgentResult.Error)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue(callback.retryingEvents.isEmpty())
+        assertEquals("HTTP 503: upstream temporarily unavailable", callback.errors.single())
+        assertTrue(callback.lastErrorRetryable)
+        assertTrue(callback.finalChatMessages().isEmpty())
     }
 
     @Test
-    fun `retries transient http 500 before succeeding`() = runBlocking {
+    fun `does not replay a provider turn in the orchestrator after client retry policy`() = runBlocking {
+        val llmClient = FakeLlmClient(
+            turns = listOf(assistantTurn(content = "不应被第二次调用")),
+            failures = listOf(
+                AgentStreamRequestException(
+                    statusCode = 503,
+                    reason = "upstream temporarily unavailable",
+                    responseBody = null
+                )
+            )
+        )
+        val callback = RecordingCallback()
+
+        val result = createOrchestrator(
+            llmClient = llmClient,
+            toolExecutor = FakeToolExecutor()
+        ).run(
+            AgentOrchestrator.Input(
+                callback = callback,
+                initialMessages = initialMessages("不要重复执行"),
+                executionEnv = FakeExecutionEnvironment("不要重复执行")
+            )
+        )
+
+        assertTrue(result is AgentResult.Error)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue(callback.retryingEvents.isEmpty())
+        assertTrue(callback.finalChatMessages().isEmpty())
+    }
+
+    @Test
+    fun `surfaces transient http 500 without replaying the logical turn`() = runBlocking {
         val llmClient = FakeLlmClient(
             turns = listOf(assistantTurn(content = "服务恢复后已完成。")),
             failures = listOf(
@@ -1187,9 +1304,11 @@ class AgentOrchestratorTest {
             )
         )
 
-        assertTrue(result is AgentResult.Success)
-        assertEquals(2, llmClient.requests.size)
-        assertEquals(1, callback.retryingEvents.size)
+        assertTrue(result is AgentResult.Error)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue(callback.retryingEvents.isEmpty())
+        assertEquals("HTTP 500: internal server error", callback.errors.single())
+        assertTrue(callback.lastErrorRetryable)
     }
 
     @Test
@@ -1221,7 +1340,7 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    fun `surfaces retryable terminal error after exhausting transient retries`() = runBlocking {
+    fun `surfaces retryable transient error without orchestrator retries`() = runBlocking {
         val llmClient = FakeLlmClient(
             turns = emptyList(),
             failures = List(4) {
@@ -1246,7 +1365,8 @@ class AgentOrchestratorTest {
         )
 
         assertTrue(result is AgentResult.Error)
-        assertEquals(3, callback.retryingEvents.size)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue(callback.retryingEvents.isEmpty())
         assertEquals(
             "HTTP 503: upstream temporarily unavailable",
             callback.errors.single()
@@ -1285,6 +1405,55 @@ class AgentOrchestratorTest {
         assertEquals("invalid request payload", callback.errors.single())
         assertTrue(callback.lastErrorRetryable)
         assertTrue(callback.finalChatMessages().isEmpty())
+    }
+
+    @Test
+    fun `surfaces a provider stream failure without retrying`() = runBlocking {
+        val llmClient = FakeLlmClient(
+            turns = emptyList(),
+            failures = listOf(
+                IllegalStateException(
+                    "provider stream failed"
+                )
+            )
+        )
+        val callback = RecordingCallback()
+
+        val result = createOrchestrator(llmClient, FakeToolExecutor()).run(
+            AgentOrchestrator.Input(
+                callback = callback,
+                initialMessages = initialMessages("hello"),
+                executionEnv = FakeExecutionEnvironment("hello")
+            )
+        )
+
+        assertTrue(result is AgentResult.Error)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue(callback.retryingEvents.isEmpty())
+        assertEquals("provider stream failed", callback.errors.single())
+    }
+
+    @Test
+    fun `does not expose an incomplete tool call parser error to the user`() = runBlocking {
+        val llmClient = FakeLlmClient(
+            turns = emptyList(),
+            failures = listOf(AgentIncompleteToolCallException(toolCallIndex = 1))
+        )
+        val callback = RecordingCallback()
+
+        val result = createOrchestrator(llmClient, FakeToolExecutor()).run(
+            AgentOrchestrator.Input(
+                callback = callback,
+                initialMessages = initialMessages("hello"),
+                executionEnv = FakeExecutionEnvironment("hello")
+            )
+        )
+
+        assertTrue(result is AgentResult.Error)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue(callback.retryingEvents.isEmpty())
+        assertTrue(callback.errors.single().contains("Provider"))
+        assertFalse(callback.errors.single().contains("missing function.name"))
     }
 
     @Test
@@ -1596,6 +1765,7 @@ class AgentOrchestratorTest {
     ) : AgentToolExecutor {
         private val queuedResults = results.mapValues { (_, value) -> ArrayDeque(value) }
         val executeCalls = mutableListOf<String>()
+        var disposeCalls: Int = 0
 
         override suspend fun execute(
             toolCall: AssistantToolCall,
@@ -1612,6 +1782,10 @@ class AgentOrchestratorTest {
             } else {
                 ToolExecutionResult.Error(toolCall.function.name, "missing fake result")
             }
+        }
+
+        override suspend fun dispose() {
+            disposeCalls += 1
         }
     }
 

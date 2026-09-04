@@ -29,6 +29,7 @@ pub(super) fn load_remembered_model(
     let request = model_load::ModelLoadRequest {
         model: model.model.clone(),
         mmproj: model.mmproj.clone(),
+        no_mmproj: model.no_mmproj,
         ctx_size: model.ctx_size,
         backend_port: None,
         resource_budget_bytes: None,
@@ -468,10 +469,12 @@ pub(super) fn evidence_label(evidence: Option<String>, confidence: Option<String
 
 pub(super) fn load_model_interactive(config: &config::AppConfig, model: &str) -> Result<String> {
     println!();
+    print_section("Load model", "Starting the selected runtime");
     print_kv("Model", model);
     let request = model_load::ModelLoadRequest {
         model: model.to_string(),
         mmproj: None,
+        no_mmproj: false,
         ctx_size: None,
         backend_port: None,
         resource_budget_bytes: None,

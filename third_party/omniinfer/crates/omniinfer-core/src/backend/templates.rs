@@ -53,19 +53,16 @@ const LINUX_TEMPLATES: &[BackendTemplate] = &[
         &["chat", "vision", "stream", "cpu", "linux"],
         "OMNIINFER_LLAMA_CPP_LINUX",
     ),
-    BackendTemplate {
-        default_ngl: Some("999"),
-        ..template(
-            "llama.cpp-linux-cuda",
-            "llama.cpp Linux CUDA",
-            "llama.cpp",
-            "llama.cpp-linux-cuda",
-            Some("llama-server"),
-            "llama.cpp Linux CUDA backend managed by OmniInfer",
-            &["chat", "vision", "stream", "gpu", "cuda", "linux"],
-            "OMNIINFER_LLAMA_CPP_LINUX_CUDA",
-        )
-    },
+    template(
+        "llama.cpp-linux-cuda",
+        "llama.cpp Linux CUDA",
+        "llama.cpp",
+        "llama.cpp-linux-cuda",
+        Some("llama-server"),
+        "llama.cpp Linux CUDA backend managed by OmniInfer",
+        &["chat", "vision", "stream", "gpu", "cuda", "linux"],
+        "OMNIINFER_LLAMA_CPP_LINUX_CUDA",
+    ),
     BackendTemplate {
         default_ngl: Some("999"),
         fallback_runtime_dir_names: &["llama.cpp-linux-ROCm"],
@@ -91,6 +88,31 @@ const LINUX_TEMPLATES: &[BackendTemplate] = &[
             "llama.cpp Linux Vulkan backend managed by OmniInfer",
             &["chat", "vision", "stream", "gpu", "vulkan", "linux"],
             "OMNIINFER_LLAMA_CPP_LINUX_VULKAN",
+        )
+    },
+    BackendTemplate {
+        model_artifact: "diffusion-model",
+        supports_mmproj: false,
+        supports_ctx_size: false,
+        external_server_protocol: Some("stable-diffusion.cpp-server"),
+        log_file_name: "stable-diffusion-server.log",
+        ..template(
+            "stable-diffusion.cpp-linux-vulkan",
+            "stable-diffusion.cpp Linux Vulkan",
+            "stable-diffusion.cpp",
+            "stable-diffusion.cpp-linux-vulkan",
+            Some("sd-server"),
+            "stable-diffusion.cpp image/video generation server managed by OmniInfer on Linux Vulkan",
+            &[
+                "image-generation",
+                "video-generation",
+                "native-audio",
+                "gpu",
+                "vulkan",
+                "linux",
+                "async-jobs",
+            ],
+            "OMNIINFER_STABLE_DIFFUSION_CPP_LINUX_VULKAN",
         )
     },
     template(
@@ -199,6 +221,33 @@ const LINUX_TEMPLATES: &[BackendTemplate] = &[
         )
     },
     BackendTemplate {
+        model_artifact: "reference",
+        supports_mmproj: false,
+        external_server_protocol: Some("freetoken-openai-server"),
+        log_file_name: "freetoken-server.log",
+        ..template(
+            "freetoken-linux-cuda",
+            "FreeToken Linux CUDA",
+            "freetoken",
+            "freetoken-linux-cuda",
+            Some("ft"),
+            "FreeToken edge-native MoE server managed by OmniInfer on Linux CUDA",
+            &[
+                "chat",
+                "stream",
+                "gpu",
+                "cuda",
+                "cuda13",
+                "linux",
+                "x64",
+                "openai-compatible",
+                "anthropic-compatible",
+                "moe",
+            ],
+            "OMNIINFER_FREETOKEN_LINUX_CUDA",
+        )
+    },
+    BackendTemplate {
         model_artifact: "vla-artifact",
         supports_ctx_size: false,
         external_server_protocol: Some("vla.cpp-zmq-server"),
@@ -247,19 +296,16 @@ const WINDOWS_TEMPLATES: &[BackendTemplate] = &[
         &["chat", "vision", "stream", "cpu"],
         "OMNIINFER_LLAMA_CPP_CPU",
     ),
-    BackendTemplate {
-        default_ngl: Some("999"),
-        ..template(
-            "llama.cpp-cuda",
-            "llama.cpp CUDA",
-            "llama.cpp",
-            "llama.cpp-cuda",
-            Some("llama-server.exe"),
-            "llama.cpp CUDA backend managed by OmniInfer",
-            &["chat", "vision", "stream", "gpu", "cuda"],
-            "OMNIINFER_LLAMA_CPP_CUDA",
-        )
-    },
+    template(
+        "llama.cpp-cuda",
+        "llama.cpp CUDA",
+        "llama.cpp",
+        "llama.cpp-cuda",
+        Some("llama-server.exe"),
+        "llama.cpp CUDA backend managed by OmniInfer",
+        &["chat", "vision", "stream", "gpu", "cuda"],
+        "OMNIINFER_LLAMA_CPP_CUDA",
+    ),
     BackendTemplate {
         default_ngl: Some("999"),
         ..template(
@@ -271,6 +317,31 @@ const WINDOWS_TEMPLATES: &[BackendTemplate] = &[
             "llama.cpp Vulkan backend managed by OmniInfer",
             &["chat", "vision", "stream", "gpu", "vulkan"],
             "OMNIINFER_LLAMA_CPP_VULKAN",
+        )
+    },
+    BackendTemplate {
+        model_artifact: "diffusion-model",
+        supports_mmproj: false,
+        supports_ctx_size: false,
+        external_server_protocol: Some("stable-diffusion.cpp-server"),
+        log_file_name: "stable-diffusion-server.log",
+        ..template(
+            "stable-diffusion.cpp-vulkan",
+            "stable-diffusion.cpp Vulkan",
+            "stable-diffusion.cpp",
+            "stable-diffusion.cpp-vulkan",
+            Some("sd-server.exe"),
+            "stable-diffusion.cpp image/video generation server managed by OmniInfer on Windows Vulkan",
+            &[
+                "image-generation",
+                "video-generation",
+                "native-audio",
+                "gpu",
+                "vulkan",
+                "windows",
+                "async-jobs",
+            ],
+            "OMNIINFER_STABLE_DIFFUSION_CPP_VULKAN",
         )
     },
     template(

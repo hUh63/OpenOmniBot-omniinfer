@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::detection::{embedded_module_exists, is_hardware_compatible};
 #[cfg(test)]
-use super::detection::{gpu_backend_ids, output_mentions_amd_gpu};
+use super::detection::{gpu_backend_ids, output_mentions_amd_gpu, parse_nvidia_driver_branch};
 use super::templates::backend_templates;
 use crate::{config, local_state, paths};
 
@@ -251,11 +251,13 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "mlx-mac" => 0,
         "llama.cpp-cuda" => 0,
         "llama.cpp-vulkan" => 0,
+        "stable-diffusion.cpp-vulkan" => 5,
         "llama.cpp-sycl" => 0,
         "llama.cpp-hip" => 0,
         "llama.cpp-linux-cuda" => 0,
         "llama.cpp-linux-rocm" => 0,
         "llama.cpp-linux-vulkan" => 0,
+        "stable-diffusion.cpp-linux-vulkan" => 5,
         "omniinfer-native-linux" => 0,
         "llama.cpp-linux-openvino" => 0,
         "llama.cpp-linux" => 1,
@@ -263,6 +265,7 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "vla.cpp-linux-cuda" => 1,
         "vla.cpp-linux" => 2,
         "vllm-linux-cuda" => 2,
+        "freetoken-linux-cuda" => 3,
         "vllm-wsl2-cuda" => 2,
         "vllm-wsl2-rocm" => 2,
         "llama.cpp-cpu" => 1,
@@ -395,13 +398,13 @@ fn backend_server_args(template: &BackendTemplate, override_value: &Value) -> Ve
             .iter()
             .map(|value| value.to_string()),
     );
-    if let Some(default_ngl) = template.default_ngl {
-        let ngl = env_value(&format!("{}_NGL", template.env_prefix))
-            .or_else(|| override_string(override_value, "ngl"))
-            .unwrap_or_else(|| default_ngl.to_string());
-        if !ngl.trim().is_empty() {
-            args.extend(["-ngl".to_string(), ngl]);
-        }
+    let ngl = env_value(&format!("{}_NGL", template.env_prefix))
+        .or_else(|| override_string(override_value, "ngl"))
+        .or_else(|| template.default_ngl.map(str::to_string));
+    if let Some(ngl) = ngl
+        && !ngl.trim().is_empty()
+    {
+        args.extend(["-ngl".to_string(), ngl]);
     }
     push_optional_int_arg(
         &mut args,

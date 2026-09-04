@@ -11,11 +11,11 @@ import cn.com.omnimind.baselib.llm.ChatCompletionTool
 import cn.com.omnimind.baselib.llm.contentText
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.tool.AgentToolConcurrencyPolicy
+import cn.com.omnimind.bot.agent.tool.handlers.ToolSearchHandler
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -91,6 +91,13 @@ internal fun isLengthStopAtContextCapacity(
     return prompt.toLong() * 100L >= capacity.toLong() * 99L
 }
 
+/**
+ * Backstop for a model that keeps emitting tool calls without reaching a
+ * user-visible terminal answer. Callers can still choose a smaller budget for
+ * constrained flows, but a normal Agent turn must never be unbounded.
+ */
+internal const val DEFAULT_AGENT_MAX_MODEL_ROUNDS = 16
+
 class AgentOrchestrator(
     private val llmClient: AgentLlmClient,
     private val toolRegistry: AgentToolCatalog,
@@ -98,17 +105,17 @@ class AgentOrchestrator(
     private val eventAdapter: AgentEventAdapter,
     private val model: String,
     private val toolImageContinuationPolicy: AgentToolImageContinuationPolicy =
-        AgentToolImageContinuationPolicy.DEFAULT
+        AgentToolImageContinuationPolicy.DEFAULT,
+    /**
+     * A child orchestrator may borrow a parent's router. Only the owner may
+     * release the handlers and their process/session resources.
+     */
+    private val ownsToolRouter: Boolean = true
 ) {
     private data class RetryDecision(
         val retryable: Boolean,
         val reason: String
     )
-
-    private class ExhaustedRetryableTurnFailure(
-        val errorMessage: String,
-        cause: Throwable
-    ) : RuntimeException(errorMessage, cause)
 
     private class TerminalTurnRequestFailure(
         val errorMessage: String,
@@ -146,7 +153,7 @@ class AgentOrchestrator(
         val conversationId: Long? = null,
         val promptCacheKey: String? = null,
         val contextCompactor: AgentContextCompactionController? = null,
-        val maxModelRounds: Int? = null,
+        val maxModelRounds: Int = DEFAULT_AGENT_MAX_MODEL_ROUNDS,
         val maxCompletionTokens: Int = 16384
     )
 
@@ -159,8 +166,6 @@ class AgentOrchestrator(
     private val tag = "AgentOrchestrator"
     private val maxLengthContinuationRounds = 3
     private val maxMissingToolCallRecoveryRounds = 1
-    private val maxTurnRequestRetries = 3
-    private val turnRetryDelaysMs = listOf(500L, 1500L, 3000L)
 
     private data class TurnUsage(
         val promptTokens: Int? = null,
@@ -240,8 +245,16 @@ class AgentOrchestrator(
         val memory: AgentChatMemory = MutableListChatMemory(input.initialMessages)
         val primaryUserGoal = resolvePrimaryUserGoal(input)
         val completionPolicies = resolveSkillCompletionPolicies(input.executionEnv.resolvedSkills)
-        val availableToolNames = toolRegistry.toolsForModel
-            .mapTo(linkedSetOf()) { it.function.name }
+        // Keep this as an explicit loop instead of the inline `mapTo` call.
+        // This code runs inside the ACP request coroutine and can be resumed
+        // while a counterpart sends $/cancelRequest.  The generated inline
+        // collection bridge is needlessly fragile on Android/R8 in that
+        // cancellation path; the mutable set is also clearer about the
+        // de-duplication contract used by tool-choice recovery.
+        val availableToolNames = linkedSetOf<String>()
+        for (tool in toolRegistry.toolsForModel) {
+            availableToolNames += tool.function.name
+        }
         val completionProgress = mutableMapOf<String, Int>()
         val completionRecoveryRounds = mutableMapOf<String, Int>()
         val executedTools = mutableListOf<ToolExecutionResult>()
@@ -264,8 +277,8 @@ class AgentOrchestrator(
 
         try {
             roundLoop@ while (true) {
-                val maxModelRounds = input.maxModelRounds?.coerceAtLeast(1)
-                if (maxModelRounds != null && completedModelRounds >= maxModelRounds) {
+                val maxModelRounds = input.maxModelRounds.coerceAtLeast(1)
+                if (completedModelRounds >= maxModelRounds) {
                     val message = t(
                         "Agent 已达到 $maxModelRounds 轮模型调用上限。",
                         "Agent reached the $maxModelRounds-round model-call limit."
@@ -294,9 +307,21 @@ class AgentOrchestrator(
                     messages = requestMessages,
                     tools = toolRegistry.toolsForModel
                 )
-                val disableThinking = input.executionEnv.reasoningEffort == "no"
+                // ACP/Xiaowan uses the shared vocabulary where `none` is the
+                // normal no-thinking value.  Treat all no-thinking aliases as
+                // an explicit wire-level disable; checking only `no` leaves
+                // GLM-style providers free to enable their default reasoning
+                // path, which can delay the first token for a simple greeting.
+                val normalizedReasoningEffort =
+                    input.executionEnv.reasoningEffort?.trim()?.lowercase()
+                val disableThinking = normalizedReasoningEffort in setOf(
+                    "no",
+                    "none",
+                    "off",
+                    "disabled",
+                )
                 val turn = try {
-                    streamTurnWithRetry(
+                    streamTurnWithTransportPolicy(
                         callback = callback,
                         request = ChatCompletionRequest(
                             messages = requestMessages,
@@ -306,6 +331,11 @@ class AgentOrchestrator(
                             streamOptions = ChatCompletionStreamOptions(includeUsage = true),
                             enableThinking = if (disableThinking) false else null,
                             reasoningEffort = if (disableThinking) null else input.executionEnv.reasoningEffort,
+                            thinking = if (disableThinking) {
+                                cn.com.omnimind.baselib.llm.ChatCompletionThinking(type = "disabled")
+                            } else {
+                                null
+                            },
                             promptCacheKey = input.promptCacheKey,
                             tools = toolRegistry.toolsForModel,
                             toolChoice = toolChoiceForRound,
@@ -313,11 +343,6 @@ class AgentOrchestrator(
                         ),
                         assistantContentPrefix = assistantContentPrefix
                     )
-                } catch (e: ExhaustedRetryableTurnFailure) {
-                    callback.onError(e.errorMessage, true)
-                    terminalError = AgentResult.Error(e.errorMessage, e)
-                    terminated = true
-                    break@roundLoop
                 } catch (e: ContextOverflowTurnFailure) {
                     val compacted = if (contextOverflowRecoveryRounds < 1) {
                         input.contextCompactor?.compactForOverflow(
@@ -445,6 +470,16 @@ class AgentOrchestrator(
                 if (toolCalls.isNotEmpty() && isLengthFinishReason(lastFinishReason)) {
                     val reason = buildTruncatedToolCallMessage()
                     toolCalls.forEach { toolCall ->
+                        // Even a rejected/truncated call must follow ACP's
+                        // start -> terminal-update lifecycle. The bridge
+                        // deliberately drops terminal updates for unknown
+                        // ids, so do not emit a completion without its start.
+                        callback.onToolCallStart(
+                            toolCall.id,
+                            toolCall.function.name,
+                            JsonObject(emptyMap()),
+                            toolRegistry.runtimeDescriptor(toolCall.function.name).toolType,
+                        )
                         val result = ToolExecutionResult.Error(
                             toolName = toolCall.function.name,
                             message = reason
@@ -591,6 +626,50 @@ class AgentOrchestrator(
                 // (matching pre-refactor semantics: write the error tool message,
                 // skip remaining calls, and advance to the next LLM round).
                 parsePhase@ for (toolCall in toolCalls) {
+                    if (
+                        toolRegistry.usesProgressiveDiscovery &&
+                        toolRegistry.toolsForModel.none { it.function.name == toolCall.function.name }
+                    ) {
+                        val result = ToolExecutionResult.Error(
+                            toolCall.function.name,
+                            t(
+                                "工具 ${toolCall.function.name} 尚未加载，请先调用 tools_search 查找并加载它。",
+                                "Tool ${toolCall.function.name} is not loaded yet. Call tools_search first to discover it."
+                            )
+                        )
+                        val descriptor = toolRegistry.runtimeDescriptor(toolCall.function.name)
+                        descriptorMap[toolCall.id] = descriptor
+                        executedTools.add(result)
+                        callback.onToolCallStart(
+                            toolCall.id,
+                            toolCall.function.name,
+                            JsonObject(emptyMap()),
+                            descriptor.toolType,
+                        )
+                        callback.onToolCallComplete(
+                            toolCall.id,
+                            toolCall.function.name,
+                            result
+                        )
+                        appendToolResultMessage(
+                            memory = memory,
+                            env = input.executionEnv,
+                            callback = callback,
+                            assistantMessage = assistantMessageForMemory,
+                            toolCall = toolCall,
+                            descriptor = descriptor,
+                            result = result
+                        )
+                        writtenToolCallIds += toolCall.id
+                        hasUserFacingOutput =
+                            hasUserFacingOutput || eventAdapter.hasUserVisibleOutput(result)
+                        advanceToNextRound = true
+                        pendingToolCallBackfillReason = t(
+                            "工具尚未加载，当前 assistant 消息中的剩余 tool_call 未执行。",
+                            "The tool was not loaded, so the remaining tool calls in this assistant message were not executed."
+                        )
+                        break@parsePhase
+                    }
                     val descriptor = toolRegistry.runtimeDescriptor(toolCall.function.name)
                     descriptorMap[toolCall.id] = descriptor
                     val parsedArgs: JsonObject = try {
@@ -609,6 +688,12 @@ class AgentOrchestrator(
                             failureStage = "argument_parse"
                         )
                         executedTools.add(result)
+                        callback.onToolCallStart(
+                            toolCall.id,
+                            toolCall.function.name,
+                            JsonObject(emptyMap()),
+                            descriptor.toolType,
+                        )
                         callback.onToolCallComplete(
                             toolCall.id,
                             toolCall.function.name,
@@ -651,6 +736,12 @@ class AgentOrchestrator(
                             failureStage = "argument_validation"
                         )
                         executedTools.add(result)
+                        callback.onToolCallStart(
+                            toolCall.id,
+                            toolCall.function.name,
+                            parsedArgs,
+                            descriptor.toolType,
+                        )
                         callback.onToolCallComplete(
                             toolCall.id,
                             toolCall.function.name,
@@ -752,6 +843,7 @@ class AgentOrchestrator(
                             val desc = descriptorMap.getValue(call.id)
                             val args = parsedArgsMap.getValue(call.id)
                             executedTools.add(result)
+                            activateDiscoveredTools(call.function.name, result)
                             recordSkillCompletionToolAttempt(
                                 policies = completionPolicies,
                                 completionProgress = completionProgress,
@@ -815,7 +907,7 @@ class AgentOrchestrator(
                             if (
                                 !terminated &&
                                 !advanceToNextRound &&
-                                isExclusiveTurnBoundaryTool(call.function.name)
+                                AgentToolConcurrencyPolicy.isTurnBoundary(call.function.name)
                             ) {
                                 advanceToNextRound = true
                                 breakBatchLoopAfterPost = true
@@ -858,10 +950,25 @@ class AgentOrchestrator(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            callback.onError("Agent execution failed: ${e.message}")
-            return AgentResult.Error("Agent execution failed", e)
+            // Keep the same retry policy for failures that escape the
+            // streaming-specific branches.  In particular, transient tool
+            // router/transport exceptions must expose the manual Retry action
+            // instead of becoming an unrecoverable generic error.  The
+            // classifier still rejects provider limits and malformed tool
+            // calls, so a retry cannot blindly repeat a side-effecting tool.
+            val decision = classifyRetryableTurnFailure(e)
+            val message = decision.reason.ifBlank {
+                t(
+                    "Agent 执行失败，请重试。",
+                    "Agent execution failed. Please retry."
+                )
+            }
+            callback.onError(message, decision.retryable)
+            return AgentResult.Error(message, e)
         } finally {
-            runCatching { toolRouter.dispose() }
+            if (ownsToolRouter) {
+                runCatching { toolRouter.dispose() }
+            }
         }
 
         terminalError?.let { return it }
@@ -909,73 +1016,53 @@ class AgentOrchestrator(
         return finalResult
     }
 
-    private suspend fun streamTurnWithRetry(
+    private suspend fun streamTurnWithTransportPolicy(
         callback: AgentCallback,
         request: ChatCompletionRequest,
         assistantContentPrefix: String
     ): ChatCompletionTurn {
-        var retryCount = 0
-        while (true) {
-            try {
-                return llmClient.streamTurn(
-                    request = request,
-                    onReasoningUpdate = { reasoning ->
-                        if (reasoning.isNotBlank()) {
-                            callback.onThinkingUpdate(normalizeThinkingText(reasoning))
-                        }
-                    },
-                    onContentUpdate = { content ->
-                        if (content.isNotBlank()) {
-                            callback.onChatMessage(
-                                combineContinuationContent(
-                                    prefix = assistantContentPrefix,
-                                    content = content
-                                ),
-                                false
-                            )
-                        }
+        try {
+            // AgentLlmClient is the sole owner of transport retries. Retrying
+            // this method would replay the complete logical round, including
+            // streamed reasoning and tool intent, and can produce duplicate
+            // thoughts/cards. A failed turn is surfaced to the UI instead.
+            return llmClient.streamTurn(
+                request = request,
+                onReasoningUpdate = { reasoning ->
+                    if (reasoning.isNotBlank()) {
+                        callback.onThinkingUpdate(normalizeThinkingText(reasoning))
                     }
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (isContextOverflowTurnFailure(e)) {
-                    val requestError = e as AgentStreamRequestException
-                    throw ContextOverflowTurnFailure(
-                        errorMessage = formatTurnFailureReason(
-                            requestError.statusCode,
-                            requestError.reason
-                        ),
-                        cause = e
-                    )
-                }
-                val decision = classifyRetryableTurnFailure(e)
-                val canRetry = decision.retryable && retryCount < maxTurnRequestRetries
-                if (!canRetry) {
-                    if (decision.retryable) {
-                        throw ExhaustedRetryableTurnFailure(
-                            errorMessage = decision.reason,
-                            cause = e
+                },
+                onContentUpdate = { content ->
+                    if (content.isNotBlank()) {
+                        callback.onChatMessage(
+                            combineContinuationContent(
+                                prefix = assistantContentPrefix,
+                                content = content
+                            ),
+                            false
                         )
                     }
-                    throw TerminalTurnRequestFailure(
-                        errorMessage = decision.reason,
-                        cause = e
-                    )
                 }
-
-                retryCount += 1
-                val retryDelayMs = turnRetryDelaysMs
-                    .getOrElse(retryCount - 1) { turnRetryDelaysMs.last() }
-                callback.onRetrying(
-                    retryCount = retryCount,
-                    maxRetries = maxTurnRequestRetries,
-                    retryDelayMs = retryDelayMs,
-                    message = buildRetryingStatusMessage(retryCount, maxTurnRequestRetries),
-                    retryReason = decision.reason
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (isContextOverflowTurnFailure(e)) {
+                val requestError = e as AgentStreamRequestException
+                throw ContextOverflowTurnFailure(
+                    errorMessage = formatTurnFailureReason(
+                        requestError.statusCode,
+                        requestError.reason
+                    ),
+                    cause = e
                 )
-                delay(retryDelayMs)
             }
+            val decision = classifyRetryableTurnFailure(e)
+            throw TerminalTurnRequestFailure(
+                errorMessage = decision.reason,
+                cause = e
+            )
         }
     }
 
@@ -993,7 +1080,8 @@ class AgentOrchestrator(
         callback.onToolCallStart(
             toolCall.id,
             toolCall.function.name,
-            parsedArgs
+            parsedArgs,
+            descriptor.toolType,
         )
         return try {
             coroutineScope {
@@ -1021,6 +1109,29 @@ class AgentOrchestrator(
             }
         } finally {
             toolHandle.complete()
+        }
+    }
+
+    private fun activateDiscoveredTools(
+        toolName: String,
+        result: ToolExecutionResult,
+    ) {
+        if (toolName != ToolSearchHandler.NAME) return
+        val rawResult = (result as? ToolExecutionResult.ContextResult)?.rawResultJson
+            ?: return
+        val names = runCatching {
+            val payload = json.parseToJsonElement(rawResult) as? JsonObject
+            val tools = payload?.get("tools") as? JsonArray
+            tools.orEmpty().mapNotNull { item ->
+                (item as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+            }.toSet()
+        }.getOrDefault(emptySet())
+        if (names.isNotEmpty()) {
+            toolRegistry.exposeToolNames(names)
+            logInfo(
+                tag,
+                "tool_discovery activated=${names.size} visible=${toolRegistry.toolsForModel.size}"
+            )
         }
     }
 
@@ -1130,6 +1241,15 @@ class AgentOrchestrator(
                 toolName = toolCall.function.name,
                 message = buildSyntheticToolSkipMessage(reason)
             )
+            val displayArguments = runCatching {
+                parseToolArguments(toolCall.function.arguments)
+            }.getOrDefault(JsonObject(emptyMap()))
+            callback.onToolCallStart(
+                toolCall.id,
+                toolCall.function.name,
+                displayArguments,
+                descriptor.toolType,
+            )
             callback.onToolCallComplete(
                 toolCall.id,
                 toolCall.function.name,
@@ -1161,15 +1281,6 @@ class AgentOrchestrator(
             "本轮未执行该工具。原因：$reason 如仍需要此工具，请由模型在下一轮重新发起。",
             "This tool was not executed in this turn. Reason: $reason If it is still needed, the model should call it again in the next turn."
         )
-    }
-
-    private fun isExclusiveTurnBoundaryTool(toolName: String): Boolean {
-        return toolName == "terminal_execute" ||
-            toolName == "android_privileged_action" ||
-            toolName == "android_privileged_session_start" ||
-            toolName == "android_privileged_session_exec" ||
-            toolName == "android_privileged_session_read" ||
-            toolName == "android_privileged_session_stop"
     }
 
     private fun isUserStoppedVlmTask(
@@ -1346,6 +1457,19 @@ class AgentOrchestrator(
     }
 
     private fun classifyRetryableTurnFailure(error: Throwable): RetryDecision {
+        // The LLM client already owns the stream-idle deadline. Retrying this
+        // exact request from the orchestrator only multiplies a dead-provider
+        // wait (45s x 3 previously) and leaves ACP/UI stuck on "thinking".
+        // Surface the failure so the user can retry explicitly.
+        if (AgentRuntimeErrorSupport.failureKind(error) ==
+            AgentRuntimeErrorSupport.PROVIDER_STREAM_IDLE_TIMEOUT
+        ) {
+            return RetryDecision(
+                retryable = false,
+                reason = AgentRuntimeErrorSupport.userFacingMessage(error)
+                    ?: error.message.orEmpty()
+            )
+        }
         if (error is AgentStreamRequestException) {
             val statusCode = error.statusCode
             val providerFailureText = buildString {
@@ -1383,6 +1507,12 @@ class AgentOrchestrator(
         }
 
         val message = error.message?.trim().orEmpty()
+        AgentRuntimeErrorSupport.userFacingMessage(error)?.let { userFacingMessage ->
+            return RetryDecision(
+                retryable = false,
+                reason = userFacingMessage
+            )
+        }
         if (looksLikeTransientTransportFailure(message)) {
             return RetryDecision(
                 retryable = true,
@@ -1435,13 +1565,6 @@ class AgentOrchestrator(
             t("请求失败，请稍后重试。", "Request failed. Please try again later.")
         }
         return statusCode?.let { "HTTP $it: $normalizedReason" } ?: normalizedReason
-    }
-
-    private fun buildRetryingStatusMessage(retryCount: Int, maxRetries: Int): String {
-        return t(
-            "连接中断，正在重试 $retryCount/$maxRetries…",
-            "Connection interrupted. Retrying $retryCount/$maxRetries..."
-        )
     }
 
     private fun resolvePrimaryUserGoal(input: Input): String {

@@ -3,32 +3,27 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
-import 'package:ui/features/home/pages/chat/utils/chat_message_identity.dart';
-import 'package:ui/features/home/pages/authorize/authorize_page_args.dart';
-import 'package:ui/features/home/pages/chat/utils/stream_text_merge.dart';
-import 'package:ui/features/home/pages/command_overlay/constants/messages.dart';
-import 'package:ui/features/home/pages/chat/mixins/agent_stream_handler.dart';
-import 'package:ui/models/agent_stream_event.dart';
 import 'package:ui/models/chat_link_preview.dart';
-import 'package:ui/features/home/pages/chat/utils/deep_thinking_persistence.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
-import 'package:ui/services/agent_stream_reducer.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/agent_event_reducer.dart';
+import 'package:ui/services/agent_identity.dart';
 import 'package:ui/services/agent_message_kinds.dart';
 import 'package:ui/services/agent_tool_call_parser.dart';
 import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
 import 'package:ui/services/link_preview_service.dart';
+import 'package:ui/services/voice_playback_coordinator.dart';
 import 'package:ui/services/agent_stream_meta.dart';
-import 'package:ui/utils/data_parser.dart';
 import 'package:ui/services/agent_diff_parser.dart';
 
-part 'chat_runtime_agent_stream_support.dart';
-part 'chat_runtime_event_ingress.dart';
 part 'chat_runtime_internal_support.dart';
+part 'chat_runtime_state.dart';
+part 'chat_runtime_snapshot_support.dart';
+part 'chat_runtime_persistence_support.dart';
+part 'chat_runtime_external_message_support.dart';
 part 'chat_runtime_message_support.dart';
 part 'chat_runtime_streaming_support.dart';
 part 'chat_runtime_thinking_support.dart';
@@ -38,162 +33,6 @@ const String kChatRuntimeModeNormal = 'normal';
 const String kChatRuntimeModeOpenClaw = 'openclaw';
 const String kChatRuntimeModeAgent = 'agent';
 const int _kStreamingTextChunkFlushThreshold = 5;
-
-enum _StreamingTextStreamKind {
-  pureChatReply,
-  agentReply,
-  pureChatThinking,
-  agentThinking,
-}
-
-class _StreamingTextBatchState {
-  _StreamingTextBatchState({
-    required this.taskId,
-    required this.kind,
-    required this.latestText,
-    required this.lastFlushedText,
-  });
-
-  final String taskId;
-  final _StreamingTextStreamKind kind;
-  String latestText;
-  String lastFlushedText;
-  int pendingChunkCount = 0;
-
-  bool get hasPendingFlush => latestText != lastFlushedText;
-
-  bool get reachedFlushThreshold =>
-      pendingChunkCount >= _kStreamingTextChunkFlushThreshold;
-
-  /// 自上次 flush 以来的新增文本中是否包含换行符。
-  /// 遇到换行时立即 flush，确保 markdown 块级元素（段落、列表等）及时渲染。
-  bool get containsNewlineSinceFlush {
-    if (latestText.length <= lastFlushedText.length) return false;
-    return latestText.indexOf('\n', lastFlushedText.length) >= 0;
-  }
-
-  void stage(String nextText) {
-    if (nextText == latestText) {
-      return;
-    }
-    latestText = nextText;
-    pendingChunkCount += 1;
-  }
-
-  void markFlushed() {
-    lastFlushedText = latestText;
-    pendingChunkCount = 0;
-  }
-}
-
-class ChatConversationRuntimeState {
-  static const Duration _localSnapshotEchoSuppressionDuration = Duration(
-    seconds: 2,
-  );
-
-  ChatConversationRuntimeState({
-    required this.conversationId,
-    required this.mode,
-  }) : chatIslandDisplayLayer = ChatIslandDisplayLayer.mode;
-
-  final int conversationId;
-  final String mode;
-
-  ConversationModel? conversation;
-  final ObservableChatMessageList messages = ObservableChatMessageList();
-
-  /// Accumulated assistant text, used to continue a stream across events.
-  ///
-  /// This is a TEXT CACHE, not a record of what is running. Its key shape
-  /// differs by producer — the built-in agent keys it by task id, the ACP
-  /// reducer by message entry id (`<acpMessageId>-agent-message`) — so it must
-  /// never feed [activeAgentTaskIds]. It used to, and because ACP mints a new
-  /// message id per `agent_message_chunk`, every streamed message registered a
-  /// phantom "task" that rendered its own agent avatar and processing row.
-  final Map<String, String> currentAiMessages = <String, String>{};
-
-  /// Accumulated reasoning text. Same contract as [currentAiMessages].
-  final Map<String, String> currentThinkingMessages = <String, String>{};
-  final Map<String, AgentStreamTaskState> agentStreamStates =
-      <String, AgentStreamTaskState>{};
-  final Map<String, _StreamingTextBatchState> _streamingTextBatches =
-      <String, _StreamingTextBatchState>{};
-  final Map<String, int> agentEntrySequences = <String, int>{};
-  final Map<String, int> agentEntryStartTimes = <String, int>{};
-  final Map<String, int> agentReplayDeltaOffsets = <String, int>{};
-  int agentNextEntrySequence = 0;
-  bool isAiResponding = false;
-  bool isContextCompressing = false;
-  bool isCheckingExecutableTask = false;
-  String deepThinkingContent = '';
-  bool isDeepThinking = false;
-  String? currentDispatchTaskId;
-  int currentThinkingStage = 1;
-  bool isInputAreaVisible = true;
-  bool isExecutingTask = false;
-
-  String? lastAgentTaskId;
-  String? activeToolCardId;
-  String? activeThinkingCardId;
-  String? activeContextCompactionMarkerId;
-  String? pendingAgentTextTaskId;
-  String? waitingThinkingBeforeAgentTextTaskId;
-  bool pendingThinkingRoundSplit = false;
-  int toolCardSequence = 0;
-  int thinkingRound = 0;
-  ChatIslandDisplayLayer chatIslandDisplayLayer;
-  String? lastAgentToolType;
-  ChatBrowserSessionSnapshot? browserSessionSnapshot;
-  int _localSnapshotEchoSuppressionUntilMillis = 0;
-
-  bool get hasInFlightTask =>
-      isAiResponding ||
-      isCheckingExecutableTask ||
-      isExecutingTask ||
-      currentDispatchTaskId != null ||
-      currentAiMessages.isNotEmpty;
-
-  bool get shouldSuppressLocalMessageSnapshotEcho =>
-      DateTime.now().millisecondsSinceEpoch <
-      _localSnapshotEchoSuppressionUntilMillis;
-
-  void expectLocalMessageSnapshotEcho() {
-    _localSnapshotEchoSuppressionUntilMillis = DateTime.now()
-        .add(_localSnapshotEchoSuppressionDuration)
-        .millisecondsSinceEpoch;
-  }
-
-  /// Turns currently believed to be producing output.
-  ///
-  /// Every member must be a TURN id. The text caches are deliberately excluded:
-  /// their keys are per-message, and mixing the two id spaces is what produced
-  /// one agent avatar and one "processing" row per streamed message.
-  Set<String> get activeAgentTaskIds {
-    final ids = <String>{...agentStreamStates.keys};
-    final currentTaskId = currentDispatchTaskId?.trim() ?? '';
-    if (currentTaskId.isNotEmpty) {
-      ids.add(currentTaskId);
-    }
-    final lastTaskId = lastAgentTaskId?.trim() ?? '';
-    if (isAiResponding && lastTaskId.isNotEmpty) {
-      ids.add(lastTaskId);
-    }
-    final pendingTaskId = pendingAgentTextTaskId?.trim() ?? '';
-    if (pendingTaskId.isNotEmpty) {
-      ids.add(pendingTaskId);
-    }
-    return ids;
-  }
-
-  void dispose() {
-    agentStreamStates.clear();
-    _streamingTextBatches.clear();
-    agentEntrySequences.clear();
-    agentEntryStartTimes.clear();
-    agentReplayDeltaOffsets.clear();
-    messages.dispose();
-  }
-}
 
 class _TaskBinding {
   const _TaskBinding({required this.conversationId, required this.mode});
@@ -222,16 +61,6 @@ class _PendingPersistenceRequest {
 
 const int _maxTerminalOutputChars = 64 * 1024;
 const int _maxTerminalOutputLines = 600;
-const Map<String, String> _executionPermissionNameToId = <String, String>{
-  '悬浮窗权限': kOverlayPermissionId,
-  'Overlay': kOverlayPermissionId,
-  '应用列表读取权限': kInstalledAppsPermissionId,
-  'Installed Apps Access': kInstalledAppsPermissionId,
-  'Shizuku 权限': kShizukuPermissionId,
-  'Shizuku Permission': kShizukuPermissionId,
-  '公共文件访问': kPublicStoragePermissionId,
-  'Public Storage Access': kPublicStoragePermissionId,
-};
 
 class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   ChatConversationRuntimeCoordinator._();
@@ -241,13 +70,17 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
 
   String _agentTextBaseId(String taskId) => '$taskId-text';
 
-  final AgentStreamReducer _agentStreamReducer = const AgentStreamReducer();
   final AgentEventReducer _agentEventReducer = const AgentEventReducer();
   final Map<String, ChatConversationRuntimeState> _runtimes =
       <String, ChatConversationRuntimeState>{};
   final Map<String, _TaskBinding> _taskBindings = <String, _TaskBinding>{};
   final Map<String, _PendingPersistenceRequest> _pendingPersistence =
       <String, _PendingPersistenceRequest>{};
+  // Conversation snapshots are produced by several independent triggers:
+  // streamed ACP updates, turn completion, app backgrounding, and page
+  // disposal. Keep one ordered tail per runtime so an older snapshot can
+  // never finish after a newer one and move durable history backwards.
+  final Map<String, Future<void>> _persistenceTails = <String, Future<void>>{};
   final Set<String> _ephemeralRuntimeKeys = <String>{};
 
   bool _initialized = false;
@@ -259,22 +92,11 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   void ensureInitialized() {
     if (_initialized) return;
     _initialized = true;
+    unawaited(VoicePlaybackCoordinator.instance.ensureInitialized());
+
     AssistsMessageService.initialize();
-    AssistsMessageService.addOnChatTaskMessageCallBack(_handleChatTaskMessage);
-    AssistsMessageService.addOnChatTaskMessageEndCallBack(
-      _handleChatTaskMessageEnd,
-    );
-    AssistsMessageService.setOnAgentStreamEventCallback(
-      _handleAgentStreamEvent,
-    );
     AssistsMessageService.addOnExternalUserMessageAppendedCallback(
       _handleExternalUserMessageAppended,
-    );
-    AssistsMessageService.setOnAgentPromptTokenUsageCallback(
-      _handleAgentPromptTokenUsageChanged,
-    );
-    AssistsMessageService.setOnAgentContextCompactionStateCallback(
-      _handleAgentContextCompactionStateChanged,
     );
   }
 
@@ -283,6 +105,106 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     required String mode,
   }) {
     return _runtimes[_runtimeKey(conversationId: conversationId, mode: mode)];
+  }
+
+  /// Conversation ids with live work in the shared ACP projection.
+  ///
+  /// The drawer must read this from the same runtime/reducer that renders the
+  /// chat. A second event subscription in the drawer would create another
+  /// lifecycle interpretation and can disagree during a session switch.
+  Set<int> get activeAgentConversationIds => Set.unmodifiable(
+    _runtimes.values
+        .where(
+          (runtime) =>
+              runtime.mode == kChatRuntimeModeAgent && runtime.hasInFlightTask,
+        )
+        .map((runtime) => runtime.conversationId),
+  );
+
+  bool isAgentConversationActive(int conversationId) {
+    final runtime = runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    return runtime?.hasInFlightTask ?? false;
+  }
+
+  /// Resolves an incoming ACP event to the runtime that admitted its official
+  /// turn. Conversation mode is UI metadata and can be stale during a mode
+  /// handoff; the `(conversationId, turnId)` binding is the authoritative
+  /// ownership check for streaming and terminal events.
+  String? modeForAcpEvent({
+    required int conversationId,
+    String? sessionId,
+    String? turnId,
+  }) {
+    final normalizedSessionId = sessionId?.trim() ?? '';
+    final normalizedTurnId = turnId?.trim() ?? '';
+    if (normalizedTurnId.isEmpty && normalizedSessionId.isEmpty) return null;
+    for (final mode in <String>[
+      kChatRuntimeModeNormal,
+      kChatRuntimeModeAgent,
+      kChatRuntimeModeOpenClaw,
+    ]) {
+      final runtime = runtimeFor(conversationId: conversationId, mode: mode);
+      if (runtime == null) continue;
+      if ((normalizedSessionId.isNotEmpty &&
+              runtime.activeAcpSessionId == normalizedSessionId) ||
+          runtime.activeAcpTurnId == normalizedTurnId ||
+          runtime.currentDispatchTurnId == normalizedTurnId ||
+          runtime.lastAgentTurnId == normalizedTurnId ||
+          runtime.activeAcpTurnId == normalizedTurnId) {
+        return mode;
+      }
+    }
+    return null;
+  }
+
+  /// Returns the conversation that first claimed a legacy process identity.
+  /// Process-only events have no ACP session/turn boundary; callers can use a
+  /// known owner when available and apply their explicit compatibility policy
+  /// for an unknown first event.
+  int? conversationIdForStandaloneProcess(String processId) {
+    final normalized = processId.trim();
+    if (normalized.isEmpty) return null;
+    for (final entry in _runtimes.entries) {
+      if (entry.value.standaloneProcessRunIds.containsKey(normalized)) {
+        return entry.value.conversationId;
+      }
+    }
+    return null;
+  }
+
+  /// Finds the conversation that owns a session/turn when an ACP event does
+  /// not include the optional host conversation id. This is important for
+  /// background Sub Agent runs: the visible page must not become the implicit
+  /// owner of an event from another conversation.
+  int? conversationIdForAcpEvent({String? sessionId, String? turnId}) {
+    final normalizedSessionId = sessionId?.trim() ?? '';
+    final normalizedTurnId = turnId?.trim() ?? '';
+    if (normalizedSessionId.isEmpty && normalizedTurnId.isEmpty) {
+      return null;
+    }
+    for (final runtime in _runtimes.values) {
+      if (normalizedSessionId.isNotEmpty &&
+          (runtime.activeAcpSessionId == normalizedSessionId ||
+              runtime.knownAcpSessionIds.contains(normalizedSessionId))) {
+        return runtime.conversationId;
+      }
+      if (normalizedTurnId.isEmpty) continue;
+      if (runtime.activeAcpTurnId == normalizedTurnId ||
+          runtime.currentDispatchTurnId == normalizedTurnId ||
+          runtime.lastAgentTurnId == normalizedTurnId ||
+          runtime.completedAgentTurnIds.contains(normalizedTurnId) ||
+          runtime.completedAcpTurnIds.contains(normalizedTurnId) ||
+          runtime.acpTurnToRunIds.keys.any((key) {
+            return key == normalizedTurnId ||
+                key.endsWith(':$normalizedTurnId');
+          })) {
+        return runtime.conversationId;
+      }
+    }
+    return null;
   }
 
   ChatConversationRuntimeState ensureRuntime({
@@ -308,9 +230,7 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     }
     if (runtime.messages.isEmpty && initialMessages != null) {
       runtime.messages.addAll(
-        canonicalizeChatMessagesById(
-          _dedupeEquivalentAgentUserMessages(initialMessages),
-        ),
+        _dedupeEquivalentAgentUserMessages(initialMessages),
       );
     }
     if (conversation != null) {
@@ -345,273 +265,592 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     );
   }
 
-  void replaceConversationSnapshot({
-    required int conversationId,
-    required String mode,
-    required List<ChatMessageModel> messages,
-    ConversationModel? conversation,
-    bool isAiResponding = false,
-    bool isContextCompressing = false,
-    bool isCheckingExecutableTask = false,
-    Map<String, String>? currentAiMessages,
-    Map<String, String>? currentThinkingMessages,
-    String deepThinkingContent = '',
-    bool isDeepThinking = false,
-    String? currentDispatchTaskId,
-    int currentThinkingStage = 1,
-    bool isInputAreaVisible = true,
-    bool isExecutingTask = false,
-    String? lastAgentTaskId,
-    String? activeToolCardId,
-    String? activeThinkingCardId,
-    String? activeContextCompactionMarkerId,
-    String? pendingAgentTextTaskId,
-    bool pendingThinkingRoundSplit = false,
-    int toolCardSequence = 0,
-    int thinkingRound = 0,
-    ChatIslandDisplayLayer chatIslandDisplayLayer = ChatIslandDisplayLayer.mode,
-    String? lastAgentToolType,
-    ChatBrowserSessionSnapshot? browserSessionSnapshot,
-    bool preserveLiveStreamingState = false,
-  }) {
-    final normalizedMessages = canonicalizeChatMessagesById(
-      _dedupeEquivalentAgentUserMessages(messages),
-    );
-    final runtime = ensureRuntime(
-      conversationId: conversationId,
-      mode: mode,
-      conversation: conversation,
-    );
-    // When the caller is polling a remote codex thread while reducer push
-    // events are still actively streaming into this runtime, we MUST NOT
-    // blow away the push-driven streaming state. Otherwise the chat list
-    // collapses for a single frame between each poll tick — the symptom
-    // the user calls "codex 输出时自动折叠了一下又展开"。
-    //
-    // In that mode we only refresh the visible message list and conversation
-    // metadata; everything else (isAiResponding, currentAiMessages,
-    // currentThinkingMessages, currentDispatchTaskId, …) stays exactly as
-    // the reducer left it.
-    if (preserveLiveStreamingState) {
-      _replaceRuntimeMessagesIfChanged(runtime, normalizedMessages);
-      runtime.conversation = conversation ?? runtime.conversation;
-      _pruneAgentReplayDeltaOffsets(runtime, normalizedMessages);
-      notifyListeners();
-      return;
-    }
-    _flushRuntimeStreamingText(runtime);
-    _replaceRuntimeMessagesIfChanged(runtime, normalizedMessages);
-    runtime.conversation = conversation ?? runtime.conversation;
-    runtime.isAiResponding = isAiResponding;
-    runtime.isContextCompressing = isContextCompressing;
-    runtime.isCheckingExecutableTask = isCheckingExecutableTask;
-    runtime.currentAiMessages
-      ..clear()
-      ..addAll(currentAiMessages ?? const <String, String>{});
-    runtime.currentThinkingMessages
-      ..clear()
-      ..addAll(currentThinkingMessages ?? const <String, String>{});
-    runtime.deepThinkingContent = deepThinkingContent;
-    runtime.isDeepThinking = isDeepThinking;
-    runtime.currentDispatchTaskId = currentDispatchTaskId;
-    runtime.currentThinkingStage = currentThinkingStage;
-    runtime.isInputAreaVisible = isInputAreaVisible;
-    runtime.isExecutingTask = isExecutingTask;
-    runtime.lastAgentTaskId = lastAgentTaskId;
-    runtime.activeToolCardId = activeToolCardId;
-    runtime.activeThinkingCardId = activeThinkingCardId;
-    runtime.activeContextCompactionMarkerId = activeContextCompactionMarkerId;
-    runtime.pendingAgentTextTaskId = pendingAgentTextTaskId;
-    runtime.waitingThinkingBeforeAgentTextTaskId = null;
-    runtime.pendingThinkingRoundSplit = pendingThinkingRoundSplit;
-    runtime.toolCardSequence = toolCardSequence;
-    runtime.thinkingRound = thinkingRound;
-    runtime.chatIslandDisplayLayer = chatIslandDisplayLayer;
-    runtime.lastAgentToolType = lastAgentToolType;
-    runtime.browserSessionSnapshot = browserSessionSnapshot;
-    runtime.agentStreamStates.clear();
-    runtime._streamingTextBatches.clear();
-    runtime.agentEntrySequences.clear();
-    runtime.agentEntryStartTimes.clear();
-    _pruneAgentReplayDeltaOffsets(runtime, messages);
-    runtime.agentNextEntrySequence = 0;
-    notifyListeners();
-  }
-
-  void _replaceRuntimeMessagesIfChanged(
-    ChatConversationRuntimeState runtime,
-    List<ChatMessageModel> messages,
-  ) {
-    final current = runtime.messages;
-    if (current.length == messages.length) {
-      var sameInstancesInOrder = true;
-      for (var index = 0; index < messages.length; index += 1) {
-        if (!identical(current[index], messages[index])) {
-          sameInstancesInOrder = false;
-          break;
-        }
-      }
-      if (sameInstancesInOrder) {
-        return;
-      }
-    }
-    current.replaceAllMessages(messages);
-  }
-
-  void _pruneAgentReplayDeltaOffsets(
-    ChatConversationRuntimeState runtime,
-    List<ChatMessageModel> messages,
-  ) {
-    if (runtime.agentReplayDeltaOffsets.isEmpty) {
-      return;
-    }
-    final liveEntryIds = <String>{};
-    for (final message in messages) {
-      liveEntryIds.add(message.id);
-      final entryId = message.streamMeta?['entryId']?.toString().trim();
-      if (entryId != null && entryId.isNotEmpty) {
-        liveEntryIds.add(entryId);
-      }
-      final cardId = message.cardData?['cardId']?.toString().trim();
-      if (cardId != null && cardId.isNotEmpty) {
-        liveEntryIds.add(cardId);
-      }
-    }
-    runtime.agentReplayDeltaOffsets.removeWhere(
-      (entryId, _) => !liveEntryIds.contains(entryId),
-    );
-  }
-
   void registerTask({
     required String taskId,
     required int conversationId,
     required String mode,
   }) {
     ensureInitialized();
-    ensureRuntime(conversationId: conversationId, mode: mode);
+    final existingBinding = _taskBindings[taskId];
+    if (existingBinding != null &&
+        (existingBinding.conversationId != conversationId ||
+            existingBinding.mode != mode)) {
+      // A remote/local handoff can resolve the same logical submission to a
+      // different runtime after an await. Do not overwrite the binding and
+      // strand the old runtime as an invisible active turn.
+      unregisterTask(
+        taskId,
+        conversationId: existingBinding.conversationId,
+        mode: existingBinding.mode,
+      );
+    }
+    final runtime = ensureRuntime(conversationId: conversationId, mode: mode);
+    // A new prompt starts with a local render key. The official ACP turn is
+    // admitted by the first session/update; never let a previous turn's
+    // official id claim the new prompt's terminal event.
+    if (runtime.currentDispatchTurnId != taskId) {
+      runtime.activeAcpTurnId = null;
+      runtime.activeRunId = taskId;
+    }
+    runtime.activeRunId ??= taskId;
     _taskBindings[taskId] = _TaskBinding(
       conversationId: conversationId,
       mode: mode,
     );
   }
 
+  void beginAcpTurn({
+    required String taskId,
+    required int conversationId,
+    required String mode,
+  }) {
+    final existingBinding = _taskBindings[taskId];
+    final existingRuntime = runtimeFor(
+      conversationId: conversationId,
+      mode: mode,
+    );
+    final alreadyStarted =
+        existingBinding?.conversationId == conversationId &&
+        existingBinding?.mode == mode &&
+        existingRuntime?.isAiResponding == true &&
+        existingRuntime?.currentDispatchTurnId == taskId &&
+        existingRuntime?.lastAgentTurnId == taskId;
+    registerTask(taskId: taskId, conversationId: conversationId, mode: mode);
+    if (alreadyStarted) {
+      return;
+    }
+    final runtime = ensureRuntime(conversationId: conversationId, mode: mode);
+    runtime.persistenceGeneration += 1;
+    runtime.isAiResponding = true;
+    runtime.currentDispatchTurnId = taskId;
+    runtime.activeRunId = taskId;
+    runtime.lastAgentTurnId = taskId;
+    runtime.currentThinkingStage = ThinkingStage.thinking.value;
+    runtime.allowRetiredAcpSessionReactivation = true;
+    notifyListeners();
+  }
+
+  /// Records the official ACP session after `session/new` and before
+  /// `session/prompt`. This is an identity reservation, not a second local
+  /// lifecycle: event admission and cancellation can now use the same
+  /// session key the Agent uses on the wire.
+  bool bindAcpSession({
+    required String taskId,
+    required int conversationId,
+    required String mode,
+    required String sessionId,
+  }) {
+    final normalizedSessionId = sessionId.trim();
+    if (normalizedSessionId.isEmpty ||
+        !isTaskActive(
+          taskId: taskId,
+          conversationId: conversationId,
+          mode: mode,
+        )) {
+      return false;
+    }
+    final runtime = runtimeFor(conversationId: conversationId, mode: mode);
+    if (runtime == null) return false;
+    final currentSessionId = runtime.activeAcpSessionId?.trim() ?? '';
+    final currentTurnId = runtime.activeAcpTurnId?.trim() ?? '';
+    if (currentSessionId.isNotEmpty &&
+        currentSessionId != normalizedSessionId &&
+        currentTurnId.isNotEmpty) {
+      return false;
+    }
+    runtime.activeAcpSessionId = normalizedSessionId;
+    runtime.knownAcpSessionIds.add(normalizedSessionId);
+    while (runtime.knownAcpSessionIds.length > 32) {
+      runtime.knownAcpSessionIds.remove(runtime.knownAcpSessionIds.first);
+    }
+    runtime.retiredAcpSessionIds.remove(normalizedSessionId);
+    notifyListeners();
+    return true;
+  }
+
+  /// Returns whether [taskId] still owns the live local turn in this runtime.
+  ///
+  /// A task binding can outlive its visible turn while an async preflight or
+  /// transport callback is unwinding. Callers that want to mutate shared
+  /// presentation state must use this identity check instead of merely
+  /// checking that a binding exists.
+  bool isTaskActive({
+    required String taskId,
+    required int conversationId,
+    required String mode,
+  }) {
+    final runtime = runtimeFor(conversationId: conversationId, mode: mode);
+    final binding = _taskBindings[taskId];
+    if (runtime == null ||
+        binding == null ||
+        binding.conversationId != conversationId ||
+        binding.mode != mode) {
+      return false;
+    }
+    return runtime.activeRunId == taskId ||
+        runtime.currentDispatchTurnId == taskId ||
+        runtime.lastAgentTurnId == taskId;
+  }
+
+  /// Commits a terminal transition proven by an authoritative remote session
+  /// snapshot. A normal history snapshot has no lifecycle authority and is
+  /// therefore still blocked by [replaceConversationSnapshot]; this seam is
+  /// reserved for the remote ACP read path after its session bookkeeping and
+  /// payload both prove that no turn is active.
+  bool finishTaskFromAuthoritativeSnapshot({
+    required String taskId,
+    required int conversationId,
+    required String mode,
+    String? sessionId,
+    String? turnId,
+  }) {
+    final runtime = runtimeFor(conversationId: conversationId, mode: mode);
+    if (runtime == null ||
+        !isTaskActive(
+          taskId: taskId,
+          conversationId: conversationId,
+          mode: mode,
+        )) {
+      return false;
+    }
+    final incomingSessionId = sessionId?.trim() ?? '';
+    final activeSessionId = runtime.activeAcpSessionId?.trim() ?? '';
+    if (incomingSessionId.isNotEmpty &&
+        activeSessionId.isNotEmpty &&
+        incomingSessionId != activeSessionId) {
+      return false;
+    }
+    final incomingTurnId = turnId?.trim() ?? '';
+    final activeTurnId = runtime.activeAcpTurnId?.trim() ?? '';
+    if (incomingTurnId.isNotEmpty &&
+        activeTurnId.isNotEmpty &&
+        incomingTurnId != activeTurnId) {
+      return false;
+    }
+    // `unregisterTask` already owns the terminal cleanup, but it can only
+    // clear an official ACP turn when the reducer has previously recorded the
+    // protocol-to-local mapping. A remote `thread/read` snapshot may be the
+    // first lifecycle signal after a missed push terminal event, so establish
+    // that mapping from the identities we just validated before delegating to
+    // the same cleanup path.
+    if (activeTurnId.isNotEmpty) {
+      runtime.resolveRunId(
+        sessionId: activeSessionId.isEmpty
+            ? incomingSessionId
+            : activeSessionId,
+        turnId: activeTurnId,
+        fallback: taskId,
+      );
+    }
+    unregisterTask(taskId, conversationId: conversationId, mode: mode);
+    return true;
+  }
+
+  /// Compatibility name for older callers. Starting a turn must stay
+  /// presentation-free; real ACP events are the only source of thinking
+  /// cards.
+  void primeAcpThinking({
+    required String taskId,
+    required int conversationId,
+    required String mode,
+  }) {
+    beginAcpTurn(taskId: taskId, conversationId: conversationId, mode: mode);
+  }
+
+  /// Compatibility name for older pure-chat call sites. Pure chat is still
+  /// an ACP turn; it only has an empty tool catalog.
   void primePureChatThinking({
     required String taskId,
     required int conversationId,
     required String mode,
   }) {
-    ensureInitialized();
-    final runtime = ensureRuntime(conversationId: conversationId, mode: mode);
-    _taskBindings[taskId] = _TaskBinding(
-      conversationId: conversationId,
-      mode: mode,
-    );
+    beginAcpTurn(taskId: taskId, conversationId: conversationId, mode: mode);
+  }
 
-    runtime.lastAgentTaskId = taskId;
-    runtime.currentThinkingStage = ThinkingStage.thinking.value;
-    runtime.isDeepThinking = true;
-
-    if (runtime.thinkingRound == 0) {
-      runtime.thinkingRound = 1;
-      runtime.activeThinkingCardId = _baseThinkingCardId(taskId);
-      final exists = runtime.messages.any(
-        (msg) => msg.id == runtime.activeThinkingCardId,
-      );
-      if (exists) {
-        _updateThinkingCard(
-          runtime,
-          taskId,
-          cardId: runtime.activeThinkingCardId,
-          isLoading: true,
-          stage: ThinkingStage.thinking.value,
-          lockCompleted: false,
-        );
-      } else {
-        _createThinkingCard(
-          runtime,
-          taskId,
-          cardId: runtime.activeThinkingCardId,
-          isLoading: true,
-          stage: ThinkingStage.thinking.value,
-        );
-      }
-      notifyListeners();
-      schedulePersistRuntimeConversation(
-        conversationId: conversationId,
-        mode: mode,
-      );
+  void unregisterTask(String taskId, {int? conversationId, String? mode}) {
+    final binding = _taskBindings[taskId];
+    // New lifecycle callers pass the conversation/mode that admitted the
+    // task. If a delayed callback belongs to an older binding, it is a no-op;
+    // resolving by the bare task id would otherwise clean the newer turn.
+    if (conversationId != null &&
+        (binding == null || binding.conversationId != conversationId)) {
       return;
     }
+    if (mode != null && (binding == null || binding.mode != mode.trim())) {
+      return;
+    }
+    final runtime = _runtimeForTask(taskId);
+    if (runtime != null) {
+      // The UI can unregister optimistically when the user presses Stop,
+      // before the native ACP terminal event arrives. Fence both identity
+      // spaces here: taskId is the local render key, while activeAcpTurnId is
+      // the official wire turn. A late session/update for either id must not
+      // become the first event of the next prompt.
+      final officialTurnId = runtime.activeAcpTurnId?.trim();
+      _rememberCompletedTurn(runtime, taskId);
+      if (officialTurnId != null && officialTurnId.isNotEmpty) {
+        _rememberCompletedTurn(runtime, officialTurnId);
+        runtime.rememberCompletedAcpTurn(officialTurnId);
+      }
+      _flushStreamingTextForTask(runtime, taskId);
+      _clearStreamingTextBatchesForTask(runtime, taskId);
+      runtime.currentAiMessages.remove(taskId);
+      runtime.currentThinkingMessages.remove(taskId);
+      if (runtime.currentDispatchTurnId == taskId) {
+        runtime.currentDispatchTurnId = null;
+      }
+      if (runtime.activeRunId == taskId) {
+        runtime.activeRunId = null;
+      }
+      if (runtime.activeAcpTurnId == taskId ||
+          _acpTurnBelongsToTask(runtime, runtime.activeAcpTurnId, taskId)) {
+        runtime.activeAcpTurnId = null;
+      }
+      if (runtime.lastAgentTurnId == taskId) {
+        runtime.lastAgentTurnId = null;
+      }
+      // A late cleanup from an older turn must not tear down the newer turn
+      // that is already running in the same conversation.
+      final hasAnotherTurn =
+          runtime.currentDispatchTurnId != null ||
+          runtime.lastAgentTurnId != null ||
+          runtime.activeAcpTurnId != null;
+      if (!hasAnotherTurn) {
+        runtime.activeAcpSessionId = null;
+        runtime.isAiResponding = false;
+        runtime.isExecutingTask = false;
+        runtime.isCheckingExecutableTask = false;
+        runtime.isContextCompressing = false;
+        runtime.deepThinkingContent = '';
+        runtime.isDeepThinking = false;
+        runtime.isInputAreaVisible = true;
+        runtime.currentThinkingStage = ThinkingStage.thinking.value;
+        runtime.activeToolCardId = null;
+        runtime.activeThinkingCardId = null;
+        runtime.pendingAgentTextTaskId = null;
+        runtime.waitingThinkingBeforeAgentTextTaskId = null;
+        runtime.pendingThinkingRoundSplit = false;
+      }
+      notifyListeners();
+    }
+    _taskBindings.remove(taskId);
+  }
 
-    _flushThinkingBatch(
-      runtime,
-      taskId,
-      _StreamingTextStreamKind.pureChatThinking,
-    );
-    runtime.pendingThinkingRoundSplit = true;
-    notifyListeners();
-    schedulePersistRuntimeConversation(
-      conversationId: conversationId,
-      mode: mode,
+  bool _acpTurnBelongsToTask(
+    ChatConversationRuntimeState runtime,
+    String? turnId,
+    String taskId,
+  ) {
+    final normalizedTurnId = turnId?.trim() ?? '';
+    if (normalizedTurnId.isEmpty) return false;
+    final turnOnlyKey = acpTurnKey(turnId: normalizedTurnId);
+    if (runtime.acpTurnToRunIds[turnOnlyKey] == taskId) return true;
+    return runtime.acpTurnToRunIds.entries.any(
+      (entry) =>
+          entry.value == taskId &&
+          (entry.key == normalizedTurnId ||
+              entry.key.endsWith(':$normalizedTurnId')),
     );
   }
 
-  void unregisterTask(String taskId) {
-    final runtime = _runtimeForTask(taskId);
-    if (runtime != null) {
-      _flushStreamingTextForTask(runtime, taskId);
-      _clearStreamingTextBatchesForTask(runtime, taskId);
-      runtime.agentStreamStates.remove(taskId);
-      runtime.currentAiMessages.remove(taskId);
-      runtime.currentThinkingMessages.remove(taskId);
-      runtime.isAiResponding = false;
-      runtime.isExecutingTask = false;
-      runtime.isCheckingExecutableTask = false;
-      runtime.deepThinkingContent = '';
-      runtime.isDeepThinking = false;
-      runtime.activeToolCardId = null;
-      runtime.activeThinkingCardId = null;
-      runtime.pendingAgentTextTaskId = null;
-      runtime.waitingThinkingBeforeAgentTextTaskId = null;
-      runtime.pendingThinkingRoundSplit = false;
-      if (runtime.currentDispatchTaskId == taskId) {
-        runtime.currentDispatchTaskId = null;
-      }
-      if (runtime.lastAgentTaskId == taskId) {
-        runtime.lastAgentTaskId = null;
-      }
+  void _rememberCompletedTurn(
+    ChatConversationRuntimeState runtime,
+    String turnId,
+  ) {
+    final normalized = turnId.trim();
+    if (normalized.isEmpty) return;
+    runtime.completedAgentTurnIds.add(normalized);
+    while (runtime.completedAgentTurnIds.length > 128) {
+      runtime.completedAgentTurnIds.remove(runtime.completedAgentTurnIds.first);
     }
-    _taskBindings.remove(taskId);
   }
 
   AgentReduceResult applyAgentEvent({
     required int conversationId,
     required Map<String, dynamic> event,
+    String mode = kChatRuntimeModeAgent,
     ConversationModel? conversation,
   }) {
     ensureInitialized();
     final runtime = ensureRuntime(
       conversationId: conversationId,
-      mode: kChatRuntimeModeAgent,
+      mode: mode,
       conversation: conversation,
       initialChatIslandDisplayLayer: ChatIslandDisplayLayer.mode,
     );
-    final result = _agentEventReducer.reduce(runtime: runtime, event: event);
+    final eventSessionId = acpEventSessionId(event);
+    final eventTurnId = acpEventTurnId(event);
+    final presentation = acpEventPresentation(event);
+    final carriesFinalTurnUsage = acpEventCarriesFinalTurnUsage(event);
+    final allowsHostSessionAdmission = acpEventAllowsImplicitTurnAdmission(
+      event,
+    );
+    final activeAcpTurn = runtime.activeAcpTurnId?.trim() ?? '';
+    final currentDispatchTurn = runtime.currentDispatchTurnId?.trim() ?? '';
+    final incomingTurn = eventTurnId?.trim() ?? '';
+    final isKnownCurrentTurn =
+        incomingTurn.isNotEmpty &&
+        (incomingTurn == activeAcpTurn ||
+            incomingTurn == currentDispatchTurn ||
+            incomingTurn == (runtime.lastAgentTurnId?.trim() ?? ''));
+    // New ACP traffic must carry its session identity. The only exception is
+    // an already-known current turn, or an explicitly marked host reservation.
+    // The old task/kind payloads remain supported below as a named
+    // compatibility shape; they must not silently become the admission rule
+    // for new protocol events.
+    if (eventSessionId == null &&
+        incomingTurn.isNotEmpty &&
+        !isKnownCurrentTurn &&
+        !allowsHostSessionAdmission &&
+        !acpEventIsLegacyCompatibilityShape(event)) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
+    if (!runtime.acceptsAcpEvent(
+      sessionId: eventSessionId,
+      turnId: eventTurnId,
+      allowCompletedTurnMetadata: carriesFinalTurnUsage,
+      allowSessionAdmission: allowsHostSessionAdmission,
+    )) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
+    // The reducer intentionally consumes stale ACP events so they do not
+    // produce a second error path. That does not make them owners of the
+    // visible turn, though. Capture ownership before reduction because a
+    // terminal event may clear the active ACP fields as part of its normal
+    // projection.
+    final activeAcpTurnBefore = runtime.activeAcpTurnId?.trim() ?? '';
+    final dispatchTurnBefore = runtime.currentDispatchTurnId?.trim() ?? '';
+    final affectsActiveTurn = eventTurnId == null
+        ? runtime.isAiResponding &&
+              dispatchTurnBefore.isNotEmpty &&
+              activeAcpTurnBefore.isEmpty
+        : activeAcpTurnBefore.isEmpty
+        ? runtime.isAiResponding && dispatchTurnBefore.isNotEmpty
+        : activeAcpTurnBefore == eventTurnId;
+    // Resolve the local render identity before reduction. The reducer may
+    // clear the active ACP fields on a terminal event, but the binding still
+    // needs to be retired using the same session/turn identity.
+    final eventTaskId = runtime.resolveAcpEventRunId(
+      sessionId: eventSessionId,
+      turnId: eventTurnId,
+      fallback:
+          runtime.activeRunId ??
+          runtime.currentDispatchTurnId ??
+          runtime.lastAgentTurnId,
+    );
+    final result = _agentEventReducer
+        .reduce(runtime: runtime, event: event)
+        .copyWith(affectsActiveTurn: affectsActiveTurn);
     if (result.handled) {
+      if (_isTerminalAcpBindingEvent(result.method, event) &&
+          eventTaskId != null) {
+        final binding = _taskBindings[eventTaskId];
+        if (binding?.conversationId == conversationId &&
+            binding?.mode == mode) {
+          // The ACP terminal event has already performed runtime cleanup.
+          // Remove only this task's binding; calling unregisterTask here would
+          // reinterpret the same terminal event and could clear a newer turn.
+          _taskBindings.remove(eventTaskId);
+        }
+      }
       _annotateAgentMessages(runtime, event, result);
+      _notifyAcpVoicePlayback(runtime, event, result);
+      if (presentation?['compaction'] is Map) {
+        final markerIndex = runtime.messages.indexWhere(
+          (message) =>
+              message.type == 2 &&
+              message.cardData?['type'] == 'context_compaction_marker',
+        );
+        if (markerIndex != -1) {
+          _persistContextCompactionMarkerIfNeeded(
+            conversationId: conversationId,
+            mode: mode,
+            message: runtime.messages[markerIndex],
+          );
+        }
+      }
       notifyListeners();
-      if (!isEphemeralRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeAgent,
-      )) {
+      if (!isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
         schedulePersistRuntimeConversation(
           conversationId: conversationId,
-          mode: kChatRuntimeModeAgent,
+          // ACP execution can be hosted by the normal chat runtime (for
+          // example Xiaowan) as well as the dedicated Agent page. Persist
+          // into the runtime that admitted the event; using the Agent mode
+          // here strands normal-chat history in a different storage bucket,
+          // so the next Xiaowan prompt cannot reconstruct its context.
+          mode: mode,
           persistMessages: true,
+          // Exact usage can legally trail turn/completed. Persist it now so
+          // leaving the page cannot strand the footer in memory only.
+          delay: carriesFinalTurnUsage
+              ? Duration.zero
+              : const Duration(milliseconds: 350),
         );
       }
     }
     return result;
+  }
+
+  bool _isTerminalAcpBindingEvent(String? method, Map<String, dynamic> event) {
+    switch (method) {
+      case 'turn/completed':
+      case 'turn/failed':
+      case 'thread/closed':
+      case 'codex/disconnected':
+        return true;
+      case 'thread/status/changed':
+        final params = _eventParams(event);
+        final status = (params['status'] ?? params['state'])
+            ?.toString()
+            .trim()
+            .toLowerCase();
+        return status == 'completed' ||
+            status == 'complete' ||
+            status == 'failed' ||
+            status == 'error' ||
+            status == 'cancelled' ||
+            status == 'canceled' ||
+            status == 'inactive' ||
+            status == 'closed';
+      case 'error':
+        return _eventParams(event)['willRetry'] != true;
+      default:
+        return false;
+    }
+  }
+
+  Map<String, dynamic> _eventParams(Map<String, dynamic> event) {
+    final params = event['params'];
+    if (params is Map<String, dynamic>) return params;
+    if (params is Map) {
+      return params.map((key, value) => MapEntry(key.toString(), value));
+    }
+    return event;
+  }
+
+  /// Keeps ACP assistant text on the same shared voice path that the former
+  /// Xiaowan stream handler used. Voice is a presentation side effect, not an
+  /// ACP event, so it belongs at the coordinator boundary rather than in a
+  /// Harness adapter or a second reducer.
+  void _notifyAcpVoicePlayback(
+    ChatConversationRuntimeState runtime,
+    Map<String, dynamic> event,
+    AgentReduceResult result,
+  ) {
+    final method = result.method;
+    if (method != 'item/agentMessage/delta' &&
+        method != 'turn/completed' &&
+        method != 'thread/closed' &&
+        method != 'turn/failed') {
+      return;
+    }
+
+    Map<String, dynamic>? asStringMap(dynamic value) {
+      if (value is Map<String, dynamic>) return value;
+      if (value is Map) {
+        return value.map((key, item) => MapEntry(key.toString(), item));
+      }
+      return null;
+    }
+
+    String? firstString(Iterable<dynamic> values) {
+      for (final value in values) {
+        final text = value?.toString().trim() ?? '';
+        if (text.isNotEmpty) return text;
+      }
+      return null;
+    }
+
+    final message = asStringMap(event['message']) ?? event;
+    final params =
+        asStringMap(event['params']) ??
+        asStringMap(message['params']) ??
+        const <String, dynamic>{};
+    final update = asStringMap(params['update']);
+    final taskId = runtime.resolveAcpEventRunId(
+      sessionId: firstString([
+        event['sessionId'],
+        event['session_id'],
+        params['sessionId'],
+        params['session_id'],
+        update?['sessionId'],
+      ]),
+      turnId:
+          result.turnId ??
+          firstString([
+            event['turnId'],
+            event['turn_id'],
+            params['turnId'],
+            params['turn_id'],
+            update?['turnId'],
+          ]),
+      fallback: runtime.lastAgentTurnId ?? runtime.currentDispatchTurnId,
+    );
+
+    ChatMessageModel? assistantMessage;
+    if (method == 'item/agentMessage/delta') {
+      final itemId = firstString([
+        params['entryId'],
+        params['itemId'],
+        params['item_id'],
+        update?['entryId'],
+        update?['messageId'],
+      ]);
+      final candidates = runtime.messages.where(
+        (message) =>
+            message.type == 1 &&
+            message.user == 2 &&
+            (taskId == null ||
+                message.streamMeta?['parentTaskId']?.toString() == taskId),
+      );
+      if (itemId != null) {
+        assistantMessage = candidates.cast<ChatMessageModel?>().firstWhere(
+          (message) =>
+              message!.id == itemId ||
+              message.id.contains(itemId) ||
+              message.streamMeta?['entryId']?.toString() == itemId,
+          orElse: () => null,
+        );
+      }
+      assistantMessage ??= candidates.isEmpty ? null : candidates.first;
+      final assistantText = assistantMessage?.text?.trim() ?? '';
+      if (assistantMessage == null || assistantText.isEmpty) {
+        return;
+      }
+      unawaited(
+        VoicePlaybackCoordinator.instance.onAssistantMessageUpdated(
+          messageId: assistantMessage.id,
+          text: assistantText,
+          isFinal: false,
+        ),
+      );
+      return;
+    }
+
+    final officialTurnId = result.turnId?.trim() ?? '';
+    assistantMessage = runtime.messages.cast<ChatMessageModel?>().firstWhere((
+      message,
+    ) {
+      if (message == null || message.type != 1 || message.user != 2) {
+        return false;
+      }
+      final streamTurnId = message.streamMeta?['turnId']?.toString().trim();
+      final parentTaskId = message.streamMeta?['parentTaskId']
+          ?.toString()
+          .trim();
+      return (officialTurnId.isNotEmpty && streamTurnId == officialTurnId) ||
+          (taskId != null && parentTaskId == taskId);
+    }, orElse: () => null);
+    final assistantText = assistantMessage?.text?.trim() ?? '';
+    if (assistantMessage == null || assistantText.isEmpty) {
+      return;
+    }
+    unawaited(
+      VoicePlaybackCoordinator.instance.onAssistantMessageCompleted(
+        messageId: assistantMessage.id,
+        text: assistantText,
+      ),
+    );
   }
 
   void _annotateAgentMessages(
@@ -647,10 +886,19 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         stringValue(event['agentName']) ??
         stringValue(params?['agentName']) ??
         stringValue(envelope?['agentName']);
-    final taskId =
+    final protocolTurnId =
         result.turnId ??
         stringValue(event['turnId']) ??
         stringValue(params?['turnId']);
+    final protocolSessionId =
+        stringValue(event['sessionId']) ??
+        stringValue(params?['sessionId']) ??
+        stringValue(envelope?['sessionId']);
+    final taskId = runtime.resolveAcpEventRunId(
+      sessionId: protocolSessionId,
+      turnId: protocolTurnId,
+      fallback: runtime.activeRunId ?? runtime.currentDispatchTurnId,
+    );
 
     for (var index = 0; index < runtime.messages.length; index += 1) {
       final message = runtime.messages[index];
@@ -668,7 +916,9 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
       }
       final parentTaskId = stringValue(
         message.streamMeta?['parentTaskId'] ??
+            message.streamMeta?['runId'] ??
             cardData?['taskId'] ??
+            cardData?['runId'] ??
             cardData?['taskID'],
       );
       if (taskId != null && parentTaskId != null && parentTaskId != taskId) {
@@ -686,6 +936,7 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           ...cardData,
           'agentId': agentId,
           if (agentName != null) 'agentName': agentName,
+          if (protocolSessionId != null) 'sessionId': protocolSessionId,
         };
       }
       runtime.messages[index] = message.copyWith(content: content);
@@ -698,21 +949,65 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     required String mode,
     bool removeCard = true,
   }) {
+    clearTaskThinkingPresentation(
+      taskId: taskId,
+      conversationId: conversationId,
+      mode: mode,
+      removeCard: removeCard,
+    );
+  }
+
+  /// Removes the optimistic thinking surface when a turn fails before the
+  /// first official ACP update. Without this, a Provider/connect error leaves
+  /// the chat showing an infinite "正在思考" card even though the turn ended.
+  void clearTaskThinkingPresentation({
+    required String taskId,
+    required int conversationId,
+    required String mode,
+    bool removeCard = true,
+  }) {
     final runtime = runtimeFor(conversationId: conversationId, mode: mode);
-    if (runtime == null) return;
+    final binding = _taskBindings[taskId];
+    if (runtime == null ||
+        binding == null ||
+        binding.conversationId != conversationId ||
+        binding.mode != mode) {
+      return;
+    }
+
+    final ownsActiveThinkingState =
+        runtime.activeRunId == taskId ||
+        runtime.currentDispatchTurnId == taskId ||
+        runtime.lastAgentTurnId == taskId;
 
     _flushThinkingBatch(
       runtime,
       taskId,
       _StreamingTextStreamKind.pureChatThinking,
     );
+    _flushThinkingBatch(
+      runtime,
+      taskId,
+      _StreamingTextStreamKind.agentThinking,
+    );
     runtime.currentThinkingMessages.remove(taskId);
-    runtime.deepThinkingContent = '';
-    runtime.isDeepThinking = false;
-    runtime.lastAgentTaskId = null;
-    runtime.activeThinkingCardId = null;
-    runtime.pendingThinkingRoundSplit = false;
-    runtime.thinkingRound = 0;
+    if (ownsActiveThinkingState) {
+      runtime.deepThinkingContent = '';
+      runtime.isDeepThinking = false;
+    }
+    if (runtime.lastAgentTurnId == taskId) {
+      runtime.lastAgentTurnId = null;
+    }
+    if (ownsActiveThinkingState &&
+        runtime.activeThinkingCardId != null &&
+        (runtime.activeThinkingCardId == taskId ||
+            runtime.activeThinkingCardId!.startsWith('$taskId-thinking'))) {
+      runtime.activeThinkingCardId = null;
+    }
+    if (ownsActiveThinkingState) {
+      runtime.pendingThinkingRoundSplit = false;
+      runtime.thinkingRound = 0;
+    }
     if (removeCard) {
       runtime.messages.removeWhere((message) {
         final cardData = message.cardData;
@@ -746,20 +1041,71 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   }) {
     final runtime = runtimeFor(conversationId: conversationId, mode: mode);
     if (runtime == null) return;
+    runtime.persistenceGeneration += 1;
     _flushRuntimeStreamingText(runtime);
-    runtime.currentDispatchTaskId = null;
+    // Clearing a runtime is a lifecycle boundary, not just a UI reset. Fence
+    // both local and official identities before releasing them, and remove
+    // the local binding so late preflight/error callbacks cannot resolve back
+    // into a new session that reuses this conversation.
+    final localRunId =
+        runtime.activeRunId?.trim() ??
+        runtime.currentDispatchTurnId?.trim() ??
+        runtime.lastAgentTurnId?.trim() ??
+        '';
+    final officialTurnId = runtime.activeAcpTurnId?.trim() ?? '';
+    if (localRunId.isNotEmpty) {
+      _rememberCompletedTurn(runtime, localRunId);
+    }
+    if (officialTurnId.isNotEmpty) {
+      _rememberCompletedTurn(runtime, officialTurnId);
+      runtime.rememberCompletedAcpTurn(officialTurnId);
+    }
+    _taskBindings.removeWhere(
+      (_, binding) =>
+          binding.conversationId == conversationId && binding.mode == mode,
+    );
+    final sessionsToRetire = <String>{
+      ...runtime.knownAcpSessionIds,
+      if (runtime.activeAcpSessionId?.trim().isNotEmpty == true)
+        runtime.activeAcpSessionId!.trim(),
+    };
+    runtime.retiredAcpSessionIds.addAll(sessionsToRetire);
+    while (runtime.retiredAcpSessionIds.length > 64) {
+      runtime.retiredAcpSessionIds.remove(runtime.retiredAcpSessionIds.first);
+    }
+    runtime.allowRetiredAcpSessionReactivation = false;
+    runtime.currentDispatchTurnId = null;
+    runtime.activeRunId = null;
+    runtime.activeAcpTurnId = null;
+    runtime.activeAcpSessionId = null;
+    runtime.isAiResponding = false;
+    runtime.isExecutingTask = false;
+    runtime.isCheckingExecutableTask = false;
     runtime.isContextCompressing = false;
     runtime.deepThinkingContent = '';
     runtime.isDeepThinking = false;
     runtime.currentThinkingMessages.clear();
+    runtime.currentAcpUserMessages.clear();
+    runtime.currentAiMessages.clear();
+    runtime.standaloneProcessRunIds.clear();
+    runtime.agentReplayDeltaOffsets.clear();
+    runtime.pendingAcpPerformanceMetrics.clear();
+    runtime.pendingAcpReasoningCardData.clear();
+    runtime.pendingAcpAssistantPresentation.clear();
+    runtime.processedAcpEventIds.clear();
+    runtime.acpCompatibilityWarningShown = false;
+    runtime.availableAcpCommands = <Map<String, dynamic>>[];
+    runtime.acpConfigOptions = <Map<String, dynamic>>[];
+    runtime.currentAcpModeId = null;
+    runtime.acpSessionInfo = <String, dynamic>{};
+    runtime.acpExtensionUpdates.clear();
     runtime.currentThinkingStage = ThinkingStage.thinking.value;
-    runtime.lastAgentTaskId = null;
+    runtime.lastAgentTurnId = null;
     runtime.pendingAgentTextTaskId = null;
     runtime.waitingThinkingBeforeAgentTextTaskId = null;
     runtime.activeToolCardId = null;
     runtime.activeThinkingCardId = null;
     runtime.activeContextCompactionMarkerId = null;
-    runtime.agentStreamStates.clear();
     runtime.pendingThinkingRoundSplit = false;
     runtime.toolCardSequence = 0;
     runtime.thinkingRound = 0;
@@ -802,201 +1148,63 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   }) {
     final runtime = runtimeFor(conversationId: conversationId, mode: mode);
     if (runtime == null) return;
-    final cardId = runtime.activeToolCardId;
-    if (cardId == null) return;
+    final activeCard = runtime.activeToolCardId == null
+        ? null
+        : runtime.messages.cast<ChatMessageModel?>().firstWhere(
+            (message) => message?.id == runtime.activeToolCardId,
+            orElse: () => null,
+          );
+    final taskId =
+        (runtime.activeRunId ??
+                runtime.currentDispatchTurnId ??
+                activeCard?.cardData?['taskId'] ??
+                activeCard?.cardData?['taskID'])
+            ?.toString()
+            .trim() ??
+        '';
+    if (taskId.isEmpty) return;
 
-    final index = runtime.messages.indexWhere((msg) => msg.id == cardId);
-    if (index == -1) {
-      runtime.activeToolCardId = null;
-      notifyListeners();
-      return;
+    var changed = false;
+    for (var index = 0; index < runtime.messages.length; index++) {
+      final message = runtime.messages[index];
+      final cardData = message.cardData;
+      if (cardData == null ||
+          (cardData['type'] != 'agent_tool_summary' &&
+              cardData['type'] != kAgentRequestCardType)) {
+        continue;
+      }
+      final cardTaskId = (cardData['taskId'] ?? cardData['taskID'] ?? '')
+          .toString()
+          .trim();
+      if (cardTaskId != taskId) continue;
+      final currentStatus = (cardData['status'] ?? '').toString().toLowerCase();
+      final isActive = cardData['type'] == 'agent_tool_summary'
+          ? const <String>{
+              'running',
+              'pending',
+              'progress',
+              'in_progress',
+            }.contains(currentStatus)
+          : const <String>{
+              'pending',
+              'running',
+              'waiting',
+            }.contains(currentStatus);
+      if (!isActive) continue;
+      final nextCardData = Map<String, dynamic>.from(cardData)
+        ..['status'] = 'interrupted'
+        ..['success'] = false;
+      if (summary != null && summary.trim().isNotEmpty) {
+        nextCardData['summary'] = summary.trim();
+      }
+      runtime.messages[index] = message.copyWith(
+        content: {'cardData': nextCardData, 'id': message.id},
+      );
+      changed = true;
     }
-
-    final existingCardData = Map<String, dynamic>.from(
-      runtime.messages[index].cardData ?? const {},
-    );
-    existingCardData['status'] = 'interrupted';
-    existingCardData['success'] = false;
-    if (summary != null && summary.trim().isNotEmpty) {
-      existingCardData['summary'] = summary.trim();
-    }
-    runtime.messages[index] = runtime.messages[index].copyWith(
-      content: {'cardData': existingCardData, 'id': cardId},
-    );
     runtime.activeToolCardId = null;
-    notifyListeners();
-  }
-
-  Future<void> persistRuntimeConversation({
-    required int conversationId,
-    required String mode,
-    bool generateSummary = false,
-    bool markComplete = false,
-    bool persistMessages = false,
-  }) async {
-    _cancelPendingPersistence(conversationId: conversationId, mode: mode);
-    if (isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
-      return;
-    }
-    final runtime = runtimeFor(conversationId: conversationId, mode: mode);
-    if (runtime == null) return;
-    _flushRuntimeStreamingText(runtime);
-    if (runtime.messages.isEmpty) return;
-
-    final snapshotMessages = List<ChatMessageModel>.from(runtime.messages);
-    final snapshotConversation = runtime.conversation;
-    final conversationMode = _conversationModeFromRuntimeMode(
-      mode,
-      conversation: snapshotConversation,
-    );
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final lastMessage = snapshotMessages.isNotEmpty
-        ? (snapshotMessages[0].text ?? '')
-        : '';
-    final messageCount = snapshotMessages.length;
-    final firstUserMessage = snapshotMessages.firstWhere(
-      (m) => m.user == 1,
-      orElse: () => ChatMessageModel.userMessage("default"),
-    );
-    final userText = firstUserMessage.text ?? 'conversation';
-    final title = userText.length > 20
-        ? '${userText.substring(0, 20)}...'
-        : userText;
-
-    String? summary = snapshotConversation?.summary;
-    if (generateSummary) {
-      final history = _buildConversationHistoryText(snapshotMessages);
-      summary = history.isEmpty
-          ? null
-          : await ConversationService.generateConversationSummary(
-              conversationHistory: history,
-            );
-    }
-
-    final baseConversation =
-        (snapshotConversation?.mode == conversationMode
-            ? snapshotConversation
-            : snapshotConversation?.copyWith(mode: conversationMode)) ??
-        ConversationModel(
-          id: conversationId,
-          mode: conversationMode,
-          title: title,
-          summary: summary,
-          status: 0,
-          lastMessage: lastMessage,
-          messageCount: messageCount,
-          createdAt: now,
-          updatedAt: now,
-        );
-
-    final updatedConversation = baseConversation.copyWith(
-      title: baseConversation.title.isEmpty ? title : baseConversation.title,
-      summary: summary ?? baseConversation.summary,
-      lastMessage: lastMessage,
-      messageCount: messageCount,
-      updatedAt: now,
-    );
-
-    await ConversationService.updateConversation(
-      updatedConversation,
-      preserveLatestMetadata: true,
-    );
-    if (persistMessages) {
-      // replaceConversationMessages is echoed back to Flutter as
-      // messages_replaced. The runtime already owns this exact snapshot; if
-      // the page reloads it while the completed run is folding, every row is
-      // recreated and the chat visibly flashes through its empty state.
-      runtime.expectLocalMessageSnapshotEcho();
-      await ConversationHistoryService.saveConversationMessages(
-        conversationId,
-        snapshotMessages,
-        mode: conversationMode,
-      );
-    }
-    runtime.conversation = updatedConversation;
-    if (markComplete) {
-      await ConversationService.completeConversation(
-        conversationId,
-        mode: conversationMode,
-      );
-    }
-  }
-
-  void schedulePersistRuntimeConversation({
-    required int conversationId,
-    required String mode,
-    bool generateSummary = false,
-    bool markComplete = false,
-    bool persistMessages = false,
-    Duration delay = const Duration(milliseconds: 350),
-  }) {
-    final key = _runtimeKey(conversationId: conversationId, mode: mode);
-    if (_ephemeralRuntimeKeys.contains(key)) {
-      return;
-    }
-    final previous = _pendingPersistence[key];
-    previous?.timer.cancel();
-    final nextGenerateSummary =
-        generateSummary || (previous?.generateSummary ?? false);
-    final nextMarkComplete = markComplete || (previous?.markComplete ?? false);
-    final nextPersistMessages =
-        persistMessages || (previous?.persistMessages ?? false);
-    final timer = Timer(delay, () {
-      _pendingPersistence.remove(key);
-      unawaited(
-        persistRuntimeConversation(
-          conversationId: conversationId,
-          mode: mode,
-          generateSummary: nextGenerateSummary,
-          markComplete: nextMarkComplete,
-          persistMessages: nextPersistMessages,
-        ),
-      );
-    });
-    _pendingPersistence[key] = _PendingPersistenceRequest(
-      conversationId: conversationId,
-      mode: mode,
-      timer: timer,
-      generateSummary: nextGenerateSummary,
-      markComplete: nextMarkComplete,
-      persistMessages: nextPersistMessages,
-    );
-  }
-
-  Future<void> flushPendingPersistence({
-    required int conversationId,
-    required String mode,
-  }) async {
-    final key = _runtimeKey(conversationId: conversationId, mode: mode);
-    final request = _pendingPersistence.remove(key);
-    if (request == null) {
-      return;
-    }
-    request.timer.cancel();
-    if (_ephemeralRuntimeKeys.contains(key)) {
-      return;
-    }
-    await persistRuntimeConversation(
-      conversationId: request.conversationId,
-      mode: request.mode,
-      generateSummary: request.generateSummary,
-      markComplete: request.markComplete,
-      persistMessages: request.persistMessages,
-    );
-  }
-
-  Future<void> flushAllPendingPersistence() async {
-    final requests = _pendingPersistence.values.toList(growable: false);
-    _pendingPersistence.clear();
-    for (final request in requests) {
-      request.timer.cancel();
-      await persistRuntimeConversation(
-        conversationId: request.conversationId,
-        mode: request.mode,
-        generateSummary: request.generateSummary,
-        markComplete: request.markComplete,
-        persistMessages: request.persistMessages,
-      );
+    if (changed) {
+      notifyListeners();
     }
   }
 

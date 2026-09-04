@@ -27,8 +27,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * in-flight subagent's coroutine.
  *
  * NOTE: We deliberately reuse the parent's existing [AgentToolExecutor]
- * router rather than constructing a new one — the router is stateless per
- * call, so this saves resources. The lazy provider is required because
+ * router rather than constructing a new one. The router may own terminal,
+ * browser, or plugin resources, so child orchestrators are explicitly
+ * non-owners and must never dispose it. The lazy provider is required because
  * SubagentToolHandler → SubagentDispatcher → router is a construction-time
  * cycle that we break with deferred lookup.
  */
@@ -179,7 +180,8 @@ class SubagentDispatcher(
                 toolRouter = toolExecutorProvider(),
                 eventAdapter = eventAdapter,
                 model = model,
-                toolImageContinuationPolicy = toolImageContinuationPolicy
+                toolImageContinuationPolicy = toolImageContinuationPolicy,
+                ownsToolRouter = false
             )
             val result = orchestrator.run(
                 AgentOrchestrator.Input(

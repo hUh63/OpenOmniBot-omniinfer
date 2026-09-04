@@ -10,10 +10,12 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -178,6 +180,241 @@ class HttpControllerResponsesTest {
         val tools = root["tools"]!!.jsonArray
         assertEquals("function", tools[0].jsonObject["type"]?.jsonPrimitive?.content)
         assertEquals("get_weather", tools[0].jsonObject["name"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `responses request backfills missing function call output before sending history`() {
+        val method = HttpController::class.java.getDeclaredMethod(
+            "buildOpenAIResponsesRequestBody",
+            String::class.java,
+            String::class.java,
+        )
+        method.isAccessible = true
+        val payload = method.invoke(
+            HttpController,
+            """
+                {
+                  "model": "gpt-4.1",
+                  "messages": [
+                    {"role": "user", "content": "检查项目"},
+                    {
+                      "role": "assistant",
+                      "tool_calls": [
+                        {
+                          "id": "call_ptpAmLkngkIT9h4H4fb1D2mj",
+                          "type": "function",
+                          "function": {"name": "file_list", "arguments": "{}"}
+                        }
+                      ]
+                    },
+                    {"role": "user", "content": "继续"}
+                  ]
+                }
+            """.trimIndent(),
+            "gpt-4.1",
+        ) as String
+
+        val input = json.parseToJsonElement(payload).jsonObject["input"]!!.jsonArray
+        val functionCallIndex = input.indexOfFirst {
+            it.jsonObject["type"]?.jsonPrimitive?.content == "function_call"
+        }
+        val functionOutputIndex = input.indexOfFirst {
+            it.jsonObject["type"]?.jsonPrimitive?.content == "function_call_output"
+        }
+
+        assertTrue(functionCallIndex >= 0)
+        assertTrue(functionOutputIndex > functionCallIndex)
+        assertEquals(
+            "call_ptpAmLkngkIT9h4H4fb1D2mj",
+            input[functionOutputIndex].jsonObject["call_id"]?.jsonPrimitive?.content,
+        )
+        assertTrue(
+            input[functionOutputIndex].jsonObject["output"]?.jsonPrimitive?.content
+                ?.contains("missing", ignoreCase = true) == true
+        )
+    }
+
+    @Test
+    fun `responses request bounds long local tool call ids and keeps call output correlated`() {
+        val method = HttpController::class.java.getDeclaredMethod(
+            "buildOpenAIResponsesRequestBody",
+            String::class.java,
+            String::class.java,
+        )
+        method.isAccessible = true
+        val longCallId = "call_" + "0123456789".repeat(9)
+        check(longCallId.length > 64)
+        val payload = method.invoke(
+            HttpController,
+            """
+                {
+                  "model": "gpt-4.1",
+                  "messages": [
+                    {"role": "user", "content": "执行工具"},
+                    {
+                      "role": "assistant",
+                      "tool_calls": [
+                        {
+                          "id": "$longCallId",
+                          "type": "function",
+                          "function": {"name": "shell", "arguments": "{}"}
+                        }
+                      ]
+                    },
+                    {"role": "tool", "tool_call_id": "$longCallId", "content": "done"}
+                  ]
+                }
+            """.trimIndent(),
+            "gpt-4.1",
+        ) as String
+
+        val input = json.parseToJsonElement(payload).jsonObject["input"]!!.jsonArray
+        val functionCall = input.first {
+            it.jsonObject["type"]?.jsonPrimitive?.content == "function_call"
+        }.jsonObject
+        val functionOutput = input.first {
+            it.jsonObject["type"]?.jsonPrimitive?.content == "function_call_output"
+        }.jsonObject
+        val wireCallId = functionCall["call_id"]!!.jsonPrimitive.content
+
+        assertTrue(wireCallId.length <= 64)
+        assertTrue(wireCallId.matches(Regex("^[a-zA-Z0-9_-]+$")))
+        assertEquals(wireCallId, functionOutput["call_id"]?.jsonPrimitive?.content)
+        assertFalse(wireCallId == longCallId)
+    }
+
+    @Test
+    fun `chat completions request applies the same wire call id boundary`() {
+        val method = HttpController::class.java.getDeclaredMethod(
+            "encodeChatCompletionRequest",
+            ChatCompletionRequest::class.java,
+        )
+        method.isAccessible = true
+        val longCallId = "session/turn/" + "x".repeat(90)
+        val payload = method.invoke(
+            HttpController,
+            ChatCompletionRequest(
+                model = "gpt-4.1",
+                messages = listOf(
+                    ChatCompletionMessage(
+                        role = "assistant",
+                        toolCalls = listOf(
+                            cn.com.omnimind.baselib.llm.AssistantToolCall(
+                                id = longCallId,
+                                function = cn.com.omnimind.baselib.llm.AssistantToolCallFunction(
+                                    name = "shell",
+                                    arguments = "{}",
+                                ),
+                            ),
+                        ),
+                    ),
+                    ChatCompletionMessage(
+                        role = "tool",
+                        toolCallId = longCallId,
+                        content = kotlinx.serialization.json.JsonPrimitive("done"),
+                    ),
+                ),
+            ),
+        ) as String
+
+        val messages = json.parseToJsonElement(payload).jsonObject["messages"]!!.jsonArray
+        val assistantId = messages[0].jsonObject["tool_calls"]!!
+            .jsonArray[0].jsonObject["id"]!!.jsonPrimitive.content
+        val outputId = messages[1].jsonObject["tool_call_id"]!!.jsonPrimitive.content
+        assertTrue(assistantId.length <= 64)
+        assertEquals(assistantId, outputId)
+        assertFalse(assistantId == longCallId)
+    }
+
+    @Test
+    fun `chat completions wire normalization preserves resolved model`() {
+        val method = HttpController::class.java.getDeclaredMethod(
+            "buildOpenAICompatibleRequestBody",
+            String::class.java,
+            String::class.java,
+            Boolean::class.javaPrimitiveType,
+            String::class.java,
+            String::class.java,
+        )
+        method.isAccessible = true
+        val payload = method.invoke(
+            HttpController,
+            """
+                {
+                  "model": "requested-model",
+                  "messages": [{"role": "user", "content": "hello"}]
+                }
+            """.trimIndent(),
+            "resolved-model",
+            true,
+            "openai_compatible",
+            "https://provider.example.com",
+        ) as String
+
+        assertEquals(
+            "resolved-model",
+            json.parseToJsonElement(payload).jsonObject["model"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
+    fun `responses request normalizes ACP tool names consistently across history catalog and choice`() {
+        val method = HttpController::class.java.getDeclaredMethod(
+            "buildOpenAIResponsesRequestBody",
+            String::class.java,
+            String::class.java,
+        )
+        method.isAccessible = true
+        val payload = method.invoke(
+            HttpController,
+            """
+                {
+                  "model": "gpt-5.6-sol",
+                  "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "agent.status"}
+                  },
+                  "tools": [
+                    {
+                      "type": "function",
+                      "function": {
+                        "name": "agent.status",
+                        "description": "Read agent status",
+                        "parameters": {"type":"object","properties":{}}
+                      }
+                    }
+                  ],
+                  "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": "second"},
+                    {"role": "user", "content": "third"},
+                    {
+                      "role": "assistant",
+                      "content": "fourth",
+                      "tool_calls": [
+                        {
+                          "id": "call_legacy",
+                          "type": "function",
+                          "function": {"name": "agent.status", "arguments": "{}"}
+                        }
+                      ]
+                    }
+                  ]
+                }
+            """.trimIndent(),
+            "gpt-5.6-sol",
+        ) as String
+
+        val root = json.parseToJsonElement(payload).jsonObject
+        val historyName = root["input"]!!.jsonArray[4]
+            .jsonObject["name"]!!.jsonPrimitive.content
+        val catalogName = root["tools"]!!.jsonArray[0]
+            .jsonObject["name"]!!.jsonPrimitive.content
+        val choiceName = root["tool_choice"]!!.jsonObject["name"]!!.jsonPrimitive.content
+
+        assertTrue(historyName.matches(Regex("^[a-zA-Z0-9_-]+$")))
+        assertEquals(historyName, catalogName)
+        assertEquals(historyName, choiceName)
     }
 
     @Test
@@ -565,6 +802,42 @@ class HttpControllerResponsesTest {
         assertEquals("Hello world", turn.message.contentText())
         assertEquals("stop", turn.finishReason)
         assertEquals(2, turn.usage?.completionTokens)
+    }
+
+    @Test
+    fun `responses stream adapter surfaces incomplete response as terminal failure`() {
+        var failure: Throwable? = null
+        var failureResponse: Response? = null
+        val wrapped = HttpController.wrapResponsesListener(
+            object : EventSourceListener() {
+                override fun onFailure(
+                    eventSource: EventSource,
+                    t: Throwable?,
+                    response: Response?,
+                ) {
+                    failure = t
+                    failureResponse = response
+                }
+            },
+        )
+
+        val source = dummyEventSource()
+        wrapped.onEvent(
+            source,
+            null,
+            "response.output_text.delta",
+            """{"type":"response.output_text.delta","delta":"准备调用工具"}""",
+        )
+        wrapped.onEvent(
+            source,
+            null,
+            "response.incomplete",
+            """{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}""",
+        )
+
+        assertNotNull(failure)
+        assertEquals(422, failureResponse?.code)
+        assertTrue(failureResponse?.body?.string()?.contains("max_output_tokens") == true)
     }
 
     private fun dummyEventSource(): EventSource {

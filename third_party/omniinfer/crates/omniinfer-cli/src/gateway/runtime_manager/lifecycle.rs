@@ -100,6 +100,7 @@ pub(super) fn annotate_restore_state(
         "backend": persistent_state.selected_backend,
         "model": selected.model,
         "mmproj": selected.mmproj,
+        "no_mmproj": selected.no_mmproj,
         "ctx_size": selected.ctx_size,
         "request_defaults": selected.request_defaults,
     });
@@ -142,6 +143,15 @@ pub(super) fn model_load_response(loaded: &LoadedRustRuntime, already_loaded: bo
         "route_state": loaded.route_state.as_str(),
         "allocation_id": loaded.allocation_id.get(),
         "resource_budget": resource_budget_payload(&loaded.resource_budget),
+        "runtime_placement": runtime_placement_payload(loaded.runtime_placement.as_ref()),
+        "speculative_admission": loaded.speculative_admission.as_ref().map(|admission| json!({
+            "speculative": true,
+            "device": admission.device,
+            "estimated_cuda_bytes": admission.estimated,
+            "exclusive_reservation_bytes": admission.exclusive,
+            "shortfall_bytes": admission.shortfall,
+            "waived_allocator_slack_bytes": admission.waived_allocator_slack,
+        })),
         "launch_command": info.command,
         "log_path": info.log_path.display().to_string(),
         "external_server_protocol": loaded.external_server_protocol.as_str(),
@@ -225,6 +235,15 @@ pub(super) fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
         "route_state": loaded.route_state.as_str(),
         "allocation_id": loaded.allocation_id.get(),
         "resource_budget": resource_budget_payload(&loaded.resource_budget),
+        "runtime_placement": runtime_placement_payload(loaded.runtime_placement.as_ref()),
+        "speculative_admission": loaded.speculative_admission.as_ref().map(|admission| json!({
+            "speculative": true,
+            "device": admission.device,
+            "estimated_cuda_bytes": admission.estimated,
+            "exclusive_reservation_bytes": admission.exclusive,
+            "shortfall_bytes": admission.shortfall,
+            "waived_allocator_slack_bytes": admission.waived_allocator_slack,
+        })),
         "launch_args": loaded.launch_args,
         "cuda_visible_devices": loaded.cuda_visible_devices,
         "warning": loaded.cuda_warning,
@@ -234,5 +253,20 @@ pub(super) fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
         "client_endpoint": loaded.client_endpoint,
         "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
         "backend_log": info.log_path.display().to_string(),
+    })
+}
+
+pub(super) fn runtime_placement_payload(placement: Option<&RuntimePlacement>) -> Value {
+    placement.map_or(Value::Null, |placement| {
+        json!({
+            "source": "llama.cpp_startup_log",
+            "policy": placement.policy.as_str(),
+            "requested_gpu_layers": placement.policy.requested_gpu_layers(),
+            "mode": placement.mode,
+            "offloaded_layers": placement.offloaded_layers,
+            "total_layers": placement.total_layers,
+            "reported_buffer_bytes": domain_bytes_payload(&placement.reported_bytes),
+            "reconciled_budget": resource_budget_payload(&placement.reconciled_budget),
+        })
     })
 }

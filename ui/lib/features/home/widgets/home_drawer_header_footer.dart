@@ -22,6 +22,76 @@ extension _HomeDrawerHeaderFooter on HomeDrawerState {
     return context.omniPalette.textSecondary;
   }
 
+  Widget _buildWebAgentShortcutBar() {
+    final items = <_DrawerWebShortcut>[
+      if (widget.onLaunchKimiWeb != null)
+        _DrawerWebShortcut(
+          label: 'Kimi Web',
+          agentId: 'kimi-code-acp',
+          onTap: widget.onLaunchKimiWeb!,
+        ),
+      if (widget.onLaunchDeepSeekWeb != null)
+        _DrawerWebShortcut(
+          label: 'DSH Web',
+          agentId: 'deepseek-harness-acp',
+          onTap: widget.onLaunchDeepSeekWeb!,
+        ),
+    ];
+    final surface = context.isDarkTheme
+        ? context.omniPalette.surfaceSecondary
+        : Colors.white;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+      child: Row(
+        children: [
+          for (int index = 0; index < items.length; index++) ...[
+            if (index > 0) const SizedBox(width: 8),
+            Expanded(
+              child: Material(
+                color: surface,
+                borderRadius: BorderRadius.circular(12),
+                child: InkWell(
+                  key: ValueKey('home-drawer-web-${items[index].agentId}'),
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () {
+                    _maybeCloseDrawer();
+                    items[index].onTap();
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 9,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        AgentBrandIcon(agentId: items[index].agentId, size: 18),
+                        const SizedBox(width: 7),
+                        Flexible(
+                          child: Text(
+                            items[index].label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: _drawerTextColor,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              fontFamily: 'PingFang SC',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildFooterShortcutBar() {
     final items = <_DrawerShortcutAction>[
       _DrawerShortcutAction(
@@ -120,4 +190,16 @@ extension _HomeDrawerHeaderFooter on HomeDrawerState {
       ),
     );
   }
+}
+
+class _DrawerWebShortcut {
+  const _DrawerWebShortcut({
+    required this.label,
+    required this.agentId,
+    required this.onTap,
+  });
+
+  final String label;
+  final String agentId;
+  final VoidCallback onTap;
 }

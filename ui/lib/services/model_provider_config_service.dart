@@ -406,27 +406,35 @@ class ModelProviderConfigService {
     try {
       final result = await AssistsMessageService.assistCore
           .invokeMethod<Map<dynamic, dynamic>>('listModelProviderProfiles');
-      return ModelProviderProfilesPayload.fromMap(result);
+      final payload = ModelProviderProfilesPayload.fromMap(result);
+      // A clean install can legitimately have no editable profile yet.  Keep
+      // the configuration page usable so the user can register the first
+      // Provider instead of rendering an empty page and losing the save path.
+      if (payload.profiles.isNotEmpty) return payload;
+      return _emptyEditableProfilePayload();
     } on PlatformException {
-      final fallback = await getConfig();
-      final profile = ModelProviderProfileSummary(
-        id: fallback.id.isNotEmpty ? fallback.id : 'profile-1',
-        name: fallback.name.isNotEmpty ? fallback.name : 'Provider 1',
-        baseUrl: fallback.baseUrl,
-        apiKey: fallback.apiKey,
-        customHeaders: fallback.customHeaders,
-        sourceType: fallback.providerType,
-        readOnly: fallback.readOnly,
-        ready: fallback.ready,
-        statusText: fallback.statusText,
-        configured: fallback.configured,
-        wireApi: fallback.wireApi,
-      );
-      return ModelProviderProfilesPayload(
-        profiles: [profile],
-        editingProfileId: profile.id,
-      );
+      return _emptyEditableProfilePayload();
     }
+  }
+
+  static ModelProviderProfilesPayload _emptyEditableProfilePayload() {
+    const profile = ModelProviderProfileSummary(
+      id: 'profile-1',
+      name: 'Provider 1',
+      baseUrl: '',
+      apiKey: '',
+      customHeaders: <String, String>{},
+      sourceType: 'custom',
+      readOnly: false,
+      ready: false,
+      statusText: '',
+      configured: false,
+      wireApi: 'chat_completions',
+    );
+    return const ModelProviderProfilesPayload(
+      profiles: <ModelProviderProfileSummary>[profile],
+      editingProfileId: 'profile-1',
+    );
   }
 
   static Future<ModelProviderProfileSummary> saveProfile({
@@ -465,7 +473,12 @@ class ModelProviderConfigService {
           'protocolType': protocolType,
           'wireApi': resolvedWireApi,
         });
-    return ModelProviderProfileSummary.fromMap(result);
+    final saved = ModelProviderProfileSummary.fromMap(result);
+    // Provider credentials/endpoint changes invalidate the previously
+    // verified catalog. The next explicit refresh repopulates the same
+    // persisted Provider document with the new profile revision.
+    await invalidateCachedFetchedModels(saved.id);
+    return saved;
   }
 
   static Future<ModelProviderProfilesPayload> deleteProfile(
@@ -767,6 +780,22 @@ class ModelProviderConfigService {
     }
   }
 
+  /// Remove the catalog document for a Provider whose credentials or endpoint
+  /// changed. This is deliberately local-only; it never starts a replacement
+  /// `/models` request. The caller decides when discovery is appropriate.
+  static Future<void> invalidateCachedFetchedModels(String profileId) async {
+    final normalizedProfileId = _canonicalProfileId(profileId);
+    if (normalizedProfileId.isEmpty) return;
+    await _migrateLegacyStorageIfNeeded(normalizedProfileId);
+    final current = _readJsonMap(_kCachedFetchedModelsKey);
+    if (!current.containsKey(normalizedProfileId)) return;
+    current.remove(normalizedProfileId);
+    await StorageService.setString(
+      _kCachedFetchedModelsKey,
+      jsonEncode(current),
+    );
+  }
+
   static Future<void> saveCachedFetchedModels({
     required String profileId,
     required String apiBase,
@@ -928,36 +957,71 @@ class ModelProviderConfigService {
     return groups;
   }
 
-  static Future<List<ProviderModelGroup>> loadChatModelGroups() async {
-    final payload = await listProfiles();
-    final groups = <ProviderModelGroup>[];
-    for (final profile in payload.profiles) {
-      List<ProviderModelOption> models;
-      // The official runtime catalog is capability-scoped and is not managed
-      // by the BYOK visibility list. Refresh its full text catalog here so the
-      // chat selector does not degrade to only the scene-bound fallback model.
-      if (profile.sourceType == 'omnibot_official' && profile.configured) {
-        try {
-          models = await fetchModels(
-            profileId: profile.id,
-            providerName: profile.name,
-            capability: 'text',
-          );
-        } catch (_) {
-          models = await getChatModelOptionsForProfile(
-            profile.id,
-            profile: profile,
-          );
-        }
-      } else {
-        models = await getChatModelOptionsForProfile(
-          profile.id,
-          profile: profile,
-        );
-      }
-      groups.add(ProviderModelGroup(profile: profile, models: models));
+  static Future<List<ProviderModelOption>> _loadChatModelOptionsForProfile(
+    ModelProviderProfileSummary profile, {
+    required bool refresh,
+  }) async {
+    if (!profile.configured) {
+      return const <ProviderModelOption>[];
     }
-    return groups;
+
+    final cached = await getCachedFetchedModels(
+      profileId: profile.id,
+      apiBase: profile.baseUrl,
+      profileRevision: profile.revision,
+    );
+    final cachedForDisplay = cached;
+    final manualIds = profile.sourceType == 'omnibot_official'
+        ? const <String>[]
+        : await getManualModelIds(profileId: profile.id);
+    final hiddenModelIds = await getHiddenChatModelIds(profileId: profile.id);
+
+    List<ProviderModelOption> visibleModels(
+      List<ProviderModelOption> remoteModels,
+    ) {
+      return filterChatModelOptions(
+        models: mergeModelOptions(
+          remoteModels: remoteModels,
+          manualModelIds: manualIds,
+        ),
+        hiddenModelIds: hiddenModelIds,
+      );
+    }
+
+    if (!refresh) {
+      return visibleModels(cachedForDisplay);
+    }
+
+    try {
+      final fetched = await fetchModels(
+        profileId: profile.id,
+        providerName: profile.name,
+        capability: 'text',
+      );
+      return visibleModels(<ProviderModelOption>[...fetched, ...cached]);
+    } catch (_) {
+      // Keep only the catalog verified for this exact Provider revision. A
+      // credential/endpoint edit must not resurrect an older document merely
+      // because the network refresh failed.
+      return visibleModels(cached);
+    }
+  }
+
+  static Future<List<ProviderModelGroup>> loadChatModelGroups({
+    bool refresh = false,
+  }) async {
+    final payload = await listProfiles();
+    // Startup and conversation reads are cache-only. Callers must opt into
+    // refresh=true only for an explicit catalog refresh action.
+    return Future.wait(
+      payload.profiles.map((profile) async {
+        final models = await _loadChatModelOptionsForProfile(
+          profile,
+          refresh: refresh,
+        );
+        return ProviderModelGroup(profile: profile, models: models);
+      }),
+    );
   }
 
   /// Forces the small platform-owned text catalog independently of whichever

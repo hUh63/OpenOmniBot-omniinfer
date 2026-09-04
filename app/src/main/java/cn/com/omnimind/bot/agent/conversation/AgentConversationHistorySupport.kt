@@ -912,10 +912,18 @@ internal object AgentConversationHistorySupport {
         payload: Map<String, Any?>
     ): Map<String, Any?> {
         val messageId = entry.entryId
-        val status = entry.status.ifBlank {
+        val storedStatus = entry.status.ifBlank {
             payload["status"]?.toString()?.trim().orEmpty()
                 .ifBlank { AgentConversationHistoryRepository.STATUS_SUCCESS }
         }
+        val previewPayload = parseJsonMap(payload["resultPreviewJson"]?.toString().orEmpty())
+        val rawResultPayload = parseJsonMap(payload["rawResultJson"]?.toString().orEmpty())
+        val clarificationQuestion = firstNonBlank(
+            payload["question"],
+            previewPayload["question"],
+            rawResultPayload["question"]
+        ).orEmpty()
+        val status = storedStatus
         val toolType = payload["toolType"]?.toString()?.trim().orEmpty()
             .ifEmpty { "builtin" }
         val terminalOutput = payload["terminalOutput"]?.toString().orEmpty()
@@ -970,6 +978,12 @@ internal object AgentConversationHistorySupport {
             "summary" to trimText(
                 payload["summary"]?.toString().orEmpty().ifEmpty { entry.summary },
                 MAX_TOOL_SUMMARY_CHARS
+            ),
+            "question" to clarificationQuestion.takeIf { it.isNotBlank() },
+            "missingFields" to (
+                payload["missingFields"] ?:
+                    previewPayload["missingFields"] ?:
+                    rawResultPayload["missingFields"]
             ),
             "reasoning_content" to safeReasoningContent,
             "progress" to trimText(
@@ -1773,6 +1787,11 @@ internal object AgentConversationHistorySupport {
             null
         }
         val safeStreamMeta = compactDisplayStreamMeta(payload["streamMeta"])
+        val safeTurnUsage = toStringAnyMap(payload["turnUsage"])
+            .mapValues { (_, value) -> parseLong(value) }
+            .filterValues { value -> value != null }
+            .mapValues { (_, value) -> value!! }
+            .takeIf { it.isNotEmpty() }
         val safeAttachments = compactDisplayList(content["attachments"])
         val agentId = firstNonBlank(content["agentId"], safeStreamMeta?.get("agentId"))
         val agentName = firstNonBlank(content["agentName"], safeStreamMeta?.get("agentName"))
@@ -1794,6 +1813,7 @@ internal object AgentConversationHistorySupport {
                     default = entry.status == AgentConversationHistoryRepository.STATUS_ERROR
                 ),
                 streamMeta = safeStreamMeta,
+                turnUsage = safeTurnUsage,
                 createdAt = entry.createdAt
             )
         }

@@ -98,6 +98,7 @@ class AgentWorkspaceManager(
         private const val DIR_BROWSER = "browser"
         private const val DIR_SKILLS = "skills"
         private const val DIR_MEMORY = "memory"
+        private const val DIR_AUDIO = "audio"
         private const val DIR_PETS = "pets"
         private const val DIR_BUILTIN_PETS_ASSETS = "builtin_pets"
         private const val FILE_MEMORY = "MEMORY.md"
@@ -112,24 +113,9 @@ class AgentWorkspaceManager(
             return File(rootDirectory(context), INTERNAL_DIR)
         }
 
-        fun modelsDirectory(context: Context): File {
-            return File(internalRootDirectory(context), "models")
-        }
-
-        fun modelsMnnDirectory(context: Context): File {
-            return File(modelsDirectory(context), "OmniInfer-mnn")
-        }
-
-        fun modelsQnnDirectory(context: Context): File {
-            return File(modelsDirectory(context), "OmniInfer-qnn")
-        }
-
-        fun modelsLlamaDirectory(context: Context): File {
-            return File(modelsDirectory(context), "OmniInfer-llama")
-        }
-
-        fun modelsLiteRtDirectory(context: Context): File {
-            return File(modelsDirectory(context), "OmniInfer-litert")
+        /** Voice synthesis cache directory under the managed workspace. */
+        fun audioDirectory(context: Context): File {
+            return File(internalRootDirectory(context), DIR_AUDIO)
         }
 
         fun androidRootPath(context: Context): String {
@@ -253,6 +239,7 @@ class AgentWorkspaceManager(
             browserDir,
             skillsDir,
             memoryDir,
+            audioDirectory(context),
             petsDir,
             shortMemoriesDir,
             memoryIndexDir
@@ -568,25 +555,6 @@ class AgentWorkspaceManager(
         } else {
             "$SHELL_ROOT_PATH/$relative"
         }
-    }
-
-    fun soulMarkdownFile(): File {
-        ensureRuntimeDirectories()
-        return File(agentDirectory(), "SOUL.md")
-    }
-
-    fun chatMarkdownFile(): File {
-        ensureRuntimeDirectories()
-        return File(agentDirectory(), "CHAT.md")
-    }
-
-    fun agentConfigFile(): File {
-        ensureRuntimeDirectories()
-        return File(agentDirectory(), "config.json")
-    }
-
-    private fun agentDirectory(): File {
-        return File(internalDir, "agent")
     }
 
     fun androidPathForShell(shellPath: String): File? {

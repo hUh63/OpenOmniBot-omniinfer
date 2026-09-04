@@ -35,6 +35,17 @@ data class ModelProviderProfile(
     fun isConfigured(): Boolean = baseUrl.isNotBlank()
 }
 
+/**
+ * Wire capabilities owned by the resolved Provider route. These are not ACP
+ * session capabilities: they describe the request/response contract between
+ * the shared Agent client and one upstream model endpoint.
+ */
+data class ProviderRequestCapabilities(
+    val supportsExplicitAutoToolChoice: Boolean = true,
+    val requiresReasoningContentForToolCalls: Boolean = false,
+    val requiresAnthropicThinkingReplay: Boolean = false,
+)
+
 data class ProviderModelOption(
     val id: String,
     val displayName: String = id,
@@ -86,6 +97,22 @@ data class SceneModelBindingEntry(
     val providerProfileId: String,
     @field:SerializedName(value = "modelId", alternate = ["c"])
     val modelId: String
+)
+
+/** Persisted voice-scene settings shared by native playback and Flutter UI. */
+data class SceneVoiceConfig(
+    @field:SerializedName(value = "autoPlay", alternate = ["a"])
+    val autoPlay: Boolean = false,
+    @field:SerializedName(value = "voiceId", alternate = ["b"])
+    val voiceId: String = "default_zh",
+    @field:SerializedName(value = "stylePreset", alternate = ["c"])
+    val stylePreset: String = "默认",
+    @field:SerializedName(value = "customStyle", alternate = ["d"])
+    val customStyle: String = "",
+    @field:SerializedName(value = "ttsMode", alternate = ["e"])
+    val ttsMode: String = "builtin",
+    @field:SerializedName(value = "customCurlCommand", alternate = ["f"])
+    val customCurlCommand: String = "",
 )
 
 data class SceneOperationConfig(

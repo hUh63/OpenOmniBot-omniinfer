@@ -111,7 +111,6 @@ flutter:
     - assets/welcome/distro_alpine.svg
     - assets/welcome/distro_ubuntu.svg
     - assets/welcome/next_page.svg
-    - assets/welcome/permission_accessibility.svg
     - assets/welcome/permission_authorized.svg
     - assets/welcome/permission_autostart.svg
     - assets/welcome/permission_battery.svg

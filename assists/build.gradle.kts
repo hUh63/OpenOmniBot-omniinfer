@@ -40,7 +40,6 @@ kotlin {
 dependencies {
     implementation(project(":baselib"))
     implementation(project(":androidgui"))
-    api(project(":accessibility"))
     api(libs.gson)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.core.ktx)

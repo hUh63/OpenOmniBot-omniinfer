@@ -20,6 +20,10 @@ import cn.com.omnimind.baselib.llm.decodeChatCompletionUsage
 import java.util.SortedMap
 import java.util.TreeMap
 
+internal class AgentIncompleteToolCallException(
+    val toolCallIndex: Int
+) : IllegalStateException("tool_call[$toolCallIndex] missing function.name")
+
 class AgentLlmStreamAccumulator(
     private val json: Json,
     private val includeReasoningInAssistantMessage: Boolean = false,
@@ -66,6 +70,12 @@ class AgentLlmStreamAccumulator(
     private var leadingVisibleBufferReleased = false
     private var outOfBandReasoningObserved = false
     private var lastNamedToolCallIndex: Int? = null
+    /**
+     * Some OpenAI-compatible gateways send the same reasoning value through
+     * multiple aliases in one SSE object (`reasoning_content`, `reasoning`,
+     * and `thinking`). Those aliases describe one payload, not three deltas.
+     */
+    private val reasoningPayloadsInChunk = mutableSetOf<String>()
 
     private var chunkIndex = 0
 
@@ -85,6 +95,7 @@ class AgentLlmStreamAccumulator(
     }
 
     private fun consumeSingleChunk(trimmed: String): Boolean {
+        reasoningPayloadsInChunk.clear()
         if (trimmed == "[DONE]") {
             seenDoneSignal = true
             return true
@@ -118,22 +129,26 @@ class AgentLlmStreamAccumulator(
             chunkHasPayload = chunkHasPayload || thisChoiceHasPayload
         }
 
-        // 兼容不同 Provider 的非标准 top-level text / message 回流
+        // 兼容不同 Provider 的非标准 top-level text / message 回流。
+        // reasoning 需要始终解析：部分网关会把正文放在 choices.delta，
+        // 同时把 reasoning 放在顶层；不能因为已经有正文就丢掉思考内容。
         if (!chunkHasPayload) {
             chunkHasPayload = appendTextPayload(root["text"]) || chunkHasPayload
             chunkHasPayload = appendTextPayload(root["message"]) || chunkHasPayload
             chunkHasPayload = appendTextPayload(root["output_text"]) || chunkHasPayload
-            appendReasoningPayload(root["reasoning_content"])
-            appendReasoningPayload(root["reasoning"])
-            appendReasoningPayload(root["thinking"])
+        }
+        appendReasoningPayload(root["reasoning_content"])
+        appendReasoningPayload(root["reasoning"])
+        appendReasoningPayload(root["thinking"])
 
-            val outputObj = root["output"] as? JsonObject
-            if (outputObj != null) {
+        val outputObj = root["output"] as? JsonObject
+        if (outputObj != null) {
+            if (!chunkHasPayload) {
                 chunkHasPayload = appendTextPayload(outputObj["text"]) || chunkHasPayload
                 chunkHasPayload = appendTextPayload(outputObj["content"]) || chunkHasPayload
-                appendReasoningPayload(outputObj["reasoning_content"])
-                appendReasoningPayload(outputObj["reasoning"])
             }
+            appendReasoningPayload(outputObj["reasoning_content"])
+            appendReasoningPayload(outputObj["reasoning"])
         }
 
         // Log parsed deltas
@@ -245,8 +260,7 @@ class AgentLlmStreamAccumulator(
 
     fun canFinalizeOnClosed(): Boolean {
         return hasDoneSignal() ||
-            !finishReason.isNullOrBlank() ||
-            (hasUsagePayload() && hasAssistantPayload())
+            !finishReason.isNullOrBlank()
     }
 
     fun buildTurn(): ChatCompletionTurn {
@@ -255,10 +269,11 @@ class AgentLlmStreamAccumulator(
         }
         flushInlineTextBuffer(final = true)
         reconcileMisindexedToolCallArguments()
+        discardDanglingToolCallPlaceholders()
         val toolCalls = toolCallBuilders.entries.map { (index, builder) ->
             val name = builder.name?.trim().orEmpty()
             if (name.isBlank()) {
-                throw IllegalStateException("tool_call[$index] missing function.name")
+                throw AgentIncompleteToolCallException(index)
             }
             AssistantToolCall(
                 id = builder.id?.takeIf { it.isNotBlank() } ?: "tool_call_$index",
@@ -339,6 +354,20 @@ class AgentLlmStreamAccumulator(
         val block = replay["block"] as? JsonObject ?: return false
         anthropicContentBlocks[index] = block
         return true
+    }
+
+    private fun discardDanglingToolCallPlaceholders() {
+        if (toolCallBuilders.values.none { !it.name.isNullOrBlank() }) return
+
+        val danglingIndices = toolCallBuilders.entries
+            .filter { (_, builder) ->
+                builder.name.isNullOrBlank() && builder.arguments.isEmpty()
+            }
+            .map { it.key }
+        danglingIndices.forEach { index ->
+            toolCallBuilders.remove(index)
+            OmniLog.w(TAG, "discarded dangling tool call placeholder at index=$index")
+        }
     }
 
     private fun reconcileMisindexedToolCallArguments() {
@@ -615,6 +644,9 @@ class AgentLlmStreamAccumulator(
         if (text.isEmpty()) {
             return
         }
+        if (!reasoningPayloadsInChunk.add(text)) {
+            return
+        }
         markOutOfBandReasoningObserved()
         appendReasoningText(text)
     }
@@ -845,7 +877,18 @@ class AgentLlmStreamAccumulator(
         if (text.isEmpty()) {
             return
         }
-        reasoningBuffer.append(text)
+        val existing = reasoningBuffer.toString()
+        when {
+            existing.isEmpty() -> reasoningBuffer.append(text)
+            // A few gateways expose cumulative snapshots instead of deltas.
+            // Only append the suffix that was not already accumulated.
+            text.startsWith(existing) -> reasoningBuffer.append(text.removePrefix(existing))
+            // A shorter snapshot is a replay/reset of the current provider
+            // value. Keep the already received text; the next snapshot will
+            // either extend it or the stream will complete with this value.
+            existing.startsWith(text) -> Unit
+            else -> reasoningBuffer.append(text)
+        }
     }
 
     private fun extractText(element: JsonElement?): String? {

@@ -7,8 +7,8 @@ Android and iOS use the embedded modules under `android/` and `ios/`.
 
 If you are running OmniInfer from a source checkout, prepare at least one local runtime backend before using the CLI.
 
-- Windows: build or install one of `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, or `llama.cpp-hip`; managed `vllm-wsl2-cuda` and `vllm-wsl2-rocm` are available for supported WSL2-capable NVIDIA and AMD systems. See [Build Guide: Windows](build.md#windows).
-- Linux: build one of `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, or `vllm-linux-cuda` first. See [Build Guide: Linux](build.md#linux).
+- Windows: build or install one of `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `stable-diffusion.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, or `llama.cpp-hip`; managed `vllm-wsl2-cuda` and `vllm-wsl2-rocm` are available for supported WSL2-capable NVIDIA and AMD systems. See [Build Guide: Windows](build.md#windows).
+- Linux: build one of `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `stable-diffusion.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, or `vllm-linux-cuda` first. See [Build Guide: Linux](build.md#linux).
 - macOS: build `llama.cpp-mac`, `llama.cpp-mac-intel`, `turboquant-mac`, or `mlx-mac` first. See [Build Guide: macOS](build.md#macos).
 
 If you are using a packaged release that already includes `runtime/`, you can skip this preparation step and jump straight to the CLI commands below.
@@ -180,9 +180,9 @@ Windows:
 
 Examples:
 
-- Linux: `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, `vllm-linux-cuda`, `vla.cpp-linux`, or `vla.cpp-linux-cuda`
+- Linux: `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `stable-diffusion.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, `vllm-linux-cuda`, `vla.cpp-linux`, or `vla.cpp-linux-cuda`
 - macOS: `llama.cpp-mac`, `llama.cpp-mac-intel`, `turboquant-mac`, or `mlx-mac`
-- Windows: `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, `llama.cpp-hip`, or managed `vllm-wsl2-cuda` / `vllm-wsl2-rocm`
+- Windows: `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `stable-diffusion.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, `llama.cpp-hip`, or managed `vllm-wsl2-cuda` / `vllm-wsl2-rocm`
 
 When you select a desktop backend, OmniInfer also creates a backend-specific JSON config template under:
 
@@ -275,7 +275,7 @@ Default path:
 
 For `llama.cpp-*`, OmniInfer accepts either a model file or a model directory. If you pass a directory, OmniInfer auto-discovers:
 
-- the main text GGUF
+- the main text GGUF, including the first file of a standard `-00001-of-000NN.gguf` split set
 - the optional `mmproj` GGUF
 
 For `mlx-mac`, OmniInfer passes the model directory directly to the embedded backend.
@@ -287,6 +287,37 @@ For `vla.cpp-*`, OmniInfer starts and supervises the managed `vla-server` proces
 ./omniinfer backend select vla.cpp-linux-cuda
 ./omniinfer load -m /models/smolvla/smolvla-libero.gguf --mmproj /models/smolvla/mmproj.gguf -- --timing-detail phase
 ```
+
+For `stable-diffusion.cpp-*`, OmniInfer manages the loopback-only `sd-server`
+and exposes its authenticated native async API under `/sdcpp/v1/*`. Chat and
+Anthropic endpoints return structured `422` while a diffusion runtime is
+loaded. MiniMax H3 uses four separate files; pass the denoiser as `-m` and the
+text encoder, video VAE, and optional audio VAE as backend launch arguments.
+This Q4 example follows the upstream low-VRAM defaults while enabling Vulkan
+flash attention:
+
+```sh
+./omniinfer backend select stable-diffusion.cpp-linux-vulkan
+./omniinfer load -m /models/MiniMax-H3-FL2VA-Q4/minimax_h3_fl2va_pruned-Q4_K.gguf -- \
+  --llm /models/MiniMax-H3-FL2VA-Q4/qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
+  --vae /models/MiniMax-H3-FL2VA-Q4/vae/minimax_h3_video_vae_fp16.safetensors \
+  --audio-vae /models/MiniMax-H3-FL2VA-Q4/vae/minimax_h3_audio_vae_fp32.safetensors \
+  --cfg-scale 1.0 --diffusion-fa --backend te=cpu \
+  --rng cpu
+```
+
+On Windows, use `stable-diffusion.cpp-vulkan` and native Windows paths for all
+four files. After loading, query `/sdcpp/v1/capabilities` before submitting a
+job because supported modes and defaults depend on the loaded checkpoint.
+MiniMax H3 aligns requested frame counts upward to at least 5 frames with
+`video_frames % 17 == 5`; use the completed job's `result.frame_count` as the
+actual output count.
+The example keeps the text encoder's computation and parameters in host memory
+while the denoiser and VAEs use Vulkan memory. Do not add
+`--offload-to-cpu` on a machine whose host-visible RAM cannot hold all four
+weight files; that flag changes the effective parameter assignment to
+`*=cpu`. Use explicit `--backend` and `--params-backend` assignments when a
+different split is required.
 
 Explicit file path:
 
@@ -393,15 +424,16 @@ default and writes submission-compatible JSON under
 `.local/benchmarks/results/`:
 
 ```sh
+mkdir -p .local/benchmarks/slots
+./omniinfer load -m /models/model.gguf --ctx-size 4096 -- \
+  --cache-ram 0 --no-cache-idle-slots --no-cache-prompt \
+  --slot-prompt-similarity 0 --slot-save-path .local/benchmarks/slots
+
 ./omniinfer bench run \
   --catalog-model-id <catalog-model-id> \
   --format GGUF \
   --quantization Q4_K_M \
-  --model-url https://example.com/model.gguf \
-  --device-name "Example workstation" \
-  --soc "Example accelerator" \
-  --backend-version <runtime-version> \
-  --build-command "cmake -B build && cmake --build build -j" \
+  --model-url https://huggingface.co/owner/model/resolve/<40-character-commit>/model.gguf \
   --baseline \
   --submitter-name <name>
 
@@ -410,8 +442,12 @@ default and writes submission-compatible JSON under
 
 Declare each optional method with `--optimization <slug>` instead of using
 `--baseline`. The runtime launch command is captured from OmniInfer state when
-available. See [Benchmark Results](benchmark.md) for the complete contract,
-security rules, and machine-readable output behavior.
+available. Known devices and managed runtime provenance are auto-detected;
+custom hardware and source builds still require the corresponding metadata
+options. Each measured run starts only after every runtime slot is erased, and
+results with Prefill or Decode CV above 5% are not archived. See
+[Benchmark Results](benchmark.md) for the complete contract, security rules,
+and machine-readable output behavior.
 
 Add `--ignore-eos` with `--max-tokens <n>` for a fixed-length benchmark. It
 requests `ignore_eos: true`; the CLI then requires every measured response to
