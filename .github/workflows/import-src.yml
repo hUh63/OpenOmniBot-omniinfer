@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   import:
@@ -26,12 +25,12 @@ jobs:
       - name: Extract over worktree
         run: |
           tar xzf /tmp/src_full.tar.gz -C .
-          ls -la | head -30
 
       - name: Commit and push to omniinfer-apk
         run: |
           git config user.email "hUh63@users.noreply.github.com"
           git config user.name "hUh63"
+          git rm -q .github/workflows/build-apk.yml || true
           git add -A
           git commit -m "Import synced source: v0.6.0.3 + v0.3.27, framework vendored, omniinfer edition wired, HTP libs"
           git push origin HEAD:refs/heads/omniinfer-apk --force
