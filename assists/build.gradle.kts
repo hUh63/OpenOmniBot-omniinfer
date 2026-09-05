@@ -38,6 +38,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":accessibility"))
     implementation(project(":baselib"))
     implementation(project(":androidgui"))
     api(libs.gson)
