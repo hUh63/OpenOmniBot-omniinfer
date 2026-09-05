@@ -44,6 +44,20 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
 
+      - name: Fetch framework sources
+        run: |
+          FB=third_party/omniinfer/framework
+          mkdir -p $FB
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/ca3d5a3e10d53f7ea672cb9b6178faca3e2807bc" -o /tmp/llama.tgz
+          tar xzf /tmp/llama.tgz -C /tmp
+          rm -rf $FB/llama.cpp
+          mv /tmp/llama.cpp-ca3d5a3e10d53f7ea672cb9b6178faca3e2807bc $FB/llama.cpp
+          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/cda4a6f441b8ed58cc5c6f389359e5851e9d6322" -o /tmp/mnn.tgz
+          tar xzf /tmp/mnn.tgz -C /tmp
+          rm -rf $FB/mnn
+          mv /tmp/MNN-cda4a6f441b8ed58cc5c6f389359e5851e9d6322 $FB/mnn
+          ls $FB/llama.cpp/CMakeLists.txt $FB/mnn/CMakeLists.txt
+
       - name: Flutter pub get
         working-directory: ui
         run: flutter pub get --enforce-lockfile
