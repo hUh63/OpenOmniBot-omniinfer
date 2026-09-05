@@ -48,14 +48,14 @@ jobs:
         run: |
           FB=third_party/omniinfer/framework
           mkdir -p $FB
-          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/ca3d5a3e10d53f7ea672cb9b6178faca3e2807bc" -o /tmp/llama.tgz
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/8a091c47abe67e0a03b85bc7c9eee8bdb9b14b05" -o /tmp/llama.tgz
           tar xzf /tmp/llama.tgz -C /tmp
           rm -rf $FB/llama.cpp
-          mv /tmp/llama.cpp-ca3d5a3e10d53f7ea672cb9b6178faca3e2807bc $FB/llama.cpp
-          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/cda4a6f441b8ed58cc5c6f389359e5851e9d6322" -o /tmp/mnn.tgz
+          mv /tmp/llama.cpp-8a091c47abe67e0a03b85bc7c9eee8bdb9b14b05 $FB/llama.cpp
+          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/2625b8aed4ebc372f9bd7bf374fb52192ceed26f" -o /tmp/mnn.tgz
           tar xzf /tmp/mnn.tgz -C /tmp
           rm -rf $FB/mnn
-          mv /tmp/MNN-cda4a6f441b8ed58cc5c6f389359e5851e9d6322 $FB/mnn
+          mv /tmp/MNN-2625b8aed4ebc372f9bd7bf374fb52192ceed26f $FB/mnn
           ls $FB/llama.cpp/CMakeLists.txt $FB/mnn/CMakeLists.txt
 
       - name: Flutter pub get
@@ -69,8 +69,7 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon --build-cache --max-workers=4 \
             assembleProductionOmniinferDebug \
-            -Ptarget=lib/main_omniinfer.dart \
-            -Pomniinfer.backend.llama_cpp=false
+            -Ptarget=lib/main_omniinfer.dart
 
       - name: Collect APK
         run: |
