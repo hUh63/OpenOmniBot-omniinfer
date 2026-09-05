@@ -118,6 +118,23 @@ class AgentWorkspaceManager(
             return File(internalRootDirectory(context), DIR_AUDIO)
         }
 
+        /** Local model directories for the OmniInfer edition (llama.cpp / MNN / QNN / LiteRT). */
+        fun modelsLlamaDirectory(context: Context): File {
+            return File(internalRootDirectory(context), "models/llama")
+        }
+
+        fun modelsMnnDirectory(context: Context): File {
+            return File(internalRootDirectory(context), "models/mnn")
+        }
+
+        fun modelsQnnDirectory(context: Context): File {
+            return File(internalRootDirectory(context), "models/qnn")
+        }
+
+        fun modelsLiteRtDirectory(context: Context): File {
+            return File(internalRootDirectory(context), "models/litert")
+        }
+
         fun androidRootPath(context: Context): String {
             return rootDirectory(context).absolutePath
         }
