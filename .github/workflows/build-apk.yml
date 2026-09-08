@@ -77,19 +77,14 @@ jobs:
           find app/build/outputs/apk -name "*.apk" -exec cp {} apk-out/ \;
           ls -la apk-out
 
-      - name: Push APK to apk-build branch
+      - name: Upload APK to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.email "hUh63@users.noreply.github.com"
-          git config user.name "hUh63"
-          git checkout --orphan apk-build
-          git rm -rf . -q || true
-          cp apk-out/*.apk .
-          for f in *.apk; do
-            gzip -k "$f" 2>/dev/null || true
-          done
-          git add -f *.apk
-          git commit -m "APK build $(date -u +%Y%m%d%H%M%S)"
-          git push origin apk-build --force
+          TAG="apk-build-$(date -u +%Y%m%d%H%M%S)"
+          gh release create "$TAG" --draft --title "APK $TAG" --notes "OmniInfer edition debug APK (auto build)"
+          gh release upload "$TAG" apk-out/*.apk --clobber
+          gh release view "$TAG" --json assets -q '.assets[].name'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
