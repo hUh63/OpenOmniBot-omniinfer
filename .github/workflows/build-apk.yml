@@ -62,14 +62,21 @@ jobs:
         working-directory: ui
         run: flutter pub get --enforce-lockfile
 
-      - name: Gradle assembleProductionOmniinferDebug
+      - name: Gradle assembleProductionOmniinferRelease
         env:
           GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
         run: |
+          printf '%s' "${{ secrets.RELEASE_KEYSTORE }}" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          chmod 600 "$RUNNER_TEMP/release.p12"
           chmod +x ./gradlew
           ./gradlew --no-daemon --build-cache --max-workers=4 \
-            assembleProductionOmniinferDebug \
-            -Ptarget=lib/main_omniinfer.dart
+            assembleProductionOmniinferRelease \
+            -Ptarget=lib/main_omniinfer.dart \
+            -Pomniinfer.backend.llama_cpp=false \
+            -POMNI_RELEASE_STORE_FILE="$RUNNER_TEMP/release.p12" \
+            -POMNI_RELEASE_STORE_PWD="${{ secrets.RELEASE_PASSWORD }}" \
+            -POMNI_RELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
+            -POMNI_RELEASE_KEY_PWD="${{ secrets.RELEASE_PASSWORD }}"
 
       - name: Collect APK
         run: |
