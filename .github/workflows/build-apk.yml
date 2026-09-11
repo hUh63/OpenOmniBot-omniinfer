@@ -22,7 +22,7 @@ jobs:
       - name: Set up Flutter 3.38.7
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.38.7'
+          flutter-version: '3.47.2'
           channel: stable
           cache: true
 
@@ -48,14 +48,14 @@ jobs:
         run: |
           FB=third_party/omniinfer/framework
           mkdir -p $FB
-          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/8a091c47abe67e0a03b85bc7c9eee8bdb9b14b05" -o /tmp/llama.tgz
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/30b6a755e29692e8bc8e072885325716a2fee70f" -o /tmp/llama.tgz
           tar xzf /tmp/llama.tgz -C /tmp
           rm -rf $FB/llama.cpp
-          mv /tmp/llama.cpp-8a091c47abe67e0a03b85bc7c9eee8bdb9b14b05 $FB/llama.cpp
-          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/2625b8aed4ebc372f9bd7bf374fb52192ceed26f" -o /tmp/mnn.tgz
+          mv /tmp/llama.cpp-30b6a755e29692e8bc8e072885325716a2fee70f $FB/llama.cpp
+          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/d56423dfd7524821e66c3304d8d70f0edc3cea7d" -o /tmp/mnn.tgz
           tar xzf /tmp/mnn.tgz -C /tmp
           rm -rf $FB/mnn
-          mv /tmp/MNN-2625b8aed4ebc372f9bd7bf374fb52192ceed26f $FB/mnn
+          mv /tmp/MNN-d56423dfd7524821e66c3304d8d70f0edc3cea7d $FB/mnn
           ls $FB/llama.cpp/CMakeLists.txt $FB/mnn/CMakeLists.txt
 
       - name: Flutter pub get
@@ -72,7 +72,6 @@ jobs:
           ./gradlew --no-daemon --build-cache --max-workers=4 \
             assembleProductionOmniinferRelease \
             -Ptarget=lib/main_omniinfer.dart \
-            -Pomniinfer.backend.llama_cpp=false \
             -POMNI_RELEASE_STORE_FILE="$RUNNER_TEMP/release.p12" \
             -POMNI_RELEASE_STORE_PWD="${{ secrets.RELEASE_PASSWORD }}" \
             -POMNI_RELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
