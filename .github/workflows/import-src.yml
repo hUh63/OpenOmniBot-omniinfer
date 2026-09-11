@@ -15,22 +15,26 @@ jobs:
 
       - name: Download source tarball
         run: |
-          curl -sS -m 600 -L \
+          curl -sS -m 1800 -L \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/543101183" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/556507457" \
             -o /tmp/src_full.tar.gz
           ls -la /tmp/src_full.tar.gz
 
-      - name: Extract over worktree
+      - name: Reset worktree and extract
         run: |
-          tar xzf /tmp/src_full.tar.gz -C . --exclude=./.github/workflows
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          tar xzf /tmp/src_full.tar.gz -C .
+          rm -rf third_party/omniinfer/framework
+          git checkout HEAD -- .github/workflows
+          ls -la
 
       - name: Commit and push to omniinfer-apk
         run: |
           git config user.email "hUh63@users.noreply.github.com"
           git config user.name "hUh63"
-          git rm -q .github/workflows/build-apk.yml || true
           git add -A
-          git commit -m "Import synced source: v0.6.0.3 + v0.3.27, framework vendored, omniinfer edition wired, HTP libs"
+          git add -f third_party/omniinfer/android third_party/omniinfer/tmp
+          git commit -m "Import synced source: v0.6.2.2 + omniinfer integration + HTP runtime libs"
           git push origin HEAD:refs/heads/omniinfer-apk --force
