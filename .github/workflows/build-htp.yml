@@ -1,0 +1,66 @@
+name: Build Snapdragon HTP runtime libs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  htp:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/snapdragon-toolchain/arm64-android:v0.7
+      options: --platform linux/amd64
+    steps:
+      - name: Fetch llama.cpp b10919
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/htp-src" && cd "$GITHUB_WORKSPACE/htp-src"
+          curl -sSL -o lc.tgz "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/b10919"
+          tar xzf lc.tgz
+          ls
+
+      - name: Configure (snapdragon preset)
+        run: |
+          cd "$GITHUB_WORKSPACE/htp-src/llama.cpp-b10919"
+          cp docs/backend/snapdragon/CMakeUserPresets.json .
+          cmake --preset arm64-android-snapdragon-release -B build-snapdragon 2>&1 | tail -30
+
+      - name: Build hexagon + opencl backends
+        run: |
+          cd "$GITHUB_WORKSPACE/htp-src/llama.cpp-b10919"
+          cmake --build build-snapdragon -j "$(nproc)" 2>&1 | tail -60
+
+      - name: Collect shared libs
+        run: |
+          cd "$GITHUB_WORKSPACE/htp-src/llama.cpp-b10919"
+          mkdir -p "$GITHUB_WORKSPACE/htp-out"
+          find . -name "libggml-hexagon.so" -o -name "libggml-htp-v*.so" -o -name "libggml-opencl.so" \
+            -o -name "libggml-base.so" -o -name "libggml.so" -o -name "libggml-cpu-*.so" \
+            -o -name "libllama.so" -o -name "libllama-common.so" -o -name "libmtmd.so" \
+            | while read -r f; do cp "$f" "$GITHUB_WORKSPACE/htp-out/"; done
+          ls -la "$GITHUB_WORKSPACE/htp-out"
+
+      - name: Pack tarball
+        run: |
+          cd "$GITHUB_WORKSPACE/htp-out"
+          tar czf "$GITHUB_WORKSPACE/htp-b10919.tar.gz" .
+          ls -la "$GITHUB_WORKSPACE/htp-b10919.tar.gz"
+          sha256sum "$GITHUB_WORKSPACE/htp-b10919.tar.gz"
+
+      - name: Upload tarball as release asset
+        run: |
+          curl -sS -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/gzip" \
+            --data-binary "@$GITHUB_WORKSPACE/htp-b10919.tar.gz" \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/386793380/assets?name=htp-b10919.tar.gz" \
+            -o "$GITHUB_WORKSPACE/htp-upload.json"
+          head -c 400 "$GITHUB_WORKSPACE/htp-upload.json"
+
+      - name: Upload artifact (backup channel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: htp-b10919
+          path: ${{ github.workspace }}/htp-b10919.tar.gz
+          if-no-files-found: error
