@@ -13,13 +13,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
-      - name: Set up Flutter 3.38.7
+      - name: Set up Flutter 3.47.2
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.47.2'
@@ -48,14 +48,14 @@ jobs:
         run: |
           FB=third_party/omniinfer/framework
           mkdir -p $FB
-          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/30b6a755e29692e8bc8e072885325716a2fee70f" -o /tmp/llama.tgz
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/b10919" -o /tmp/llama.tgz
           tar xzf /tmp/llama.tgz -C /tmp
           rm -rf $FB/llama.cpp
-          mv /tmp/llama.cpp-30b6a755e29692e8bc8e072885325716a2fee70f $FB/llama.cpp
-          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/d56423dfd7524821e66c3304d8d70f0edc3cea7d" -o /tmp/mnn.tgz
+          mv /tmp/llama.cpp-b10919 $FB/llama.cpp
+          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/a03b005cf6f888ebf092e4753840f935827f9c36" -o /tmp/mnn.tgz
           tar xzf /tmp/mnn.tgz -C /tmp
           rm -rf $FB/mnn
-          mv /tmp/MNN-d56423dfd7524821e66c3304d8d70f0edc3cea7d $FB/mnn
+          mv /tmp/MNN-a03b005cf6f888ebf092e4753840f935827f9c36 $FB/mnn
           ls $FB/llama.cpp/CMakeLists.txt $FB/mnn/CMakeLists.txt
 
       - name: Flutter pub get
