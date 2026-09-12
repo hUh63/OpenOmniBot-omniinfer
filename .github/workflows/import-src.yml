@@ -18,7 +18,7 @@ jobs:
           curl -sS -m 1800 -L \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/558591313" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/559581252" \
             -o /tmp/src_full.tar.gz
           ls -la /tmp/src_full.tar.gz
 
@@ -36,5 +36,5 @@ jobs:
           git config user.name "hUh63"
           git add -A
           git add -f third_party/omniinfer/android third_party/omniinfer/tmp
-          git commit -m "Import synced source: v0.6.2.3 + llama.cpp b10919 / MNN 09-11 + omniinfer integration"
+          git commit -m "Add MediaTek NPU (LiteRT dispatch) support for Dimensity + auto NPU backend"
           git push origin HEAD:refs/heads/omniinfer-apk --force
