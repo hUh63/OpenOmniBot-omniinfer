@@ -210,6 +210,35 @@ async fn proxy_body_to_runtime(
     response_from_upstream(response).await
 }
 
+async fn proxy_passthrough_to_runtime(
+    client: &Client<HttpConnector, Full<HyperBytes>>,
+    method: Method,
+    uri: &str,
+    content_type: Option<axum::http::HeaderValue>,
+    body: HyperBytes,
+) -> Result<Response<Body>> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(content_type) = content_type {
+        builder = builder.header(CONTENT_TYPE, content_type);
+    }
+    let request = builder.body(Full::new(body))?;
+    let response = client.request(request).await?;
+    let status = response.status();
+    let content_length = response.headers().get(CONTENT_LENGTH).cloned();
+    let mut builder = Response::builder().status(status);
+    for (name, value) in response.headers().iter() {
+        if should_forward_response_header(name) {
+            builder = builder.header(name, value);
+        }
+    }
+    if let Some(content_length) = content_length {
+        builder = builder.header(CONTENT_LENGTH, content_length);
+    }
+    let mut response = builder.body(Body::new(response.into_body()))?;
+    add_cors_headers(response.headers_mut());
+    Ok(response)
+}
+
 async fn proxy_openai_chat_to_runtime(
     client: &Client<HttpConnector, Full<HyperBytes>>,
     uri: &str,
@@ -268,19 +297,54 @@ async fn clear_runtime_cache(
     client: &Client<HttpConnector, Full<HyperBytes>>,
     runtime_base: &str,
 ) -> Result<Response<Body>> {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(format!("{runtime_base}/slots/0?action=erase"))
+    let props_request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("{runtime_base}/props"))
         .body(Full::new(HyperBytes::new()))?;
-    let response = client.request(request).await?;
-    let status = response.status();
-    let body = response.into_body().collect().await?.to_bytes();
-    if status.is_success() {
-        return Ok(json_response(
-            StatusCode::OK,
-            json!({"ok": true, "message": "KV cache cleared"}),
-        ));
+    let props_response = client.request(props_request).await?;
+    let props_status = props_response.status();
+    let props_body = props_response.into_body().collect().await?.to_bytes();
+    if !props_status.is_success() {
+        return Ok(cache_clear_error_response(props_status, &props_body));
     }
+    let props = serde_json::from_slice::<Value>(&props_body).unwrap_or(Value::Null);
+    let slot_count = props
+        .get("total_slots")
+        .or_else(|| props.get("slots"))
+        .and_then(Value::as_u64)
+        .filter(|count| (1..=256).contains(count));
+    let Some(slot_count) = slot_count else {
+        return Ok(json_response(
+            StatusCode::CONFLICT,
+            json!({"error": {"message": "backend did not report a valid slot count; cache erasure cannot be proven"}}),
+        ));
+    };
+    let mut cleared_slots = Vec::with_capacity(slot_count as usize);
+    for slot_id in 0..slot_count {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{runtime_base}/slots/{slot_id}?action=erase"))
+            .body(Full::new(HyperBytes::new()))?;
+        let response = client.request(request).await?;
+        let status = response.status();
+        let body = response.into_body().collect().await?.to_bytes();
+        if !status.is_success() {
+            return Ok(cache_clear_error_response(status, &body));
+        }
+        cleared_slots.push(slot_id);
+    }
+    Ok(json_response(
+        StatusCode::OK,
+        json!({
+            "ok": true,
+            "message": "KV cache cleared",
+            "cache_policy": "cleared_each_run",
+            "cleared_slots": cleared_slots,
+        }),
+    ))
+}
+
+fn cache_clear_error_response(status: StatusCode, body: &[u8]) -> Response<Body> {
     let detail = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|value| {
@@ -302,10 +366,7 @@ async fn clear_runtime_cache(
             status.as_u16()
         )
     };
-    Ok(json_response(
-        StatusCode::CONFLICT,
-        json!({"error": {"message": message}}),
-    ))
+    json_response(StatusCode::CONFLICT, json!({"error": {"message": message}}))
 }
 
 async fn proxy_anthropic_to_runtime(

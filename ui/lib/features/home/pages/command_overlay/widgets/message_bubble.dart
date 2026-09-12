@@ -13,6 +13,8 @@ import 'package:ui/widgets/image_preview_overlay.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../../../models/chat_message_model.dart';
 import '../../../../../services/app_background_service.dart';
+import '../../../../../services/voice_playback_coordinator.dart';
+import '../../../../../services/voice_playback_channel_service.dart';
 import '../../../../../theme/theme_context.dart';
 import '../../../../../widgets/streaming_text.dart';
 import 'thinking_dots_indicator.dart';
@@ -60,7 +62,6 @@ class MessageBubble extends StatelessWidget {
   final void Function(ChatMessageModel message, LongPressStartDetails details)?
   onUserMessageLongPressStart;
   final VoidCallback? onRetryAgentMessage;
-  final VoidCallback? onContinueAgentMessage;
   final VoidCallback? onUserMessageEditTap;
   final VoidCallback? onStreamingTextLayoutChanged;
   final AppBackgroundVisualProfile visualProfile;
@@ -81,7 +82,6 @@ class MessageBubble extends StatelessWidget {
     this.onRequestAuthorize,
     this.onUserMessageLongPressStart,
     this.onRetryAgentMessage,
-    this.onContinueAgentMessage,
     this.onUserMessageEditTap,
     this.onStreamingTextLayoutChanged,
     this.visualProfile = AppBackgroundVisualProfile.defaultProfile,
@@ -1087,8 +1087,11 @@ class MessageBubble extends StatelessWidget {
     required bool includeTurnUsageFooter,
   }) {
     final speed = _decodeTokensPerSecond;
-    final aiText = _buildAiText(context, text);
-    final continueStatus = _buildAgentContinueStatus(context);
+    final aiText = _buildAiText(
+      context,
+      text,
+      trailing: _buildVoiceAction(context, text),
+    );
     final retryingStatus = _buildAgentRetryingStatus(context);
     final errorFooter = _buildAgentErrorFooter(context, text);
     final turnUsageFooter = includeTurnUsageFooter
@@ -1114,33 +1117,108 @@ class MessageBubble extends StatelessWidget {
             ),
           ),
         ],
-        if (continueStatus != null) ...[
-          if (showPrimaryText || speed != null) const SizedBox(height: 8),
-          continueStatus,
-        ],
         if (retryingStatus != null) ...[
-          if (showPrimaryText || speed != null || continueStatus != null)
-            const SizedBox(height: 8),
+          if (showPrimaryText || speed != null) const SizedBox(height: 8),
           retryingStatus,
         ],
         if (errorFooter != null) ...[
-          if (showPrimaryText ||
-              speed != null ||
-              continueStatus != null ||
-              retryingStatus != null)
+          if (showPrimaryText || speed != null || retryingStatus != null)
             const SizedBox(height: 8),
           errorFooter,
         ],
         if (turnUsageFooter != null) ...[
           if (showPrimaryText ||
               speed != null ||
-              continueStatus != null ||
               retryingStatus != null ||
               errorFooter != null)
             const SizedBox(height: 8),
           turnUsageFooter,
         ],
       ],
+    );
+  }
+
+  /// Voice playback is an optional ACP scene capability. Keep the control in
+  /// the same message bubble as the assistant text so enabling the scene has
+  /// an immediately visible affordance (and never creates a second input
+  /// surface).
+  Widget? _buildVoiceAction(BuildContext context, String text) {
+    if (message.user != 2 || message.type != 1 || text.trim().isEmpty) {
+      return null;
+    }
+    final coordinator = VoicePlaybackCoordinator.instance;
+    return AnimatedBuilder(
+      animation: coordinator,
+      builder: (context, _) {
+        if (!coordinator.shouldShowVoiceButton(
+          user: message.user,
+          type: message.type,
+          text: text,
+        )) {
+          return const SizedBox.shrink();
+        }
+        final state = coordinator.stateFor(message.id);
+        final isPlaying = state.status == VoicePlaybackStatus.playing;
+        final isBusy = state.status == VoicePlaybackStatus.synthesizing;
+        final isPaused = state.status == VoicePlaybackStatus.paused;
+        final hasError = state.status == VoicePlaybackStatus.error;
+        final statusLabel = isBusy
+            ? '语音生成中'
+            : hasError
+            ? '语音失败'
+            : isPaused
+            ? '已暂停'
+            : null;
+        final statusColor = hasError
+            ? Colors.red.shade400
+            : _resolvedAiSecondaryTextColor(context);
+        return Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Semantics(
+            label: statusLabel ?? (isPlaying ? '暂停语音' : '播放语音'),
+            button: true,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  key: ValueKey('voice-playback-${message.id}'),
+                  onPressed: isBusy
+                      ? null
+                      : () => coordinator.togglePlayback(
+                          messageId: message.id,
+                          text: text,
+                        ),
+                  tooltip: statusLabel ?? (isPlaying ? '暂停语音' : '播放语音'),
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 17,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 28,
+                    minHeight: 28,
+                  ),
+                  icon: Icon(
+                    isBusy
+                        ? Icons.hourglass_top_rounded
+                        : isPlaying
+                        ? Icons.pause_circle_outline_rounded
+                        : Icons.volume_up_outlined,
+                    color: statusColor,
+                  ),
+                ),
+                if (statusLabel != null)
+                  Text(
+                    statusLabel,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 11,
+                      height: 1.1,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1181,31 +1259,17 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget? _buildAgentContinueStatus(BuildContext context) {
-    // 续跑期间不再单独显示"正在从当前轮继续…"+转圈,
-    // 让旧 bubble 看起来就像一条普通的待更新消息,等首帧新内容到达整体替换。
-    return null;
-  }
-
   Widget? _buildAgentErrorFooter(BuildContext context, String text) {
-    // 续跑期间隐藏整个错误页脚(报错文字 + Continue 提示框 + Retry 按钮),
-    // 不让用户在新内容到达前看到任何残留的失败状态。
-    if (message.content?['agentContinuing'] == true) {
-      return null;
-    }
     final errorText = (message.content?['agentErrorText'] ?? '')
         .toString()
         .trim();
     final retryable = message.content?['agentRetryable'] == true;
-    final continueable = message.content?['agentContinueable'] == true;
     final showRetryButton = retryable && onRetryAgentMessage != null;
-    final showContinueButton = continueable && onContinueAgentMessage != null;
     final showErrorText = errorText.isNotEmpty && errorText != text.trim();
-    if (!showErrorText && !showRetryButton && !showContinueButton) {
+    if (!showErrorText && !showRetryButton) {
       return null;
     }
     final warningColor = Theme.of(context).colorScheme.error;
-    final continueColor = const Color(0xFFFF9F1A);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1225,50 +1289,6 @@ class MessageBubble extends StatelessWidget {
               ),
             ),
           ),
-        if (showContinueButton) ...[
-          if (showErrorText) const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: continueColor.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    LegacyTextLocalizer.isEnglish
-                        ? 'Interrupted. Continue from this turn.'
-                        : '已中断，点击「继续」从当前轮恢复',
-                    style: TextStyle(
-                      fontSize: 12 * _chatTextScale,
-                      color: continueColor.withValues(alpha: 0.96),
-                      height: 1.4,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                FilledButton.tonalIcon(
-                  onPressed: onContinueAgentMessage,
-                  icon: const Icon(Icons.play_arrow_rounded, size: 16),
-                  label: Text(
-                    LegacyTextLocalizer.isEnglish ? 'Continue' : '继续',
-                  ),
-                  style: FilledButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    backgroundColor: continueColor,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    visualDensity: VisualDensity.compact,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
         if (showRetryButton)
           Align(
             alignment: Alignment.centerLeft,
@@ -1289,58 +1309,68 @@ class MessageBubble extends StatelessWidget {
 
   Widget? _buildTurnUsageFooter(BuildContext context) {
     final usage = message.turnUsage;
-    if (usage == null || usage.isEmpty) {
-      return null;
-    }
-    final ctx = _readIntValue(usage['ctx']);
+    if (usage == null || usage.isEmpty) return null;
     final input = _readIntValue(usage['in']);
     final output = _readIntValue(usage['out']);
     final cache = _readIntValue(usage['cache']);
-    if (ctx == null && input == null && output == null && cache == null) {
-      return null;
-    }
+    final endedAt = _readIntValue(usage['endedAt']);
+    final durationMs = _readIntValue(usage['durationMs']);
+    final hasUsage = input != null || output != null || cache != null;
+    if (!hasUsage && endedAt == null) return null;
     final textColor = _resolvedAiSecondaryTextColor(
       context,
     ).withValues(alpha: 0.72);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Theme.of(
-          context,
-        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.32),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+    final ended = endedAt == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(endedAt).toLocal();
+    String two(int value) => value.toString().padLeft(2, '0');
+    final seconds = durationMs == null ? null : durationMs ~/ 1000;
+    final duration = seconds == null
+        ? null
+        : seconds < 60
+        ? '${(durationMs! / 1000).toStringAsFixed(1)}s'
+        : '${seconds ~/ 60}m ${seconds % 60}s';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Wrap(
+        spacing: 9,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          Icon(Icons.av_timer_rounded, size: 12, color: textColor),
-          const SizedBox(width: 6),
-          Text(
-            'ctx:${_formatUsageValue(ctx)}',
-            style: TextStyle(
-              fontSize: 11 * _chatTextScale,
+          if (input != null)
+            _buildTurnUsageMetric(
+              icon: Icons.arrow_downward_rounded,
+              value: input,
               color: textColor,
-              height: 1.1,
             ),
-          ),
-          const SizedBox(width: 9),
-          _buildTurnUsageMetric(
-            icon: Icons.arrow_downward_rounded,
-            value: input,
-            color: textColor,
-          ),
-          const SizedBox(width: 8),
-          _buildTurnUsageMetric(
-            icon: Icons.arrow_upward_rounded,
-            value: output,
-            color: textColor,
-          ),
-          const SizedBox(width: 8),
-          _buildTurnUsageMetric(
-            icon: LucideIcons.databaseZap,
-            value: cache,
-            color: textColor,
-          ),
+          if (output != null)
+            _buildTurnUsageMetric(
+              icon: Icons.arrow_upward_rounded,
+              value: output,
+              color: textColor,
+            ),
+          if (cache != null)
+            _buildTurnUsageMetric(
+              icon: LucideIcons.databaseZap,
+              value: cache,
+              color: textColor,
+            ),
+          if (ended != null && duration != null && durationMs! >= 0)
+            _buildTurnUsageMetric(
+              icon: LucideIcons.timer,
+              text: duration,
+              color: textColor,
+            ),
+          if (ended != null)
+            Tooltip(
+              message: ended.toString(),
+              child: _buildTurnUsageMetric(
+                icon: LucideIcons.circleCheck,
+                text:
+                    '${two(ended.hour)}:${two(ended.minute)}:${two(ended.second)}',
+                color: textColor,
+              ),
+            ),
         ],
       ),
     );
@@ -1348,7 +1378,8 @@ class MessageBubble extends StatelessWidget {
 
   Widget _buildTurnUsageMetric({
     required IconData icon,
-    required int? value,
+    int? value,
+    String? text,
     required Color color,
   }) {
     return Row(
@@ -1357,7 +1388,7 @@ class MessageBubble extends StatelessWidget {
         Icon(icon, size: 12, color: color),
         const SizedBox(width: 3),
         Text(
-          _formatUsageValue(value),
+          text ?? _formatUsageValue(value),
           style: TextStyle(
             fontSize: 11 * _chatTextScale,
             color: color,

@@ -1,15 +1,97 @@
 use super::*;
 
+pub(super) struct ExecutionPlacement {
+    pub(super) compute_mode: &'static str,
+    pub(super) prefill: BenchmarkAccelerator,
+    pub(super) decode: BenchmarkAccelerator,
+    pub(super) privilege: BenchmarkPrivilegeLevel,
+}
+
+pub(super) fn resolve_execution(
+    args: &BenchRunArgs,
+    backend: &str,
+    run_command: &str,
+) -> Result<ExecutionPlacement> {
+    let (prefill, decode) = match (args.prefill_accelerator, args.decode_accelerator) {
+        (Some(prefill), Some(decode)) => (prefill, decode),
+        (None, None) => {
+            let accelerator = infer_accelerator(backend).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Compute accelerator is ambiguous for backend {backend:?}. Pass both --prefill-accelerator and --decode-accelerator."
+                )
+            })?;
+            (accelerator, accelerator)
+        }
+        _ => anyhow::bail!(
+            "Pass both --prefill-accelerator and --decode-accelerator, or omit both for an unambiguous single-accelerator backend."
+        ),
+    };
+    let privilege_wrapper = run_command
+        .split_whitespace()
+        .next()
+        .map(|value| value.trim_matches(['\'', '"']).to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "su" | "sudo"));
+    match args.privilege_level {
+        BenchmarkPrivilegeLevel::Elevated if !privilege_wrapper => anyhow::bail!(
+            "--privilege-level elevated requires --run-command to retain its su or sudo wrapper."
+        ),
+        BenchmarkPrivilegeLevel::Standard if privilege_wrapper => anyhow::bail!(
+            "The runtime command uses a privilege wrapper. Pass --privilege-level elevated."
+        ),
+        _ => {}
+    }
+    Ok(ExecutionPlacement {
+        compute_mode: if prefill == decode { "single" } else { "mixed" },
+        prefill,
+        decode,
+        privilege: args.privilege_level,
+    })
+}
+
+pub(super) fn infer_accelerator(backend: &str) -> Option<BenchmarkAccelerator> {
+    let backend = backend.to_ascii_lowercase();
+    if backend.contains("htp") {
+        Some(BenchmarkAccelerator::Htp)
+    } else if backend.contains("npu") || backend.contains("qnn") {
+        Some(BenchmarkAccelerator::Npu)
+    } else if backend.contains("ane") {
+        Some(BenchmarkAccelerator::Ane)
+    } else if [
+        "cuda",
+        "rocm",
+        "hip",
+        "vulkan",
+        "mlx",
+        "metal",
+        "turboquant",
+    ]
+    .iter()
+    .any(|marker| backend.contains(marker))
+    {
+        Some(BenchmarkAccelerator::Gpu)
+    } else if backend.contains("cpu") || matches!(backend.as_str(), "llama.cpp-linux") {
+        Some(BenchmarkAccelerator::Cpu)
+    } else {
+        None
+    }
+}
+
 pub(super) fn validate_metadata(args: &BenchRunArgs) -> Result<()> {
     for (label, value, max) in [
         ("--catalog-model-id", args.catalog_model_id.as_str(), 128),
         ("--quantization", args.quantization.as_str(), 256),
-        ("--device-name", args.device_name.as_str(), 256),
-        ("--soc", args.soc.as_str(), 256),
-        ("--backend-version", args.backend_version.as_str(), 256),
         ("--submitter-name", args.submitter_name.as_str(), 256),
     ] {
         validate_text(label, value, max)?;
+    }
+    for (label, value) in [
+        ("--device-name", args.device_name.as_deref()),
+        ("--soc", args.soc.as_deref()),
+        ("--backend-version", args.backend_version.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_text(label, value, 256)?;
+        }
     }
     if !MODEL_FORMATS.contains(&args.model_format.as_str()) {
         anyhow::bail!("--format must be one of: {}", MODEL_FORMATS.join(", "));
@@ -44,7 +126,9 @@ pub(super) fn validate_metadata(args: &BenchRunArgs) -> Result<()> {
             "generated protocol notes exceed 2048 characters after the --ignore-eos marker is appended. Shorten --notes."
         );
     }
-    validated_command("--build-command", &args.build_command)?;
+    if let Some(command) = args.build_command.as_deref() {
+        validated_command("--build-command", command)?;
+    }
     if !valid_catalog_id(&args.catalog_model_id) {
         anyhow::bail!("--catalog-model-id must be a 1-128 character catalog slug.");
     }
@@ -90,6 +174,35 @@ pub(super) fn validate_https_url(label: &str, value: &str) -> Result<()> {
         || parsed.fragment().is_some()
     {
         anyhow::bail!("{label} must be a public HTTPS URL without credentials or a fragment.");
+    }
+    let segments = parsed
+        .path_segments()
+        .map(|segments| segments.map(str::to_ascii_lowercase).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for pair in segments.windows(2) {
+        if matches!(
+            pair[0].as_str(),
+            "blob" | "resolve" | "revision" | "revisions" | "tree"
+        ) && matches!(
+            pair[1].as_str(),
+            "head" | "latest" | "main" | "master" | "stable"
+        ) {
+            anyhow::bail!("{label} must use an immutable model revision.");
+        }
+    }
+    if matches!(
+        parsed.host_str().map(str::to_ascii_lowercase).as_deref(),
+        Some("huggingface.co" | "www.huggingface.co" | "hf-mirror.com" | "www.hf-mirror.com")
+    ) {
+        let revision = segments
+            .iter()
+            .position(|segment| segment == "resolve")
+            .and_then(|index| segments.get(index + 1));
+        if !revision.is_some_and(|revision| {
+            revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            anyhow::bail!("{label} must use a Hugging Face /resolve/<40-character-commit>/ URL.");
+        }
     }
     Ok(())
 }

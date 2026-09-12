@@ -6,16 +6,15 @@ import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.account.PlatformModelsUnavailableException
 import cn.com.omnimind.baselib.llm.ChatCompletionRequest
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
-import cn.com.omnimind.baselib.llm.ChatCompletionThinking
 import cn.com.omnimind.baselib.llm.ChatCompletionTurn
 import cn.com.omnimind.baselib.llm.ChatCompletionUsage
-import cn.com.omnimind.baselib.llm.DeepSeekProvider
-import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
+import cn.com.omnimind.baselib.llm.OpenAiResponsesFunctionNameCodec
 import cn.com.omnimind.baselib.llm.OmniOfficialProvider
 import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.ReasoningStreamUpdatePolicy
 import cn.com.omnimind.baselib.llm.contentText
+import cn.com.omnimind.baselib.llm.encodeRequestToString
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.media.PlatformMediaProtocol
 import kotlinx.coroutines.CompletableDeferred
@@ -24,8 +23,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -36,35 +35,38 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
-import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 interface AgentLlmClient {
     suspend fun streamTurn(
         request: ChatCompletionRequest,
         onReasoningUpdate: (suspend (String) -> Unit)? = null,
-        onContentUpdate: (suspend (String) -> Unit)? = null
+        onContentUpdate: (suspend (String) -> Unit)? = null,
+        onToolCallInput: (suspend (AssistantToolCall) -> Unit)? = null,
     ): ChatCompletionTurn
 }
 
 class AgentStreamRequestException(
     val statusCode: Int?,
     val reason: String,
-    val responseBody: String?
+    val responseBody: String?,
+    val responseStarted: Boolean = false,
+    cause: Throwable? = null,
 ) : RuntimeException(
     "chat completion stream request failed${
         statusCode?.let { "($it)" }.orEmpty()
-    }: $reason"
+    }: $reason", cause
 )
 
-class AgentStreamReasoningLeakException(
-    reason: String
-) : RuntimeException(reason)
+class AgentStreamIdleTimeoutException(
+    val timeoutMillis: Long,
+) : RuntimeException("chat completion stream idle timeout after ${timeoutMillis}ms")
 
 class HttpAgentLlmClient(
     private val scope: CoroutineScope,
-    private val modelOverride: AgentModelOverride? = null,
-    private val streamRequestOp: suspend (
+    modelOverride: AgentModelOverride? = null,
+    private val streamRequestOp: (suspend (
         model: String,
         requestBodyJson: String,
         event: EventSourceListener,
@@ -75,20 +77,7 @@ class HttpAgentLlmClient(
         explicitProtocolType: String?,
         explicitWireApi: String?,
         forceHttp1: Boolean
-    ) -> EventSource = { model, requestBodyJson, event, explicitApiBase, explicitApiKey, explicitCustomHeaders, explicitModel, explicitProtocolType, explicitWireApi, forceHttp1 ->
-        HttpController.postChatCompletionsStreamRequest(
-            model = model,
-            requestBodyJson = requestBodyJson,
-            event = event,
-            explicitApiBase = explicitApiBase,
-            explicitApiKey = explicitApiKey,
-            explicitCustomHeaders = explicitCustomHeaders,
-            explicitModel = explicitModel,
-            explicitProtocolType = explicitProtocolType,
-            explicitWireApi = explicitWireApi,
-            forceHttp1 = forceHttp1
-        )
-    },
+    ) -> EventSource)? = null,
     private val resolveRouteInfoOp: (
         modelOrScene: String,
         explicitApiBase: String?,
@@ -128,18 +117,27 @@ class HttpAgentLlmClient(
                 )
         }
     },
-    private val streamIdleWatchdogMs: Long = 0L,
-    private val maxTransientStreamRetries: Int = 2,
-    private val transientStreamRetryDelayMs: Long = 750L,
+    // This is the single transport retry owner. A retry is safe only before
+    // visible output exists; replaying a started stream duplicates reasoning,
+    // text, and potentially tool intent.
+    private val maxTransientStreamRetries: Int? = null,
+    private val transientStreamRetryDelayMs: Long? = null,
+    private val streamIdleTimeoutMs: Long? = null,
     private val json: Json = Json {
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
         explicitNulls = false
-    }
+    },
 ) : AgentLlmClient {
+    private val effectiveMaxTransientStreamRetries: Int?
+        get() = maxTransientStreamRetries
+    private val effectiveTransientStreamRetryDelayMs: Long?
+        get() = transientStreamRetryDelayMs
+    private val effectiveStreamIdleTimeoutMs: Long?
+        get() = streamIdleTimeoutMs
+    private val modelOverride: AgentModelOverride? = modelOverride?.normalized()
     private val tag = "HttpAgentLlmClient"
-
     private companion object {
         const val REASONING_UPDATE_INTERVAL_MS =
             ReasoningStreamUpdatePolicy.DEFAULT_INTERVAL_MS
@@ -162,18 +160,14 @@ class HttpAgentLlmClient(
         // and the 16K ceiling can reserve several times a user's weekly allowance
         // before the vision model is called. A vision turn only needs the current
         // image question; subsequent text turns still use the normal agent context.
-        const val PLATFORM_VISION_MAX_COMPLETION_TOKENS = 1_024
     }
 
-    internal data class StreamRequestVariant(
-        val name: String,
-        val request: ChatCompletionRequest
-    )
 
     override suspend fun streamTurn(
         request: ChatCompletionRequest,
         onReasoningUpdate: (suspend (String) -> Unit)?,
-        onContentUpdate: (suspend (String) -> Unit)?
+        onContentUpdate: (suspend (String) -> Unit)?,
+        onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
     ): ChatCompletionTurn {
         val usesOfficialProvider =
             OmniOfficialProvider.isOfficialProfile(modelOverride?.providerProfileId) ||
@@ -189,6 +183,7 @@ class HttpAgentLlmClient(
                 effectiveExplicitModel = modelOverride?.modelId,
                 onReasoningUpdate = onReasoningUpdate,
                 onContentUpdate = onContentUpdate,
+                onToolCallInput = onToolCallInput,
             )
         }
 
@@ -200,6 +195,7 @@ class HttpAgentLlmClient(
             effectiveExplicitModel = platformVisionModel,
             onReasoningUpdate = null,
             onContentUpdate = null,
+            onToolCallInput = null,
         )
         val description = visionTurn.message.contentText().trim()
         check(description.isNotEmpty()) { "官方图片理解模型未返回可用内容" }
@@ -208,6 +204,7 @@ class HttpAgentLlmClient(
             effectiveExplicitModel = modelOverride?.modelId,
             onReasoningUpdate = onReasoningUpdate,
             onContentUpdate = onContentUpdate,
+            onToolCallInput = onToolCallInput,
         )
     }
 
@@ -235,132 +232,125 @@ class HttpAgentLlmClient(
         effectiveExplicitModel: String?,
         onReasoningUpdate: (suspend (String) -> Unit)?,
         onContentUpdate: (suspend (String) -> Unit)?,
+        onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
     ): ChatCompletionTurn {
-        val modelCandidates = buildModelCandidates(request.model)
-        val sanitizedRequest = sanitizeRequestForTarget(request)
-        var lastFailure: AgentStreamRequestException? = null
-
-        for (modelIndex in modelCandidates.indices) {
-            val candidateModel = modelCandidates[modelIndex]
-            val routeInfo = resolveRouteInfoOp(
-                candidateModel,
-                modelOverride?.apiBase,
-                modelOverride?.apiKey,
-                modelOverride?.customHeaders,
-                effectiveExplicitModel,
-                modelOverride?.protocolType,
-                modelOverride?.wireApi
-            )
-            val variants = buildRequestVariants(sanitizedRequest, routeInfo)
-            for (variantIndex in variants.indices) {
-                val variant = variants[variantIndex]
-                try {
-                    if (modelIndex > 0 || variantIndex > 0) {
-                        OmniLog.w(
-                            tag,
-                            "retry stream request model=$candidateModel variant=${variant.name}"
-                        )
-                    }
-                    // Encode lazily, one variant at a time, so we never hold multiple
-                    // copies of a potentially huge request payload in memory at once.
-                    val requestJson = json.encodeToString(variant.request)
-                    if (AiRequestTransportPolicy.isPlatformRoute(routeInfo.routeTag)) {
-                        PlatformMediaProtocol.requirePlatformJsonRequestWithinLimit(requestJson)
-                    }
-                    return streamTurnWithPlatformAuthRetry(
-                        model = candidateModel,
-                        requestJson = requestJson,
-                        explicitModel = effectiveExplicitModel,
-                        platformRoute = AiRequestTransportPolicy.isPlatformRoute(routeInfo.routeTag),
-                        onReasoningUpdate = onReasoningUpdate,
-                        onContentUpdate = onContentUpdate
-                    )
-                } catch (error: AgentStreamRequestException) {
-                    lastFailure = error
-                    val canRetryVariant =
-                        error.statusCode == 400 && variantIndex < variants.lastIndex
-                    if (canRetryVariant) {
-                        OmniLog.w(
-                            tag,
-                            "stream variant=${variant.name} failed with 400: ${error.reason}"
-                        )
-                        continue
-                    }
-
-                    val canFallbackModel =
-                        modelIndex < modelCandidates.lastIndex && isModelNotSupported(error)
-                    if (canFallbackModel) {
-                        val nextModel = modelCandidates[modelIndex + 1]
-                        OmniLog.w(
-                            tag,
-                            "model=$candidateModel not supported, fallback to model=$nextModel; reason=${error.reason}"
-                        )
-                        break
-                    }
-                    throw error
-                } catch (error: AgentStreamReasoningLeakException) {
-                    if (shouldRetryNextVariantAfterReasoningLeak(routeInfo, variants, variantIndex)) {
-                        OmniLog.w(
-                            tag,
-                            "stream variant=${variant.name} leaked inline reasoning on guarded route; retrying next conservative variant"
-                        )
-                        continue
-                    }
-                    throw error
-                }
-            }
-        }
-
-        throw lastFailure ?: IllegalStateException("chat completion stream failed with unknown reason")
+        val routeInfo = resolveRouteInfoOp(
+            request.model,
+            modelOverride?.apiBase,
+            modelOverride?.apiKey,
+            modelOverride?.customHeaders,
+            effectiveExplicitModel,
+            modelOverride?.protocolType,
+            modelOverride?.wireApi,
+        )
+        val namePlan = if (OpenAiWireApi.isResponses(routeInfo.wireApi)) {
+            OpenAiResponsesFunctionNameCodec.planFor(request)
+        } else null
+        val wireRequest = namePlan?.encodeRequest(request) ?: request
+        val turn = streamTurnWithPlatformAuthRetry(
+            model = request.model,
+            requestJson = json.encodeToJsonElement(wireRequest).jsonObject,
+            explicitModel = effectiveExplicitModel,
+            platformRoute = AiRequestTransportPolicy.isPlatformRoute(routeInfo.routeTag),
+            onReasoningUpdate = onReasoningUpdate,
+            onContentUpdate = onContentUpdate,
+            onToolCallInput = { call ->
+                onToolCallInput?.invoke(call.copy(function = call.function.copy(
+                    name = namePlan?.restore(call.function.name) ?: call.function.name,
+                )))
+            },
+        )
+        return namePlan?.restoreTurn(turn) ?: turn
     }
 
     private suspend fun streamTurnWithPlatformAuthRetry(
         model: String,
-        requestJson: String,
+        requestJson: JsonObject,
         explicitModel: String?,
         platformRoute: Boolean,
         onReasoningUpdate: (suspend (String) -> Unit)?,
         onContentUpdate: (suspend (String) -> Unit)?,
+        onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
     ): ChatCompletionTurn {
+        var emittedOutput = false
+        suspend fun forward(
+            callback: (suspend (String) -> Unit)?,
+            value: String,
+        ) {
+            if (value.isNotBlank()) emittedOutput = true
+            callback?.invoke(value)
+        }
         return try {
-            streamTurnOnce(model, requestJson, explicitModel, onReasoningUpdate, onContentUpdate)
+            streamTurnOnce(
+                model,
+                requestJson,
+                explicitModel,
+                onReasoningUpdate = { value -> forward(onReasoningUpdate, value) },
+                onContentUpdate = { value -> forward(onContentUpdate, value) },
+                onToolCallInput = { call -> emittedOutput = true; onToolCallInput?.invoke(call) },
+            )
         } catch (error: AgentStreamRequestException) {
-            if (error.statusCode != 401 || !platformRoute || !refreshPlatformSessionOp()) {
+            if (
+                error.statusCode != 401 ||
+                emittedOutput ||
+                error.responseStarted ||
+                !platformRoute ||
+                !refreshPlatformSessionOp()
+            ) {
                 throw error
             }
             OmniLog.i(tag, "platform access token refreshed after 401; retrying once")
-            streamTurnOnce(model, requestJson, explicitModel, onReasoningUpdate, onContentUpdate)
+            streamTurnOnce(
+                model,
+                requestJson,
+                explicitModel,
+                onReasoningUpdate = { value -> forward(onReasoningUpdate, value) },
+                onContentUpdate = { value -> forward(onContentUpdate, value) },
+                onToolCallInput = { call -> emittedOutput = true; onToolCallInput?.invoke(call) },
+            )
         }
     }
 
     private suspend fun streamTurnOnce(
         model: String,
-        requestJson: String,
+        requestJson: JsonObject,
         explicitModel: String?,
         onReasoningUpdate: (suspend (String) -> Unit)?,
-        onContentUpdate: (suspend (String) -> Unit)?
+        onContentUpdate: (suspend (String) -> Unit)?,
+        onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
     ): ChatCompletionTurn {
-        val retryCount = maxTransientStreamRetries.coerceAtLeast(0)
+        val retryCount = effectiveMaxTransientStreamRetries?.coerceAtLeast(0) ?: 0
+        var retriedIncompleteToolCall = false
         repeat(retryCount + 1) { attempt ->
+            var attemptProducedOutput = false
+            suspend fun forward(
+                callback: (suspend (String) -> Unit)?,
+                value: String,
+            ) {
+                if (value.isNotBlank()) attemptProducedOutput = true
+                callback?.invoke(value)
+            }
             try {
                 return try {
                     doStreamTurnOnce(
                         model,
                         requestJson,
                         explicitModel,
-                        onReasoningUpdate,
-                        onContentUpdate,
+                        onReasoningUpdate = { value -> forward(onReasoningUpdate, value) },
+                        onContentUpdate = { value -> forward(onContentUpdate, value) },
+                        onToolCallInput = { call -> attemptProducedOutput = true; onToolCallInput?.invoke(call) },
                         forceHttp1 = false,
                     )
                 } catch (error: AgentStreamRequestException) {
-                    if (isHttp2ProtocolError(error)) {
+                    if (isHttp2ProtocolError(error) && !attemptProducedOutput && !error.responseStarted) {
                         OmniLog.w(tag, "HTTP/2 stream PROTOCOL_ERROR, retrying with HTTP/1.1")
                         doStreamTurnOnce(
                             model,
                             requestJson,
                             explicitModel,
-                            onReasoningUpdate,
-                            onContentUpdate,
+                            onReasoningUpdate = { value -> forward(onReasoningUpdate, value) },
+                            onContentUpdate = { value -> forward(onContentUpdate, value) },
+                            onToolCallInput = { call -> attemptProducedOutput = true; onToolCallInput?.invoke(call) },
                             forceHttp1 = true,
                         )
                     } else {
@@ -368,14 +358,31 @@ class HttpAgentLlmClient(
                     }
                 }
             } catch (error: AgentStreamRequestException) {
-                if (attempt >= retryCount || !isTransientStreamFailure(error)) throw error
-                val delayMs = transientStreamRetryDelayMs.coerceAtLeast(0L) * (attempt + 1L)
+                if (
+                    attemptProducedOutput || error.responseStarted ||
+                    attempt >= retryCount ||
+                    !isTransientStreamFailure(error)
+                ) throw error
+                val delayMs = (effectiveTransientStreamRetryDelayMs ?: 0L)
+                    .coerceAtLeast(0L) * (attempt + 1L)
                 OmniLog.w(
                     tag,
                     "transient stream failure, retrying attempt=${attempt + 1}/$retryCount " +
                         "delayMs=$delayMs reason=${error.reason}",
                 )
                 if (delayMs > 0L) delay(delayMs)
+            } catch (error: AgentIncompleteToolCallException) {
+                if (
+                    attemptProducedOutput ||
+                    retriedIncompleteToolCall ||
+                    attempt >= retryCount
+                ) throw error
+                retriedIncompleteToolCall = true
+                OmniLog.w(
+                    tag,
+                    "incomplete streamed tool call index=${error.toolCallIndex}; " +
+                        "retrying the same model turn once",
+                )
             }
         }
         error("unreachable transient stream retry state")
@@ -396,37 +403,21 @@ class HttpAgentLlmClient(
         return TRANSIENT_STREAM_FAILURE_MARKERS.any(reason::contains)
     }
 
-    private fun shouldBufferLeadingInlineThinkTag(
-        routeInfo: HttpController.ChatCompletionRouteInfo
-    ): Boolean {
-        if (shouldGuardNvidiaKimiReasoningLeak(routeInfo)) {
-            return true
-        }
-        val protocolType = routeInfo.protocolType.trim().ifEmpty { "openai_compatible" }
-        if (!protocolType.equals("openai_compatible", ignoreCase = true)) {
-            return false
-        }
-        return sequenceOf(routeInfo.resolvedModel, routeInfo.requestedModel)
-            .map { it.trim().lowercase() }
-            .any { model ->
-                model.startsWith("qwen") ||
-                    model.contains("/qwen") ||
-                    model.contains(":qwen") ||
-                    model.contains("_qwen") ||
-                    model.contains("-qwen")
-            }
-    }
-
     private suspend fun doStreamTurnOnce(
         model: String,
-        requestJson: String,
+        requestJson: JsonObject,
         explicitModel: String?,
         onReasoningUpdate: (suspend (String) -> Unit)?,
         onContentUpdate: (suspend (String) -> Unit)?,
+        onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
         forceHttp1: Boolean
     ): ChatCompletionTurn {
         val streamDone = CompletableDeferred<ChatCompletionTurn>()
         val completed = AtomicBoolean(false)
+        val startedAtMs = System.currentTimeMillis()
+        var firstEventLogged = false
+        var firstReasoningLogged = false
+        var firstContentLogged = false
         val routeInfo = resolveRouteInfoOp(
             model,
             modelOverride?.apiBase,
@@ -438,10 +429,10 @@ class HttpAgentLlmClient(
         )
         val accumulator = AgentLlmStreamAccumulator(
             json = json,
-            includeReasoningInAssistantMessage = routeInfo.requiresReasoningEcho,
-            bufferLeadingTextUntilInlineThinkTag = shouldBufferLeadingInlineThinkTag(routeInfo),
-            guardLeadingReasoningLeak = shouldGuardNvidiaKimiReasoningLeak(routeInfo),
-            captureAnthropicContentBlocks = routeInfo.requiresAnthropicThinkingReplay,
+            includeReasoningInAssistantMessage =
+                routeInfo.providerCapabilities.requiresReasoningContentForToolCalls,
+            captureAnthropicContentBlocks =
+                routeInfo.providerCapabilities.requiresAnthropicThinkingReplay,
             anthropicSourceModel = routeInfo.resolvedModel
         )
         var lastReasoning = ""
@@ -450,8 +441,10 @@ class HttpAgentLlmClient(
         var reasoningEmitJob: Job? = null
         val reasoningLock = Any()
         var lastContent = ""
+        var lastToolInputEmitAt = 0L
+        val lastToolInputs = mutableMapOf<String, AssistantToolCall>()
         var eventSource: EventSource? = null
-        var streamIdleWatchdog: Job? = null
+        val lastStreamActivityAtMs = AtomicLong(startedAtMs)
         val emissionQueue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
         val emissionLock = Any()
         val emissionJob = scope.launch {
@@ -465,29 +458,6 @@ class HttpAgentLlmClient(
                 return
             }
             emissionQueue.trySend(block)
-        }
-
-        fun cancelWatchdog() {
-            streamIdleWatchdog?.cancel()
-            streamIdleWatchdog = null
-        }
-
-        fun scheduleWatchdog() {
-            val timeoutMs = streamIdleWatchdogMs
-            if (timeoutMs <= 0L) {
-                return
-            }
-            cancelWatchdog()
-            streamIdleWatchdog = scope.launch {
-                delay(timeoutMs)
-                if (!completed.compareAndSet(false, true)) {
-                    return@launch
-                }
-                streamDone.completeExceptionally(
-                    IllegalStateException("chat completion stream idle timeout after ${timeoutMs}ms")
-                )
-                eventSource?.cancel()
-            }
         }
 
         fun dispatchReasoningSnapshot(reasoning: String) {
@@ -580,9 +550,23 @@ class HttpAgentLlmClient(
             }
         }
 
+        fun emitToolInputs(force: Boolean = false) {
+            val now = System.currentTimeMillis()
+            // Same presentation cadence as reasoning, without limiting the input.
+            if (!force && now - lastToolInputEmitAt < REASONING_UPDATE_INTERVAL_MS) return
+            val calls = accumulator.currentToolCalls()
+            if (calls.isEmpty()) return
+            lastToolInputEmitAt = now
+            emitReasoning(force = true)
+            calls.forEach { call ->
+                if (lastToolInputs.put(call.id, call) != call) {
+                    enqueueEmission { onToolCallInput?.invoke(call) }
+                }
+            }
+        }
+
         fun completeStream(eventSource: EventSource? = null) {
             if (!completed.compareAndSet(false, true)) return
-            cancelWatchdog()
             runCatching {
                 val turn = accumulator.buildTurn().copy(
                     resolvedModel = routeInfo.resolvedModel,
@@ -590,8 +574,15 @@ class HttpAgentLlmClient(
                 enforceReasoningEchoIfRequired(turn, routeInfo)
                 emitReasoning(force = true)
                 emitContent()
+                emitToolInputs(force = true)
                 turn
             }.onSuccess { turn ->
+                OmniLog.i(
+                    tag,
+                    "ACP provider timing stage=stream_completed " +
+                        "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                        "protocol=${routeInfo.protocolType}"
+                )
                 streamDone.complete(turn)
             }.onFailure { error ->
                 streamDone.completeExceptionally(error)
@@ -599,9 +590,43 @@ class HttpAgentLlmClient(
             eventSource?.cancel()
         }
 
+        fun failIdleStream(timeoutMs: Long) {
+            if (!completed.compareAndSet(false, true)) return
+            val error = AgentStreamIdleTimeoutException(timeoutMs)
+            OmniLog.w(
+                tag,
+                "ACP provider timing stage=stream_idle_timeout " +
+                    "elapsedMs=${System.currentTimeMillis() - startedAtMs}"
+            )
+            streamDone.completeExceptionally(error)
+            eventSource?.cancel()
+        }
+
+        val idleWatchdog = effectiveStreamIdleTimeoutMs?.let { timeoutMs ->
+            scope.launch {
+                val checkIntervalMs = timeoutMs.coerceIn(1L, 1_000L)
+                while (!completed.get()) {
+                    delay(checkIntervalMs)
+                    if (
+                        System.currentTimeMillis() - lastStreamActivityAtMs.get() >=
+                        timeoutMs.coerceAtLeast(1L)
+                    ) {
+                        failIdleStream(timeoutMs)
+                        break
+                    }
+                }
+            }
+        }
+
         val listener = object : EventSourceListener() {
             override fun onOpen(eventSource: EventSource, response: Response) {
-                scheduleWatchdog()
+                lastStreamActivityAtMs.set(System.currentTimeMillis())
+                OmniLog.i(
+                    tag,
+                    "ACP provider timing stage=stream_open " +
+                        "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                        "protocol=${routeInfo.protocolType}"
+                )
             }
 
             override fun onEvent(
@@ -611,21 +636,48 @@ class HttpAgentLlmClient(
                 data: String
             ) {
                 if (completed.get()) return
+                lastStreamActivityAtMs.set(System.currentTimeMillis())
                 runCatching {
-                    scheduleWatchdog()
+                    if (!firstEventLogged) {
+                        firstEventLogged = true
+                        OmniLog.i(
+                            tag,
+                            "ACP provider timing stage=first_event " +
+                                "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                                "protocol=${routeInfo.protocolType}"
+                        )
+                    }
                     val done = accumulator.consume(data)
+                    if (!firstReasoningLogged && accumulator.currentReasoningLength() > 0) {
+                        firstReasoningLogged = true
+                        OmniLog.i(
+                            tag,
+                            "ACP provider timing stage=first_reasoning " +
+                                "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                                "protocol=${routeInfo.protocolType}"
+                        )
+                    }
+                    if (!firstContentLogged && accumulator.currentContent().isNotEmpty()) {
+                        firstContentLogged = true
+                        OmniLog.i(
+                            tag,
+                            "ACP provider timing stage=first_content " +
+                                "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                                "protocol=${routeInfo.protocolType}"
+                        )
+                    }
                     emitReasoning()
                     emitContent()
+                    emitToolInputs()
                     if (done) {
                         completeStream(eventSource)
                     }
                 }.onFailure { error ->
                     if (completed.compareAndSet(false, true)) {
-                        val failure = if (error is AgentStreamReasoningLeakException) {
+                        val failure = IllegalStateException(
+                            "invalid chat completion stream chunk: ${error.message}",
                             error
-                        } else {
-                            IllegalStateException("invalid chat completion stream chunk: ${error.message}", error)
-                        }
+                        )
                         streamDone.completeExceptionally(failure)
                         eventSource.cancel()
                     }
@@ -634,14 +686,13 @@ class HttpAgentLlmClient(
 
             override fun onClosed(eventSource: EventSource) {
                 if (completed.get()) {
-                    cancelWatchdog()
                     return
                 }
+                lastStreamActivityAtMs.set(System.currentTimeMillis())
                 if (accumulator.canFinalizeOnClosed()) {
                     completeStream()
                     return
                 }
-                cancelWatchdog()
                 if (completed.compareAndSet(false, true)) {
                     streamDone.completeExceptionally(
                         IllegalStateException(DEFAULT_CLOSED_STREAM_ERROR)
@@ -651,7 +702,14 @@ class HttpAgentLlmClient(
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 if (!completed.compareAndSet(false, true)) return
-                cancelWatchdog()
+                lastStreamActivityAtMs.set(System.currentTimeMillis())
+                OmniLog.w(
+                    tag,
+                    "ACP provider timing stage=stream_failed " +
+                        "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                        "status=${response?.code ?: "none"} " +
+                        "protocol=${routeInfo.protocolType}"
+                )
                 val responseBody = extractRawResponseBody(response)
                 parseSuccessfulNonStreamingResponsesTurn(
                     statusCode = response?.code,
@@ -668,16 +726,18 @@ class HttpAgentLlmClient(
                     AgentStreamRequestException(
                         statusCode = response?.code,
                         reason = reason,
-                        responseBody = responseBody?.take(4000)
+                        responseBody = responseBody,
+                        responseStarted = accumulator.hasAssistantPayload(),
+                        cause = t,
                     )
                 )
             }
         }
 
         try {
-            eventSource = streamRequestOp(
+            eventSource = streamRequestOp?.invoke(
                 model,
-                requestJson,
+                json.encodeRequestToString(requestJson),
                 listener,
                 modelOverride?.apiBase,
                 modelOverride?.apiKey,
@@ -686,11 +746,27 @@ class HttpAgentLlmClient(
                 modelOverride?.protocolType,
                 modelOverride?.wireApi,
                 forceHttp1
+            ) ?: HttpController.postChatCompletionsStreamRequest(
+                model = model,
+                requestBody = requestJson,
+                event = listener,
+                explicitApiBase = modelOverride?.apiBase,
+                explicitApiKey = modelOverride?.apiKey,
+                explicitCustomHeaders = modelOverride?.customHeaders,
+                explicitModel = explicitModel,
+                explicitProtocolType = modelOverride?.protocolType,
+                explicitWireApi = modelOverride?.wireApi,
+                forceHttp1 = forceHttp1,
             )
-            scheduleWatchdog()
+            OmniLog.i(
+                tag,
+                "ACP provider timing stage=request_dispatched " +
+                    "elapsedMs=${System.currentTimeMillis() - startedAtMs} " +
+                    "protocol=${routeInfo.protocolType}"
+            )
             return streamDone.await()
         } finally {
-            cancelWatchdog()
+            idleWatchdog?.cancel()
             reasoningEmitJob?.cancel()
             eventSource?.cancel()
             emissionQueue.close()
@@ -702,7 +778,7 @@ class HttpAgentLlmClient(
         turn: ChatCompletionTurn,
         routeInfo: HttpController.ChatCompletionRouteInfo
     ) {
-        if (!routeInfo.requiresReasoningEcho) {
+        if (!routeInfo.providerCapabilities.requiresReasoningContentForToolCalls) {
             return
         }
         if (turn.reasoning.isBlank()) {
@@ -717,269 +793,6 @@ class HttpAgentLlmClient(
         )
     }
 
-    internal fun buildRequestVariants(
-        request: ChatCompletionRequest,
-        routeInfo: HttpController.ChatCompletionRouteInfo
-    ): List<StreamRequestVariant> {
-        val compatibleRequest = normalizeMultimodalMessageContent(request, routeInfo).let {
-            if (isParateraGlm(routeInfo)) it.copy(streamOptions = null) else it
-        }
-        val variants = mutableListOf<StreamRequestVariant>()
-        val seenRequests = LinkedHashSet<ChatCompletionRequest>()
-        // Dedup by structural equality of the request itself instead of by its
-        // serialized JSON. This is equivalent (equal data classes serialize to equal
-        // JSON) but avoids eagerly materializing every variant's payload string, which
-        // could be tens of MB each and previously exhausted the heap (issue #429).
-        fun add(name: String, candidate: ChatCompletionRequest) {
-            if (seenRequests.add(candidate)) {
-                variants.add(StreamRequestVariant(name = name, request = candidate))
-            }
-        }
-
-        if (shouldGuardNvidiaKimiReasoningLeak(routeInfo)) {
-            val noThinkingRequest = compatibleRequest.copy(
-                enableThinking = false,
-                reasoningEffort = "none",
-                thinking = ChatCompletionThinking(type = "disabled")
-            )
-            add("nvidia_no_thinking", noThinkingRequest)
-            add(
-                "nvidia_no_thinking_minimal",
-                noThinkingRequest.copy(streamOptions = null)
-            )
-        }
-
-        add("default", compatibleRequest)
-        add(
-            "no_stream_options",
-            compatibleRequest.copy(streamOptions = null)
-        )
-        val requiresNativeToolCalls = compatibleRequest.tools.isNotEmpty() &&
-            compatibleRequest.parallelToolCalls == false &&
-            (compatibleRequest.toolChoice as? JsonPrimitive)
-                ?.contentOrNull
-                ?.equals("required", ignoreCase = true) == true
-        if (requiresNativeToolCalls) {
-            return variants
-        }
-
-        val legacyFunctions = compatibleRequest.tools.map { it.function }
-        val legacyRequest = legacyFunctions
-            .takeIf {
-                it.isNotEmpty() &&
-                    !routeInfo.wireApi.equals("responses", ignoreCase = true)
-            }
-            ?.let {
-                compatibleRequest.copy(
-                    streamOptions = null,
-                    parallelToolCalls = null,
-                    toolChoice = null,
-                    tools = emptyList(),
-                    functions = it,
-                    functionCall = toLegacyFunctionCall(request.toolChoice)
-                )
-            }
-        add(
-            "minimal",
-            compatibleRequest.copy(
-                streamOptions = null,
-                parallelToolCalls = null,
-                toolChoice = null
-            )
-        )
-
-        if (legacyRequest != null) {
-            add("legacy_functions", legacyRequest)
-        }
-        request.promptCacheKey?.let {
-            add(
-                "no_prompt_cache_key",
-                compatibleRequest.copy(
-                    streamOptions = null,
-                    parallelToolCalls = null,
-                    toolChoice = null,
-                    promptCacheKey = null
-                )
-            )
-        }
-        return variants
-    }
-
-    private fun normalizeMultimodalMessageContent(
-        request: ChatCompletionRequest,
-        routeInfo: HttpController.ChatCompletionRouteInfo
-    ): ChatCompletionRequest {
-        if (!isParateraGlm(routeInfo) || request.messages.none { it.content is JsonArray }) {
-            return request
-        }
-        val messages = request.messages.map { message ->
-            val content = message.content as? JsonPrimitive ?: return@map message
-            if (!content.isString) return@map message
-            message.copy(
-                content = JsonArray(
-                    listOf(
-                        JsonObject(
-                            mapOf(
-                                "type" to JsonPrimitive("text"),
-                                "text" to JsonPrimitive(content.content),
-                            )
-                        )
-                    )
-                )
-            )
-        }
-        return request.copy(messages = messages)
-    }
-
-    private fun isParateraGlm(routeInfo: HttpController.ChatCompletionRouteInfo): Boolean {
-        val model = routeInfo.resolvedModel.trim().lowercase()
-        val host = runCatching { URI(routeInfo.apiBase.orEmpty()).host.orEmpty() }
-            .getOrDefault("")
-            .lowercase()
-        return model == "glm-5.1" && host == "llmapi.paratera.com"
-    }
-
-    private fun shouldRetryNextVariantAfterReasoningLeak(
-        routeInfo: HttpController.ChatCompletionRouteInfo,
-        variants: List<StreamRequestVariant>,
-        variantIndex: Int
-    ): Boolean {
-        if (!shouldGuardNvidiaKimiReasoningLeak(routeInfo)) {
-            return false
-        }
-        return variants
-            .drop(variantIndex + 1)
-            .any { it.name.startsWith("nvidia_no_thinking") }
-    }
-
-    private fun shouldGuardNvidiaKimiReasoningLeak(
-        routeInfo: HttpController.ChatCompletionRouteInfo
-    ): Boolean {
-        val protocolType = routeInfo.protocolType.trim().ifEmpty { "openai_compatible" }
-        if (!protocolType.equals("openai_compatible", ignoreCase = true)) {
-            return false
-        }
-        if (!isNvidiaIntegrateApiBase(routeInfo.apiBase)) {
-            return false
-        }
-        return sequenceOf(routeInfo.resolvedModel, routeInfo.requestedModel)
-            .map(::normalizeReasoningLeakGuardModel)
-            .any { it == "kimi-k2.6" }
-    }
-
-    private fun isNvidiaIntegrateApiBase(apiBase: String?): Boolean {
-        val normalized = apiBase?.trim()?.takeIf { it.isNotEmpty() } ?: return false
-        val host = runCatching { URI(normalized).host?.lowercase() }
-            .getOrNull()
-            ?.removePrefix("www.")
-            ?: return false
-        return host == "integrate.api.nvidia.com"
-    }
-
-    private fun normalizeReasoningLeakGuardModel(model: String): String {
-        return model.trim().lowercase()
-            .substringAfterLast('/')
-            .substringAfterLast(':')
-    }
-
-    private fun sanitizeRequestForTarget(request: ChatCompletionRequest): ChatCompletionRequest {
-        if (shouldPreserveAllAssistantReasoning()) {
-            return request
-        }
-        val sanitizedMessages = request.messages.mapIndexed { index, message ->
-            if (
-                message.role != "assistant" ||
-                message.reasoningContent.isNullOrBlank() ||
-                shouldRetainAssistantReasoning(index, request.messages)
-            ) {
-                message
-            } else {
-                message.copy(reasoningContent = null)
-            }
-        }
-        return if (sanitizedMessages == request.messages) {
-            request
-        } else {
-            request.copy(messages = sanitizedMessages)
-        }
-    }
-
-    private fun shouldPreserveAllAssistantReasoning(): Boolean {
-        if (isOfficialDeepSeekTarget()) {
-            return true
-        }
-        return when (resolvedProtocolType()) {
-            DeepSeekProvider.PROTOCOL_TYPE, "anthropic" -> true
-            else -> false
-        }
-    }
-
-    private fun shouldRetainAssistantReasoning(
-        assistantIndex: Int,
-        messages: List<ChatCompletionMessage>
-    ): Boolean {
-        val message = messages.getOrNull(assistantIndex) ?: return false
-        if (message.toolCalls?.isNotEmpty() == true) {
-            return true
-        }
-        for (index in assistantIndex + 1 until messages.size) {
-            when (messages[index].role) {
-                "tool" -> return true
-                "user" -> return false
-            }
-        }
-        return false
-    }
-
-    private fun isOfficialDeepSeekTarget(): Boolean {
-        if (modelOverride != null) {
-            return DeepSeekProvider.shouldUseOfficialAdapter(
-                protocolType = modelOverride.protocolType,
-                apiBase = modelOverride.apiBase
-            )
-        }
-        val profile = runCatching { ModelProviderConfigStore.getEditingProfile() }
-            .getOrNull()
-        return DeepSeekProvider.shouldUseOfficialAdapter(
-            protocolType = profile?.protocolType,
-            apiBase = profile?.baseUrl
-        )
-    }
-
-    private fun resolvedProtocolType(): String {
-        modelOverride?.protocolType
-            ?.let(DeepSeekProvider::normalizeProtocolType)
-            ?.let { return it }
-        return runCatching { ModelProviderConfigStore.getEditingProfile().protocolType }
-            .map(DeepSeekProvider::normalizeProtocolType)
-            .getOrDefault(DeepSeekProvider.normalizeProtocolType(null))
-    }
-
-    private fun toLegacyFunctionCall(toolChoice: JsonElement?): JsonElement? {
-        if (toolChoice == null) return null
-        return when (toolChoice) {
-            is JsonPrimitive -> {
-                val raw = toolChoice.contentOrNull?.trim().orEmpty()
-                when {
-                    raw.isEmpty() || raw.equals("none", ignoreCase = true) -> null
-                    raw.equals("required", ignoreCase = true) -> JsonPrimitive("auto")
-                    else -> JsonPrimitive(raw)
-                }
-            }
-
-            is JsonObject -> {
-                val functionName =
-                    extractJsonText((toolChoice["function"] as? JsonObject)?.get("name"))
-                if (functionName.isNullOrBlank()) {
-                    JsonPrimitive("auto")
-                } else {
-                    JsonObject(mapOf("name" to JsonPrimitive(functionName)))
-                }
-            }
-
-            else -> JsonPrimitive("auto")
-        }
-    }
 
     private fun extractRawResponseBody(response: Response?): String? {
         val body = runCatching { response?.body?.string() }.getOrNull()?.trim().orEmpty()
@@ -1070,14 +883,6 @@ class HttpAgentLlmClient(
         return if (normalized.length <= maxLen) normalized else "${normalized.take(maxLen)}..."
     }
 
-    private fun buildModelCandidates(baseModel: String): List<String> {
-        val normalized = baseModel.trim().ifEmpty { baseModel }
-        val candidates = linkedSetOf(normalized)
-        if (normalized.startsWith("scene.")) {
-            candidates.add("scene.dispatch.model")
-        }
-        return candidates.toList()
-    }
 
     private fun ChatCompletionRequest.hasImageInput(): Boolean =
         messages.any { message -> message.content.containsImageInput() }
@@ -1096,10 +901,8 @@ class HttpAgentLlmClient(
         return copy(
             messages = currentImageMessage?.let(::listOf) ?: messages,
             model = model,
-            maxCompletionTokens = maxCompletionTokens?.coerceAtMost(
-                PLATFORM_VISION_MAX_COMPLETION_TOKENS
-            ),
-            maxTokens = maxTokens?.coerceAtMost(PLATFORM_VISION_MAX_COMPLETION_TOKENS),
+            maxCompletionTokens = maxCompletionTokens,
+            maxTokens = maxTokens,
             tools = emptyList(),
             toolChoice = null,
             parallelToolCalls = null,

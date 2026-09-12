@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/services/agent_runtime_service.dart';
+import 'package:ui/services/agent_web_action_presenter.dart';
+import 'package:ui/services/omni_plugin_service.dart';
+import 'package:ui/services/scene_model_config_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
@@ -30,6 +33,12 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   bool _refreshing = false;
   String? _error;
   String? _busyAgentId;
+  String? _busyPluginActionKey;
+  List<OmniPluginActionItem> _pluginActions = const <OmniPluginActionItem>[];
+  int _catalogRequestId = 0;
+  late Set<String> _preparingAgentIds;
+  StreamSubscription<Set<String>>? _preparationSubscription;
+  String _sharedModelLabel = '';
   // 远程 PC Bridge 状态：先用缓存同步渲染，后台再刷新，避免一帧加载闪烁。
   bool _remoteBridgeEnabled =
       StorageService.getBool(StorageService.kRemoteBridgeEnabledKey) ?? false;
@@ -42,11 +51,83 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   @override
   void initState() {
     super.initState();
+    _preparingAgentIds = AgentRuntimeService.preparingAgentIds;
+    _preparationSubscription = AgentRuntimeService.agentPreparationChanges
+        .listen((agentIds) {
+          if (!mounted) return;
+          final completed = _preparingAgentIds.difference(agentIds).isNotEmpty;
+          setState(() => _preparingAgentIds = agentIds);
+          if (completed) unawaited(_load());
+        });
+    // The native agent/list endpoint returns cached health. Keep route entry
+    // immediate; users can request the full terminal/proot probe with the
+    // refresh action without blocking this page.
     unawaited(_load());
+    unawaited(_loadPluginActions());
+    unawaited(_loadSharedModel());
     unawaited(_loadRemoteBridge());
   }
 
+  @override
+  void dispose() {
+    unawaited(_preparationSubscription?.cancel());
+    super.dispose();
+  }
+
+  Future<void> _loadSharedModel() async {
+    try {
+      final catalog = await SceneModelConfigService.getSceneCatalog();
+      final agentScene = catalog.firstWhere(
+        (item) => item.sceneId == 'scene.dispatch.model',
+        orElse: () => const SceneCatalogItem(
+          sceneId: '',
+          description: '',
+          defaultModel: '',
+          effectiveModel: '',
+          effectiveProviderProfileId: '',
+          effectiveProviderProfileName: '',
+          boundProviderProfileId: '',
+          boundProviderProfileName: '',
+          transport: '',
+          configSource: '',
+          overrideApplied: false,
+          overrideModel: '',
+          providerConfigured: false,
+          bindingExists: false,
+          bindingProfileMissing: false,
+        ),
+      );
+      final provider = agentScene.effectiveProviderProfileName.trim();
+      final model = agentScene.effectiveModel.trim();
+      if (!mounted) return;
+      setState(() {
+        _sharedModelLabel = [
+          provider,
+          model,
+        ].where((value) => value.isNotEmpty).join(' / ');
+      });
+    } catch (_) {
+      // The Agent catalog remains usable when scene binding is unavailable.
+    }
+  }
+
+  Future<void> _loadPluginActions() async {
+    try {
+      final actions = await OmniPluginService.listActions();
+      if (!mounted) return;
+      setState(() {
+        _pluginActions = actions
+            .where((action) => action.supportsPlacement('agent_settings'))
+            .toList(growable: false);
+      });
+    } catch (_) {
+      // Agent configuration remains available if the optional action catalog
+      // cannot be read during app startup.
+    }
+  }
+
   Future<void> _load({bool refresh = false}) async {
+    final requestId = ++_catalogRequestId;
     if (refresh) {
       setState(() => _refreshing = true);
     }
@@ -54,7 +135,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       final catalog = refresh
           ? await AgentRuntimeService.refreshAgents()
           : await AgentRuntimeService.listAgents();
-      if (!mounted) return;
+      if (!mounted || requestId != _catalogRequestId) return;
       setState(() {
         _catalog = catalog;
         _loading = false;
@@ -62,11 +143,14 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
         _error = null;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || requestId != _catalogRequestId) return;
       setState(() {
         _loading = false;
         _refreshing = false;
-        _error = error.toString();
+        // The native ACP catalog is the only source of truth. Keep an
+        // already loaded catalog on transient errors, but never invent a
+        // second list in Dart.
+        _error = formatAgentRuntimeErrorForUser(error, english: _english);
       });
     }
   }
@@ -119,74 +203,109 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   }
 
   Future<void> _test(AcpAgentProfile agent) async {
-    if (_busyAgentId != null || !agent.enabled) return;
-    if (agent.managedAdapter && agent.status == 'unchecked') {
-      showToast(
-        _text(
-          '首次检测会自动准备 ACP 适配器；也可在终端环境页统一安装，下载可能需要一些时间。',
-          'The first check prepares the ACP adapter. You can also install it from Terminal Environment; the download may take a moment.',
-        ),
-      );
+    if (_busyAgentId == agent.id ||
+        _preparingAgentIds.contains(agent.id) ||
+        !agent.enabled) {
+      return;
     }
-    setState(() => _busyAgentId = agent.id);
+    await _runAgentAction(agent, prepare: false);
+  }
+
+  void _prepare(AcpAgentProfile agent) {
+    if (_preparingAgentIds.contains(agent.id) || !agent.enabled) return;
+    unawaited(_runAgentAction(agent, prepare: true));
+  }
+
+  Future<void> _runAgentAction(
+    AcpAgentProfile agent, {
+    required bool prepare,
+  }) async {
+    if (!prepare) setState(() => _busyAgentId = agent.id);
     try {
-      final result = await AgentRuntimeService.testAgent(agent.id);
+      final result = prepare
+          ? await AgentRuntimeService.prepareAgentInBackground(
+              agent.id,
+              force: true,
+            )
+          : await AgentRuntimeService.testAgent(agent.id);
       if (!mounted) return;
       await _load();
       if (!mounted) return;
       final ok = result['ok'] == true;
-      final title = ok
-          ? _text('Agent 检测成功', 'Agent check succeeded')
-          : _text('Agent 检测失败', 'Agent check failed');
-      await showSettingsDetailSheet<void>(
-        context: context,
-        builder: (sheetContext) => SettingsDetailSheet(
-          key: ValueKey('agent-check-result-${agent.id}'),
-          title: title,
-          body: Semantics(
-            container: true,
-            liveRegion: true,
-            label: title,
-            child: SelectableText(
-              ok
-                  ? _formatCapabilities(result['capabilities'])
-                  : (result['error']?.toString() ??
-                        _text('未知错误', 'Unknown error')),
-            ),
-          ),
-        ),
+      final installed =
+          result['agent'] is Map &&
+          (result['agent'] as Map)['installed'] == true;
+      final initializationFailed = prepare && !ok && installed;
+      final title = prepare
+          ? (ok
+                ? _text('助手安装成功', 'Assistant installed')
+                : initializationFailed
+                ? _text(
+                    '安装已完成，但助手未能启动',
+                    'Installed, but the assistant could not start',
+                  )
+                : _text('助手安装失败', 'Assistant installation failed'))
+          : (ok
+                ? _text('助手检查通过', 'Assistant is ready')
+                : _text('助手暂时无法启动', 'Assistant could not start'));
+      await _showActionResult(
+        agent,
+        title,
+        ok
+            ? _text('助手已准备好，可以开始对话。', 'The assistant is ready to chat.')
+            : _actionError(
+                result['error'],
+                installation: prepare && !installed,
+              ),
       );
     } catch (error) {
       if (!mounted) return;
-      showToast(error.toString(), type: ToastType.error);
+      await _showActionResult(
+        agent,
+        prepare
+            ? _text('安装未完成', 'Installation did not finish')
+            : _text('助手暂时无法启动', 'Assistant could not start'),
+        _actionError(error, installation: prepare),
+      );
     } finally {
-      if (mounted) setState(() => _busyAgentId = null);
+      if (!prepare && mounted) setState(() => _busyAgentId = null);
     }
   }
 
-  String _formatCapabilities(dynamic value, {String indent = ''}) {
-    if (value is Map) {
-      return value.entries
-          .map((entry) {
-            final nested = entry.value;
-            if (nested is Map || nested is List) {
-              return '$indent${entry.key}:\n'
-                  '${_formatCapabilities(nested, indent: '$indent  ')}';
-            }
-            return '$indent${entry.key}: $nested';
-          })
-          .join('\n');
-    }
-    if (value is List) {
-      return value
-          .map(
-            (item) =>
-                '$indent- '
-                '${_formatCapabilities(item, indent: '$indent  ').trim()}',
-          )
-          .join('\n');
-    }
-    return '$indent$value';
+  Future<void> _showActionResult(
+    AcpAgentProfile agent,
+    String title,
+    String message,
+  ) async {
+    await showSettingsDetailSheet<void>(
+      context: context,
+      builder: (sheetContext) => SettingsDetailSheet(
+        key: ValueKey('agent-check-result-${agent.id}'),
+        title: title,
+        body: Semantics(
+          container: true,
+          liveRegion: true,
+          label: title,
+          child: SelectableText(message),
+        ),
+      ),
+    );
+  }
+
+  String _actionError(Object? error, {bool installation = false}) {
+    return formatAgentRuntimeErrorForUser(
+      error,
+      english: _english,
+      fallback: installation
+          ? _text(
+              '安装未完成，请检查网络后重新安装。',
+              'Installation did not finish. Check your connection and try again.',
+            )
+          : _text(
+              '助手未能启动，请重试；若仍失败，可重新安装。',
+              'The assistant could not start. Try again, or reinstall if the problem continues.',
+            ),
+    );
   }
 
   Future<void> _addCustomAgent() async {
@@ -204,7 +323,10 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       });
     } catch (error) {
       if (!mounted) return;
-      showToast(error.toString(), type: ToastType.error);
+      showToast(
+        formatAgentRuntimeErrorForUser(error, english: _english),
+        type: ToastType.error,
+      );
     }
   }
 
@@ -214,6 +336,22 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     );
     if (changed == true && mounted) {
       await _load();
+    }
+  }
+
+  String _pluginActionKey(OmniPluginActionItem action) =>
+      '${action.pluginId}/${action.id}';
+
+  Future<void> _invokePluginAction(OmniPluginActionItem action) async {
+    final key = _pluginActionKey(action);
+    if (_busyPluginActionKey != null) return;
+    setState(() => _busyPluginActionKey = key);
+    try {
+      await AgentWebActionPresenter.invoke(action, english: _english);
+    } finally {
+      if (mounted && _busyPluginActionKey == key) {
+        setState(() => _busyPluginActionKey = null);
+      }
     }
   }
 
@@ -244,7 +382,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
           ),
           IconButton(
             tooltip: _text('添加自定义 ACP Agent', 'Add custom ACP Agent'),
-            onPressed: _busyAgentId == null ? _addCustomAgent : null,
+            onPressed: _addCustomAgent,
             icon: const Icon(LucideIcons.plus),
           ),
         ],
@@ -280,10 +418,12 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
                   SettingsSectionTitle(
                     label: _text('托管 Agent', 'Managed Agents'),
                     subtitle: _text(
-                      '预置 Agent 始终显示；状态来自命令检测与 ACP initialize。API、账号和默认模型由各 Agent 自身配置。',
-                      'Built-in Agents always remain visible. Status comes from command detection and ACP initialize. Each Agent owns its API, account, and default model configuration.',
+                      '选择助手并配置模型。安装完成后，可返回聊天页使用；启动失败时可修改配置或重新安装。',
+                      'Choose an assistant and configure its model. Once installed, return to chat to use it. If it cannot start, update its configuration or reinstall it.',
                     ),
                   ),
+                  _buildSharedModelSummary(card),
+                  const SizedBox(height: 12),
                   _buildSearchField(card),
                   const SizedBox(height: 12),
                   OmniSegmentedSlider<_AgentFilter>(
@@ -359,7 +499,17 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
                       ],
                     ),
                   ],
-                  // 远程 PC Bridge：全局共享配置入口（仅配置远程 Codex app-server 连接）。
+                  if (_pluginActions.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    _buildSectionLabel(
+                      _text('本地 Web 界面', 'Local Web interfaces'),
+                    ),
+                    for (var i = 0; i < _pluginActions.length; i++) ...[
+                      _buildPluginActionTile(_pluginActions[i]),
+                      if (i < _pluginActions.length - 1) _buildRowDivider(),
+                    ],
+                  ],
+                  // 远程 PC Bridge：全局共享配置入口（仅配置远程 ACP 连接）。
                   const SizedBox(height: 24),
                   _buildSectionLabel(_text('远程运行', 'Remote runtime')),
                   _FlatTile(
@@ -377,12 +527,12 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
                         : _text('未启用', 'Not enabled'),
                     subtitle: _remoteBridgeEnabled
                         ? _text(
-                            'Agent 聊天使用远程 Codex app-server',
-                            'Agent chat runs on the remote Codex app-server',
+                            'Agent 聊天使用远程 ACP',
+                            'Agent chat runs on the remote ACP runtime',
                           )
                         : _text(
-                            '配置远程 Codex app-server 连接',
-                            'Configure a remote Codex app-server connection',
+                            '配置远程 ACP 连接',
+                            'Configure a remote ACP connection',
                           ),
                     onTap: () {
                       GoRouterManager.push('/home/remote_codex_setting');
@@ -390,6 +540,38 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
                   ),
                 ],
               ),
+      ),
+    );
+  }
+
+  Widget _buildSharedModelSummary(Color card) {
+    final palette = context.omniPalette;
+    final label = _sharedModelLabel.isEmpty
+        ? _text('尚未配置统一模型', 'No shared model configured')
+        : _sharedModelLabel;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.bot, size: 18, color: palette.accentPrimary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '${_text('默认模型：', 'Default model: ')}$label',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: palette.textSecondary,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -468,17 +650,17 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     final statusColor = agent.enabled ? status.color : const Color(0xFF98A2B3);
     final hasError =
         (agent.lastCheckError ?? '').isNotEmpty && agent.status != 'online';
-    final canTest = agent.enabled && agent.status != 'missing';
-    final busy = agent.id == _busyAgentId;
-    final needsManagedPreparation =
-        agent.managedAdapter &&
-        agent.status == 'unchecked' &&
-        agent.lastCheckError?.contains('will be prepared') == true;
-    final testLabel = needsManagedPreparation
-        ? _text('准备并初始化', 'Prepare & initialize')
-        : agent.status == 'unchecked'
-        ? _text('检测', 'Check')
+    final canTest =
+        agent.enabled && (agent.status != 'missing' || agent.managedAdapter);
+    final preparing = _preparingAgentIds.contains(agent.id);
+    final busy = agent.id == _busyAgentId || preparing;
+    final testLabel = agent.managedAdapter
+        ? agent.installed == true
+              ? _text('重新安装', 'Reinstall')
+              : _text('安装', 'Install')
         : _text('重新检测', 'Check again');
+    final action = agent.managedAdapter ? _prepare : _test;
+    final capabilitySubtitle = _capabilitySubtitle(agent);
     return _FlatTile(
       tileKey: Key('agent-config-${agent.id}'),
       leading: AgentBrandIcon(
@@ -487,21 +669,88 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
         fallbackColor: palette.accentPrimary,
       ),
       title: agent.name,
-      statusColor: statusColor,
-      statusLabel: !agent.enabled ? _text('已停用', 'Disabled') : status.label,
-      subtitle: agent.description.isNotEmpty
-          ? agent.description
-          : ([agent.command, ...agent.arguments]).join(' '),
-      subtitleMonospace: agent.description.isEmpty,
-      errorText: hasError ? agent.lastCheckError : null,
+      statusColor: preparing ? const Color(0xFFE3A52B) : statusColor,
+      statusLabel: preparing
+          ? _text('后台安装中', 'Installing in background')
+          : !agent.enabled
+          ? _text('已停用', 'Disabled')
+          : status.label,
+      subtitle:
+          capabilitySubtitle ??
+          (agent.managedAdapter || agent.id == 'xiaowan-acp'
+              ? null
+              : agent.description.isNotEmpty
+              ? agent.description
+              : ([agent.command, ...agent.arguments]).join(' ')),
+      subtitleMonospace:
+          capabilitySubtitle == null && agent.description.isEmpty,
+      errorText: hasError && !preparing
+          ? _actionError(
+              agent.lastCheckError,
+              installation: agent.installed == false,
+            )
+          : null,
       actionLabel: canTest ? testLabel : null,
       actionKey: Key('agent-check-${agent.id}'),
-      onAction: canTest ? () => _test(agent) : null,
+      onAction: canTest ? () => action(agent) : null,
       navigationLabel: _text('配置', 'Configure'),
       navigationKey: Key('agent-navigation-${agent.id}'),
       busy: busy,
-      onTap: () => _openAgentConfig(agent),
+      onTap: preparing
+          ? () {}
+          : () => _openAgentConfig(agent),
     );
+  }
+
+  Widget _buildPluginActionTile(OmniPluginActionItem action) {
+    final palette = context.omniPalette;
+    final key = _pluginActionKey(action);
+    final busy = _busyPluginActionKey == key;
+    final disabled = _busyPluginActionKey != null;
+    final label = action.localizedPresentationValue(
+      'label',
+      english: _english,
+      fallback: action.displayName,
+    );
+    final description = action.localizedPresentationValue(
+      'description',
+      english: _english,
+      fallback: action.description,
+    );
+    return _FlatTile(
+      tileKey: Key('plugin-action-$key'),
+      leading: Icon(LucideIcons.globe2, size: 18, color: palette.accentPrimary),
+      title: label,
+      subtitle: description,
+      actionLabel: _text('打开', 'Open'),
+      actionKey: Key('plugin-action-button-$key'),
+      onAction: disabled ? null : () => _invokePluginAction(action),
+      busy: busy,
+      onTap: disabled ? null : () => _invokePluginAction(action),
+    );
+  }
+
+  /// Surface the common plugin workflow without exposing a raw capability
+  /// dump. The source remains the generic ACP profile capabilities map; this
+  /// page does not branch the runtime by vendor.
+  String? _capabilitySubtitle(AcpAgentProfile agent) {
+    final plugin = agent.capabilities['plugin'];
+    if (plugin is! Map || plugin['supported'] != true) return null;
+    final authoring = plugin['authoring'] == true;
+    final install = plugin['installViaHarness'] == true;
+    if (!authoring && !install) return null;
+    if (_english) {
+      return authoring && install
+          ? 'Plugins: create and install through the assistant'
+          : authoring
+          ? 'Plugins: create through the assistant'
+          : 'Plugins: install through the assistant';
+    }
+    return authoring && install
+        ? '插件：可通过助手创建和安装'
+        : authoring
+        ? '插件：可通过助手创建'
+        : '插件：可通过助手安装';
   }
 }
 
@@ -526,7 +775,20 @@ class _AddCustomAgentDialogState extends State<_AddCustomAgentDialog> {
   void _save() {
     final name = _name.trim();
     final command = _command.trim();
-    if (name.isEmpty || command.isEmpty) return;
+    if (name.isEmpty) {
+      showToast(
+        _text('名称不能为空', 'Agent name is required'),
+        type: ToastType.warning,
+      );
+      return;
+    }
+    if (command.isEmpty) {
+      showToast(
+        _text('启动命令不能为空', 'Agent command is required'),
+        type: ToastType.warning,
+      );
+      return;
+    }
     Navigator.of(context).pop(
       AcpAgentProfile(
         id: '',
@@ -631,7 +893,7 @@ class _FlatTile extends StatelessWidget {
 
   final Widget leading;
   final String title;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final Key? tileKey;
   final Color? statusColor;
   final String? statusLabel;
@@ -826,7 +1088,7 @@ class _FlatTile extends StatelessWidget {
                           ),
                         ),
                       )
-                    else
+                    else if (!busy && actionLabel == null)
                       Icon(
                         LucideIcons.chevronRight,
                         size: 18,
@@ -874,7 +1136,7 @@ Map<String, String> _parseEnvironment(String source) {
       color: const Color(0xFF98A2B3),
     ),
     'offline' => (
-      label: english ? 'Initialization failed' : '初始化失败',
+      label: english ? 'Could not start' : '启动失败',
       color: const Color(0xFFE05252),
     ),
     _ => (label: english ? 'Unchecked' : '未检测', color: const Color(0xFFE3A52B)),

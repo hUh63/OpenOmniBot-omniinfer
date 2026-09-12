@@ -1,39 +1,6 @@
 import 'package:flutter/services.dart';
 import 'package:ui/models/omni_plugin_item.dart';
 
-class SandboxPluginDashboard {
-  const SandboxPluginDashboard({
-    required this.pluginId,
-    required this.title,
-    required this.entryPath,
-    required this.rootPath,
-    required this.permissions,
-  });
-
-  final String pluginId;
-  final String title;
-  final String entryPath;
-  final String rootPath;
-  final Set<String> permissions;
-
-  bool get canUseXiaowan =>
-      permissions.contains('xiaowan') || permissions.contains('ai');
-
-  factory SandboxPluginDashboard.fromMap(Map<dynamic, dynamic> raw) {
-    return SandboxPluginDashboard(
-      pluginId: (raw['pluginId'] ?? '').toString(),
-      title: (raw['title'] ?? '').toString(),
-      entryPath: (raw['entryPath'] ?? '').toString(),
-      rootPath: (raw['rootPath'] ?? '').toString(),
-      permissions:
-          (raw['permissions'] as List<dynamic>?)
-              ?.map((permission) => permission.toString())
-              .toSet() ??
-          const <String>{},
-    );
-  }
-}
-
 class OmniVlmReadiness {
   const OmniVlmReadiness({
     this.debugBuild = false,
@@ -55,6 +22,66 @@ class OmniVlmReadiness {
       model: (raw?['model'] ?? '').toString(),
     );
   }
+}
+
+class OmniPluginActionItem {
+  const OmniPluginActionItem({
+    required this.id,
+    required this.pluginId,
+    required this.displayName,
+    required this.description,
+    required this.presentation,
+  });
+
+  final String id;
+  final String pluginId;
+  final String displayName;
+  final String description;
+  final Map<String, dynamic> presentation;
+
+  factory OmniPluginActionItem.fromMap(Map<dynamic, dynamic> raw) {
+    return OmniPluginActionItem(
+      id: (raw['id'] ?? '').toString(),
+      pluginId: (raw['pluginId'] ?? '').toString(),
+      displayName: (raw['displayName'] ?? '').toString(),
+      description: (raw['description'] ?? '').toString(),
+      presentation: Map<String, dynamic>.from(
+        (raw['presentation'] as Map?) ?? const <String, dynamic>{},
+      ),
+    );
+  }
+
+  bool supportsPlacement(String placement) {
+    final normalized = placement.trim();
+    if (normalized.isEmpty) return false;
+    if (presentation['placement']?.toString().trim() == normalized) {
+      return true;
+    }
+    final placements = presentation['placements'];
+    return placements is Iterable &&
+        placements.any((value) => value?.toString().trim() == normalized);
+  }
+
+  String localizedPresentationValue(
+    String key, {
+    required bool english,
+    required String fallback,
+  }) {
+    final value = presentation[key];
+    if (value is Map) {
+      final localized = value[english ? 'en' : 'zh']?.toString().trim() ?? '';
+      if (localized.isNotEmpty) return localized;
+      final englishValue = value['en']?.toString().trim() ?? '';
+      if (englishValue.isNotEmpty) return englishValue;
+      final chineseValue = value['zh']?.toString().trim() ?? '';
+      if (chineseValue.isNotEmpty) return chineseValue;
+    }
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? fallback : text;
+  }
+
+  int get quickLaunchOrder =>
+      int.tryParse(presentation['quickLaunchOrder']?.toString() ?? '') ?? 0;
 }
 
 class OmniPluginService {
@@ -97,22 +124,39 @@ class OmniPluginService {
     });
   }
 
+  static Future<List<OmniPluginActionItem>> listActions() async {
+    final raw = await _channel.invokeListMethod<dynamic>('listActions');
+    return raw
+            ?.whereType<Map>()
+            .map(OmniPluginActionItem.fromMap)
+            .where(
+              (action) => action.id.isNotEmpty && action.pluginId.isNotEmpty,
+            )
+            .toList(growable: false) ??
+        const <OmniPluginActionItem>[];
+  }
+
+  static Future<Map<String, dynamic>> invokeAction(
+    String pluginId,
+    String actionId, [
+    Map<String, dynamic> arguments = const <String, dynamic>{},
+  ]) async {
+    final raw = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'invokeAction',
+      <String, Object?>{
+        'pluginId': pluginId,
+        'actionId': actionId,
+        'arguments': arguments,
+      },
+    );
+    return Map<String, dynamic>.from(raw ?? const <dynamic, dynamic>{});
+  }
+
   static Future<OmniVlmReadiness> getVlmReadiness() async {
     final raw = await _channel.invokeMapMethod<dynamic, dynamic>(
       'getVlmReadiness',
     );
     return OmniVlmReadiness.fromMap(raw);
-  }
-
-  static Future<SandboxPluginDashboard> getDashboard(String pluginId) async {
-    final raw = await _channel.invokeMapMethod<dynamic, dynamic>(
-      'getDashboard',
-      <String, Object?>{'pluginId': pluginId},
-    );
-    if (raw == null) {
-      throw StateError('Plugin platform returned no dashboard for $pluginId');
-    }
-    return SandboxPluginDashboard.fromMap(raw);
   }
 
   static Future<Map<String, dynamic>> invokeSandbox(
@@ -127,14 +171,6 @@ class OmniPluginService {
         'method': method,
         'params': params,
       },
-    );
-    return Map<String, dynamic>.from(raw ?? const <dynamic, dynamic>{});
-  }
-
-  static Future<Map<String, dynamic>> pinToHome(String pluginId) async {
-    final raw = await _channel.invokeMapMethod<dynamic, dynamic>(
-      'pinToHome',
-      <String, Object?>{'pluginId': pluginId},
     );
     return Map<String, dynamic>.from(raw ?? const <dynamic, dynamic>{});
   }

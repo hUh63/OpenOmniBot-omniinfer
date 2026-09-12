@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot
 
 import BaseApplication
+import cn.com.omnimind.baselib.account.AccountCredentialStorageException
 import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
@@ -10,6 +11,8 @@ import cn.com.omnimind.baselib.util.AppSecretStore
 import cn.com.omnimind.baselib.util.CredentialEndpointSecurity
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.AgentPromptSettingsStore
+import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
+import cn.com.omnimind.bot.agent.AgentRuntimeFeatureFlags
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.SkillIndexService
 import cn.com.omnimind.bot.agent.WorkspaceMemoryRollupScheduler
@@ -85,7 +88,7 @@ class App : BaseApplication() {
         CredentialEndpointSecurity.configureDebugLoopback(BuildConfig.DEBUG)
         AppSecretStore.initialize(this)
         ModelProviderConfigStore.initialize(this)
-        DebugOmniMindProviderBootstrap.install()
+        DebugOmniMindProviderBootstrap.install(this)
         OfficialOmniPluginProviders.register()
         OmniAccount.initialize(
             context = this,
@@ -97,25 +100,30 @@ class App : BaseApplication() {
             },
         )
         AgentPromptSettingsStore.initializeAndCleanupLegacyFiles(this)
-        cn.com.omnimind.bot.localmodel.LocalModelFeatureInstaller.install(this)
         LegacyLocalModelDataCleanup.start(this)
         setupUncaughtExceptionHandler()
 
         DatabaseHelper.init(this)
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                AgentConversationHistoryRepository(this@App).purgeLegacyStreamEvents()
+            }.onSuccess { deleted ->
+                if (deleted > 0) {
+                    OmniLog.i(
+                        "AppStartup",
+                        "Removed $deleted legacy ACP stream events from history",
+                    )
+                }
+            }.onFailure { error ->
+                OmniLog.w(
+                    "AppStartup",
+                    "Legacy ACP stream-event cleanup failed: ${error.message}",
+                )
+            }
+        }
 
-        val nestedStart = System.currentTimeMillis()
         NestedBackgroundStateUtil.init(this)
-        OmniLog.d(
-            "AppStartup",
-            "NestedBackgroundStateUtil.init cost: ${System.currentTimeMillis() - nestedStart}ms"
-        )
-
-        val registryStart = System.currentTimeMillis()
         cn.com.omnimind.baselib.llm.ModelSceneRegistry.init(this)
-        OmniLog.d(
-            "AppStartup",
-            "ModelSceneRegistry.init cost: ${System.currentTimeMillis() - registryStart}ms"
-        )
         runCatching {
             val workspaceManager = AgentWorkspaceManager(this)
             workspaceManager.ensureRuntimeDirectories()
@@ -124,7 +132,9 @@ class App : BaseApplication() {
         // Seed built-in skills before restoring enabled runtime-bundle plugins.
         // Both paths materialize files under the same skills directory; starting
         // plugin recovery first can race the seeder and leave the plugin disabled.
-        initializeOfficialPlugins()
+        if (AgentRuntimeFeatureFlags.ENABLE_PLUGIN_RUNTIME) {
+            initializeOfficialPlugins()
+        }
         runCatching {
             WorkspaceMemoryRollupScheduler(this).ensureScheduledIfEnabled()
         }
@@ -139,8 +149,17 @@ class App : BaseApplication() {
         }
 
         initSDKsAfterPrivacyConsent()
-        McpServerManager.restoreIfEnabled(this)
-        cn.com.omnimind.bot.im.ImChannelManager.restoreIfEnabled(this)
+        // Restore the persisted local MCP service after the application process
+        // is recreated.  The server still binds on its IO scope, so startup is
+        // not blocked, while the settings channel can synchronously finish the
+        // same restore if the first state query wins the race.
+        if (AgentRuntimeFeatureFlags.ENABLE_LOCAL_MCP_SERVER) {
+            McpServerManager.restoreIfEnabled(this)
+        } else {
+            // Stop a previously persisted server so the clean baseline has no
+            // local MCP listener or background MCP work at all.
+            McpServerManager.stopServer()
+        }
         CoroutineScope(Dispatchers.IO).launch {
             runCatching {
                 EmbeddedTerminalRuntime.warmup(this@App)
@@ -196,11 +215,19 @@ class App : BaseApplication() {
             }.onFailure {
                 OmniLog.w("AppStartup", "Cloud-service version policy check failed: ${it.message}")
             }
-            if (
-                OmniAccount.isConfigured() &&
-                OmniAccount.repository().isSignedIn() &&
-                OmniAccount.currentCloudServiceAccess().allowed
-            ) {
+            val signedIn = runCatching {
+                OmniAccount.isConfigured() && OmniAccount.repository().isSignedIn()
+            }.onFailure { error ->
+                if (error is AccountCredentialStorageException) {
+                    OmniLog.w(
+                        "AppStartup",
+                        "Secure account storage is temporarily unavailable; deferring AI sync",
+                    )
+                } else {
+                    OmniLog.w("AppStartup", "Account session state check failed: ${error.message}")
+                }
+            }.getOrDefault(false)
+            if (signedIn && OmniAccount.currentCloudServiceAccess().allowed) {
                 runCatching {
                     val settings = OmniAccount.repository().getAiSettings()
                     PlatformAiProvisioner.synchronize(settings)

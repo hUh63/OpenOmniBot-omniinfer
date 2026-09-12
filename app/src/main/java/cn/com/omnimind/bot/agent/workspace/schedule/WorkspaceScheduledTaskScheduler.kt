@@ -9,11 +9,10 @@ import android.util.Base64
 import cn.com.omnimind.baselib.database.Conversation
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.util.OmniLog
-import cn.com.omnimind.bot.manager.AssistsCoreManager
+import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
+import cn.com.omnimind.bot.webchat.WebAgentRunBridge
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import io.flutter.plugin.common.MethodCall
-import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -55,29 +54,27 @@ class WorkspaceScheduledTaskScheduler(
         val parentConversationId: String? = null,
         val parentConversationMode: String? = null,
         val subagentPrompt: String? = null,
-        val notificationEnabled: Boolean = true
+        val notificationEnabled: Boolean = true,
+        val createdAt: Long = 0
     )
-
-    private class NoopResult(
-        private val taskId: String,
-        private val action: String
-    ) : MethodChannel.Result {
-        override fun success(result: Any?) {
-            OmniLog.i(TAG, "$action success taskId=$taskId")
-        }
-
-        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-            OmniLog.e(TAG, "$action error taskId=$taskId code=$errorCode message=$errorMessage")
-        }
-
-        override fun notImplemented() {
-            OmniLog.w(TAG, "$action not implemented taskId=$taskId")
-        }
-    }
 
     private val appContext = context.applicationContext
     private val gson = Gson()
     private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val agentRunBridge by lazy {
+        WebAgentRunBridge(
+            context = appContext,
+            manager = AgentRuntimeManager.getInstance(appContext)
+        )
+    }
+
+    /** Model-facing creation owns the new identity; sync/import retains upsert. */
+    fun createTask(rawTask: Map<String, Any?>): Map<String, Any?> {
+        return upsertTask(rawTask + mapOf(
+            "taskId" to java.util.UUID.randomUUID().toString(),
+            "createdAt" to System.currentTimeMillis()
+        ))
+    }
 
     fun upsertTask(rawTask: Map<String, Any?>): Map<String, Any?> {
         val taskId = rawTask["taskId"]?.toString()?.trim()
@@ -120,6 +117,18 @@ class WorkspaceScheduledTaskScheduler(
         persistTaskMap(existingMap)
         removeTaskFromFlutterStorage(normalizedId)
         return removed
+    }
+
+    fun listTasks(): List<Map<String, Any?>> {
+        return loadTaskMapMutable().values.map(::taskPayload)
+    }
+
+    fun updateTask(rawTask: Map<String, Any?>): Map<String, Any?> {
+        val taskId = rawTask["taskId"]?.toString()?.trim()?.ifEmpty { null }
+            ?: rawTask["id"]?.toString()?.trim().orEmpty()
+        require(taskId.isNotEmpty()) { "taskId is empty" }
+        require(loadTaskMapMutable().containsKey(taskId)) { "Scheduled task not found: $taskId" }
+        return upsertTask(rawTask)
     }
 
     fun syncTasks(rawTasks: List<Map<String, Any?>>): Map<String, Any?> {
@@ -227,6 +236,24 @@ class WorkspaceScheduledTaskScheduler(
         return executeSubagentTask(task)
     }
 
+    private fun taskPayload(task: StoredTask): Map<String, Any?> = linkedMapOf(
+        "taskId" to task.taskId,
+        "title" to task.title,
+        "createdAt" to task.createdAt,
+        "targetKind" to task.targetKind,
+        "scheduleType" to task.scheduleType,
+        "fixedTime" to task.fixedTime,
+        "countdownMinutes" to task.countdownMinutes,
+        "repeatDaily" to task.repeatDaily,
+        "enabled" to task.enabled,
+        "nextExecutionTime" to task.nextExecutionTime,
+        "subagentConversationId" to task.subagentConversationId,
+        "parentConversationId" to task.parentConversationId,
+        "parentConversationMode" to task.parentConversationMode,
+        "subagentPrompt" to task.subagentPrompt,
+        "notificationEnabled" to task.notificationEnabled,
+    )
+
     private fun executeSubagentTask(task: StoredTask): StoredTask {
         val prompt = task.subagentPrompt?.trim().orEmpty()
         require(prompt.isNotEmpty()) { "subagentPrompt is empty" }
@@ -240,10 +267,16 @@ class WorkspaceScheduledTaskScheduler(
             "scheduledTaskTitle" to task.title,
             "scheduleNotificationEnabled" to task.notificationEnabled
         )
-        AssistsCoreManager(appContext).createAgentTask(
-            MethodCall("createAgentTask", args),
-            NoopResult(task.taskId, "createAgentTask")
-        )
+        runBlocking {
+            agentRunBridge.startRun(
+                taskId = args["taskId"].toString(),
+                conversationId = conversationId,
+                conversationMode = SUBAGENT_MODE,
+                userMessage = prompt,
+                attachments = emptyList(),
+                cwd = null
+            )
+        }
         return task
     }
 
@@ -332,7 +365,8 @@ class WorkspaceScheduledTaskScheduler(
             parentConversationId = parentConversationId,
             parentConversationMode = parentConversationMode,
             subagentPrompt = subagentPrompt,
-            notificationEnabled = notificationEnabled
+            notificationEnabled = notificationEnabled,
+            createdAt = toLong(rawTask["createdAt"]) ?: existing?.createdAt ?: 0
         )
     }
 
@@ -416,6 +450,7 @@ class WorkspaceScheduledTaskScheduler(
         }
         payload["id"] = task.taskId
         payload["title"] = task.title
+        payload["createdAt"] = task.createdAt
         payload["targetKind"] = task.targetKind
         payload["type"] = if (task.scheduleType == "countdown") "countdown" else "fixedTime"
         payload["fixedTime"] = task.fixedTime

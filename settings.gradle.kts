@@ -37,7 +37,11 @@ val filePath = settingsDir.toString() + "/ui/.android/include_flutter.groovy"
 apply(from = File(filePath))
 
 include(":baselib")
+include(":omniinfer-server")
+project(":omniinfer-server").projectDir = File(settingsDir, "third_party/omniinfer/android/omniinfer-server")
 include(":uikit")
+include(":core")
+project(":core").projectDir = File(settingsDir, "ReTerminal/core")
 include(":core:main")
 project(":core:main").projectDir = File(settingsDir, "ReTerminal/core/main")
 include(":core:components")
@@ -48,32 +52,3 @@ include(":core:terminal-emulator")
 project(":core:terminal-emulator").projectDir = File(settingsDir, "ReTerminal/core/terminal-emulator")
 include(":core:terminal-view")
 project(":core:terminal-view").projectDir = File(settingsDir, "ReTerminal/core/terminal-view")
-
-fun requireOmniInferModule(moduleName: String, moduleDir: File, markerFileName: String) {
-    if (File(moduleDir, markerFileName).exists()) {
-        return
-    }
-
-    throw GradleException(
-        """
-        Missing required OmniInfer sources for $moduleName at: ${moduleDir.relativeTo(settingsDir)}
-
-        Initialize the required submodules with:
-          git submodule update --init third_party/omniinfer
-        """.trimIndent()
-    )
-}
-
-val omniInferServerDir = File(settingsDir, "third_party/omniinfer/android/omniinfer-server")
-val omniInferServerMarker = File(omniInferServerDir, "build.gradle.kts")
-val omniInferTasksRequested = gradle.startParameter.taskNames.any { taskName ->
-    val normalized = taskName.substringAfterLast(':')
-    normalized.contains("omniinfer", ignoreCase = true) ||
-        normalized in setOf("build", "assemble", "check", "test")
-}
-
-if (omniInferServerMarker.exists() || omniInferTasksRequested) {
-    requireOmniInferModule(":omniinfer-server", omniInferServerDir, "build.gradle.kts")
-    include(":omniinfer-server")
-    project(":omniinfer-server").projectDir = omniInferServerDir
-}

@@ -35,6 +35,29 @@ data class ModelProviderProfile(
     fun isConfigured(): Boolean = baseUrl.isNotBlank()
 }
 
+/**
+ * Wire capabilities owned by the resolved Provider route. These are not ACP
+ * session capabilities: they describe the request/response contract between
+ * the shared Agent client and one upstream model endpoint.
+ */
+data class ProviderRequestCapabilities(
+    val supportsChatPromptCacheKey: Boolean = false,
+    val supportsExplicitAutoToolChoice: Boolean = true,
+    val requiresReasoningContentForToolCalls: Boolean = false,
+    val requiresAnthropicThinkingReplay: Boolean = false,
+    val supportsResponsesPromptCacheKey: Boolean = true,
+    val supportsResponsesParallelToolCalls: Boolean = true,
+    /**
+     * Whether this resolved route accepts image input.
+     *
+     * Null means the provider has not declared this fact. It is intentionally
+     * tri-state so unknown BYOK routes keep their existing behavior while a
+     * provider can explicitly reject image continuation before a request is
+     * built.
+     */
+    val supportsVisionInput: Boolean? = null,
+)
+
 data class ProviderModelOption(
     val id: String,
     val displayName: String = id,
@@ -51,6 +74,8 @@ data class ProviderModelOption(
     val group: String? = null,
     val attachment: Boolean? = null,
     val reasoning: Boolean? = null,
+    val supportedReasoningLevels: List<String> = emptyList(),
+    val defaultReasoningLevel: String? = null,
     val toolCall: Boolean? = null,
     val structuredOutput: Boolean? = null,
     val temperature: Boolean? = null
@@ -86,6 +111,22 @@ data class SceneModelBindingEntry(
     val providerProfileId: String,
     @field:SerializedName(value = "modelId", alternate = ["c"])
     val modelId: String
+)
+
+/** Persisted voice-scene settings shared by native playback and Flutter UI. */
+data class SceneVoiceConfig(
+    @field:SerializedName(value = "autoPlay", alternate = ["a"])
+    val autoPlay: Boolean = false,
+    @field:SerializedName(value = "voiceId", alternate = ["b"])
+    val voiceId: String = "default_zh",
+    @field:SerializedName(value = "stylePreset", alternate = ["c"])
+    val stylePreset: String = "默认",
+    @field:SerializedName(value = "customStyle", alternate = ["d"])
+    val customStyle: String = "",
+    @field:SerializedName(value = "ttsMode", alternate = ["e"])
+    val ttsMode: String = "builtin",
+    @field:SerializedName(value = "customCurlCommand", alternate = ["f"])
+    val customCurlCommand: String = "",
 )
 
 data class SceneOperationConfig(

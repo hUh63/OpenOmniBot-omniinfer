@@ -27,13 +27,10 @@ import 'pages/omnibot_workspace/omnibot_artifact_preview_page.dart';
 import 'pages/omnibot_workspace/omnibot_workspace_page.dart';
 import 'pages/webview/webview_page.dart';
 import 'pages/settings/settings_page.dart';
-import 'pages/companion_setting/companion_setting_page.dart';
-import 'pages/settings/imessage_setting_page.dart';
 import 'pages/mcp/remote_mcp_servers_page.dart';
 import 'pages/skill_store/skill_store_page.dart';
 import 'pages/plugin_market/plugin_market_page.dart';
 import 'pages/plugin_market/plugin_detail_page.dart';
-import 'pages/plugin_market/plugin_dashboard_page.dart';
 import 'package:ui/models/omni_plugin_item.dart';
 import 'pages/termux_setting/termux_setting_page.dart';
 import 'pages/scene_model_setting/scene_model_setting_page.dart';
@@ -374,18 +371,6 @@ List<GoRoute> homeRoutes = [
   ),
 
   GoRoute(
-    path: '/home/plugin_dashboard',
-    name: 'home/plugin_dashboard',
-    pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
-      key: state.pageKey,
-      name: 'home/plugin_dashboard',
-      child: PluginDashboardPage(
-        pluginId: state.uri.queryParameters['pluginId']?.trim() ?? '',
-      ),
-    ),
-  ),
-
-  GoRoute(
     path: '/home/workspace_memory_setting',
     name: 'home/workspace_memory_setting',
     pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
@@ -492,26 +477,5 @@ List<GoRoute> homeRoutes = [
     path: '/home/authorize_setting',
     name: 'home/authorize_setting',
     builder: (context, state) => const AuthorizeSettingPage(),
-  ),
-
-  GoRoute(
-    path: '/home/imessage_setting',
-    name: 'home/imessage_setting',
-    pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
-      key: state.pageKey,
-      name: 'home/imessage_setting',
-      child: const ImessageSettingPage(),
-    ),
-  ),
-
-  // 陪伴权限授权页
-  GoRoute(
-    path: '/home/companion_setting',
-    name: 'home/companion_setting',
-    pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
-      key: state.pageKey,
-      name: 'home/companion_setting',
-      child: const CompanionSettingPage(),
-    ),
   ),
 ];

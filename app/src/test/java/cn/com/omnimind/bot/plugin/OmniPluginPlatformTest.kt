@@ -26,7 +26,43 @@ class OmniPluginPlatformTest {
         platform.openSession().useSuspending { session ->
             assertTrue(session.toolDefinitions.isEmpty())
             assertTrue(session.toolHandlers.isEmpty())
+            assertTrue(session.actionDefinitions.isEmpty())
+            assertTrue(session.actionHandlers.isEmpty())
         }
+    }
+
+    @Test
+    fun `installed plugin exposes scoped user actions`() = runBlocking {
+        val provider = RecordingActionProvider()
+        val platform = platform(provider)
+        platform.install(provider.descriptor.id)
+
+        val listed = platform.listActionDefinitions().single()
+        assertEquals("open_test_surface", listed.id)
+        assertEquals(provider.descriptor.id, listed.ownerPluginId)
+        // Listing declarative metadata must not instantiate an action handler.
+        assertEquals(1, provider.handlerDisposeCount)
+
+        platform.openSession().useSuspending { session ->
+            assertTrue(session.actionDefinitions.isEmpty())
+            assertTrue(session.actionHandlers.isEmpty())
+        }
+
+        platform.openActionSession(provider.descriptor.id).useSuspending { session ->
+            val definition = session.actionDefinitions.single()
+            assertEquals("open_test_surface", definition.id)
+            assertEquals(provider.descriptor.id, definition.ownerPluginId)
+            assertEquals(
+                buildJsonObject { put("result", "opened") },
+                session.actionHandlers.single().execute(
+                    definition.id,
+                    JsonObject(emptyMap()),
+                ),
+            )
+        }
+
+        // Activation probes one handler and the scoped action session creates one.
+        assertEquals(2, provider.handlerDisposeCount)
     }
 
     @Test
@@ -259,6 +295,27 @@ class OmniPluginPlatformTest {
     }
 
     @Test
+    fun `install by default prepares runtime without loading operation tools`() = runBlocking {
+        val provider = RecordingProvider(
+            pluginId = "com.omnimind.install-default",
+            toolName = "install_default_action",
+            installByDefault = true,
+        )
+        val platform = platform(provider)
+
+        val state = platform.list().single()
+
+        assertTrue(state.installed)
+        assertFalse(state.enabled)
+        assertEquals(1, provider.installCount)
+        assertEquals(0, provider.enableCount)
+        platform.openSession().useSuspending { session ->
+            assertTrue(session.toolDefinitions.isEmpty())
+            assertTrue(session.toolHandlers.isEmpty())
+        }
+    }
+
+    @Test
     fun `required plugin repairs a persisted disabled state`() = runBlocking {
         val provider = RecordingProvider(
             pluginId = "com.omnimind.required-disabled",
@@ -400,6 +457,7 @@ class OmniPluginPlatformTest {
         private val toolName: String,
         interfaceVersion: Int = OmniPluginContract.CURRENT_INTERFACE_VERSION,
         required: Boolean = false,
+        installByDefault: Boolean = false,
         private var installFailure: Throwable? = null,
     ) : OmniPluginProvider {
         var installCount = 0
@@ -422,6 +480,7 @@ class OmniPluginPlatformTest {
             description = "test plugin",
             publisher = "OmniMind",
             required = required,
+            installByDefault = installByDefault,
         )
 
         override suspend fun install() {
@@ -497,6 +556,48 @@ class OmniPluginPlatformTest {
 
         override suspend fun dispose() {
             onDispose()
+        }
+    }
+
+    private class RecordingActionProvider : OmniPluginProvider {
+        var handlerDisposeCount = 0
+
+        override val descriptor = OmniPluginDescriptor(
+            id = "com.omnimind.action-test",
+            name = "Action test",
+            version = "1.0.0",
+            description = "test actions",
+            publisher = "OmniMind",
+        )
+
+        override fun create(): OmniPlugin = object : OmniPlugin {
+            override fun contribution() = OmniPluginContribution(
+                actionGroups = listOf(
+                    OmniPluginActionGroup(
+                        definitions = listOf(
+                            OmniPluginActionDefinition(
+                                id = "open_test_surface",
+                                displayName = "Open test surface",
+                                description = "test",
+                            ),
+                        ),
+                        handlerFactory = {
+                            object : OmniPluginActionHandler {
+                                override val actionIds = setOf("open_test_surface")
+
+                                override suspend fun execute(
+                                    actionId: String,
+                                    args: JsonObject,
+                                ) = buildJsonObject { put("result", "opened") }
+
+                                override suspend fun dispose() {
+                                    handlerDisposeCount += 1
+                                }
+                            }
+                        },
+                    ),
+                ),
+            )
         }
     }
 }

@@ -118,22 +118,18 @@ class AgentWorkspaceManager(
             return File(internalRootDirectory(context), DIR_AUDIO)
         }
 
-        /** Local model directories for the OmniInfer edition (llama.cpp / MNN / QNN / LiteRT). */
-        fun modelsLlamaDirectory(context: Context): File {
-            return File(internalRootDirectory(context), "models/llama")
-        }
+        /** Local on-device model directories under the managed workspace. */
+        fun modelsLlamaDirectory(context: Context): File =
+            File(internalRootDirectory(context), "models/llama")
 
-        fun modelsMnnDirectory(context: Context): File {
-            return File(internalRootDirectory(context), "models/mnn")
-        }
+        fun modelsMnnDirectory(context: Context): File =
+            File(internalRootDirectory(context), "models/mnn")
 
-        fun modelsQnnDirectory(context: Context): File {
-            return File(internalRootDirectory(context), "models/qnn")
-        }
+        fun modelsQnnDirectory(context: Context): File =
+            File(internalRootDirectory(context), "models/qnn")
 
-        fun modelsLiteRtDirectory(context: Context): File {
-            return File(internalRootDirectory(context), "models/litert")
-        }
+        fun modelsLiteRtDirectory(context: Context): File =
+            File(internalRootDirectory(context), "models/litert")
 
         fun androidRootPath(context: Context): String {
             return rootDirectory(context).absolutePath
@@ -244,6 +240,21 @@ class AgentWorkspaceManager(
         val linkFile: File,
         val sourceDir: File
     )
+
+    /** Local model directories and files for the OmniInfer edition. */
+    fun modelsLlamaDirectory(): File = File(internalDir, "models/llama")
+
+    fun modelsMnnDirectory(): File = File(internalDir, "models/mnn")
+
+    fun modelsQnnDirectory(): File = File(internalDir, "models/qnn")
+
+    fun modelsLiteRtDirectory(): File = File(internalDir, "models/litert")
+
+    fun agentConfigFile(): File = File(memoryDir, "agent-config.json")
+
+    fun soulMarkdownFile(): File = File(memoryDir, "SOUL.md")
+
+    fun chatMarkdownFile(): File = File(memoryDir, "CHAT.md")
 
     fun ensureRuntimeDirectories() {
         migrateLegacyWorkspaceIfNeeded()

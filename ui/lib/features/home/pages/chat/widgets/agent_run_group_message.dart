@@ -24,7 +24,6 @@ class AgentRunGroupMessage extends StatefulWidget {
     required this.onBeforeTaskExecute,
     this.onCancelTask,
     this.onRetryAgentMessage,
-    this.onContinueAgentMessage,
     this.parentScrollController,
     this.onParentScrollHandoff,
     this.onRequestAuthorize,
@@ -40,7 +39,6 @@ class AgentRunGroupMessage extends StatefulWidget {
   final OnBeforeTaskExecute onBeforeTaskExecute;
   final void Function(String taskId)? onCancelTask;
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
-  final ValueChanged<ChatMessageModel>? onContinueAgentMessage;
   final ScrollController? parentScrollController;
   final VoidCallback? onParentScrollHandoff;
   final OnRequestAuthorize? onRequestAuthorize;
@@ -151,7 +149,9 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
   @override
   Widget build(BuildContext context) {
     final primaryVisibleMessageId =
-        widget.group.visibleMessagesOldestFirst.lastOrNull?.id;
+        widget.group.visibleMessagesOldestFirst
+            .where((message) => !isAgentTurnFailureMessage(message))
+            .lastOrNull?.id;
     final hasFoldableHistory = widget.group.segmentsOldestFirst.any(
       (segment) =>
           segment.isProcess || segment.message.id != primaryVisibleMessageId,
@@ -178,6 +178,7 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
             status: widget.group.status,
             startedAt: widget.group.startedAt,
             finishedAt: widget.group.finishedAt,
+            activeToolLabel: _activeToolLabel(context),
             expanded: _effectiveExpanded,
             onToggleExpanded: widget.group.isRunning || !hasFoldableHistory
                 ? null
@@ -203,12 +204,35 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
               segment.messages,
               firstThinkingMessageId,
             )
+          else if (isAgentTurnFailureMessage(segment.message))
+            _buildVisibleMessageBubble(segment.message)
+          else if (isAgentPlanMessage(segment.message))
+            // ACP plans are mutable state snapshots. Do not put them behind
+            // the completed-run fold; the same card id is refreshed for each
+            // plan_update and remains visible as the current plan.
+            _buildPersistentPlanSection(segment.message)
           else if (segment.message.id != primaryVisibleMessageId)
             _buildAnimatedHistoricalTextSection(segment.message)
           else
             _buildVisibleMessageBubble(segment.message),
       ],
     );
+  }
+
+  String? _activeToolLabel(BuildContext context) {
+    final isEnglish =
+        Localizations.maybeLocaleOf(context)?.languageCode == 'en';
+    for (final message in widget.group.processMessagesNewestFirst) {
+      final cardData = message.cardData;
+      if (cardData == null || cardData['type'] != kAgentToolSummaryCardType) {
+        continue;
+      }
+      final status = (cardData['status'] ?? '').toString().trim().toLowerCase();
+      if (status == 'running' || status == 'pending') {
+        return resolveAgentToolProgressTitle(cardData, isEnglish: isEnglish);
+      }
+    }
+    return null;
   }
 
   Widget _buildVisibleMessageBubble(
@@ -226,8 +250,6 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
       onBeforeTaskExecute: widget.onBeforeTaskExecute,
       onCancelTask: widget.onCancelTask,
       onRetryAgentMessage: () => widget.onRetryAgentMessage?.call(message),
-      onContinueAgentMessage: () =>
-          widget.onContinueAgentMessage?.call(message),
       enableThinkingCollapse: false,
       useAgentToolPresentation: widget.useAcpPresentation,
       parentScrollController: widget.parentScrollController,
@@ -245,6 +267,16 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
         key: ValueKey('agent-run-history-${widget.group.taskId}-${message.id}'),
         child: _buildVisibleMessageBubble(message, forceTextFinal: true),
       ),
+    );
+  }
+
+  Widget _buildPersistentPlanSection(ChatMessageModel message) {
+    return Padding(
+      key: ValueKey(
+        'agent-plan-persistent-${widget.group.taskId}-${message.id}',
+      ),
+      padding: const EdgeInsets.only(top: 2, bottom: 6),
+      child: _buildVisibleMessageBubble(message, forceTextFinal: true),
     );
   }
 
@@ -375,14 +407,13 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
       onBeforeTaskExecute: widget.onBeforeTaskExecute,
       onCancelTask: widget.onCancelTask,
       onRetryAgentMessage: () => widget.onRetryAgentMessage?.call(message),
-      onContinueAgentMessage: () =>
-          widget.onContinueAgentMessage?.call(message),
       enableThinkingCollapse: true,
       // While the run itself is finishing, let the outer 320 ms fold own the
       // transition. Running the thinking card's 170 ms height/opacity collapse
       // at the same time multiplies both animations and looks like a flash.
       // A manually re-opened finished run still initializes each completed
-      // thinking card in its normal collapsed state.
+      // thinking card in its compact collapsed state. Users can expand only
+      // the reasoning segment they want to inspect.
       thinkingAutoCollapseOnComplete: widget.group.isRunning || widget.expanded,
       useAgentToolPresentation: widget.useAcpPresentation,
       showThinkingAvatarOverride: hideAvatar ? false : null,
@@ -463,7 +494,11 @@ class _AgentToolCallGroup extends StatelessWidget {
     );
     final isEnglish =
         Localizations.maybeLocaleOf(context)?.languageCode == 'en';
-    final title = _toolGroupTitle(messages, isEnglish: isEnglish);
+    final title = _toolGroupTitle(
+      messages,
+      isEnglish: isEnglish,
+      primaryCard: primaryCard,
+    );
 
     return Align(
       alignment: Alignment.centerLeft,
@@ -573,13 +608,17 @@ class _AgentToolCallGroup extends StatelessWidget {
   String _toolGroupTitle(
     List<ChatMessageModel> messages, {
     required bool isEnglish,
+    required Map<String, dynamic> primaryCard,
   }) {
-    // The inner tool-group capsule (multiple consecutive tool cards
-    // collapsed into one chevron) was previously surfacing the per-tool
-    // count summary too ("已运行 1 条命令 · 已读取 1 个文件"). The user
-    // explicitly asked for the expanded run UI to match the collapsed
-    // header, so this capsule also shows the generic "已处理" — its own
-    // count text was the only place left after fixing the outer header.
+    final status = (primaryCard['status'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+    if (status == 'running' || status == 'pending') {
+      return resolveAgentToolProgressTitle(primaryCard, isEnglish: isEnglish);
+    }
+    // Completed tool groups keep the compact historical label. While a tool
+    // is live, however, the capsule must identify the action being performed.
     return isEnglish ? 'Processed' : '已处理';
   }
 
@@ -622,7 +661,11 @@ class _LegacyAgentRunSummaryHeader extends StatelessWidget {
     // computed from the message timestamps inside this group (first
     // candidate message → last candidate message). If we can't derive
     // a duration (single instant), we just show "已处理".
-    final baseLabel = isEnglish ? 'Processed' : '已处理';
+    final baseLabel = group.status == AgentRunStatus.failed
+        ? (isEnglish ? 'Failed' : '执行失败')
+        : group.status == AgentRunStatus.cancelled
+        ? (isEnglish ? 'Cancelled' : '已取消')
+        : (isEnglish ? 'Processed' : '已处理');
     final elapsedLabel = _agentRunElapsedLabel(group);
     final label = elapsedLabel.isEmpty
         ? baseLabel
@@ -700,6 +743,7 @@ class _LegacyAgentRunSummaryHeader extends StatelessWidget {
 String _agentRunElapsedLabel(AgentRunTimelineGroup group) {
   int? earliestMs;
   int? latestMs;
+  int? earliestContentMs;
   void visit(Iterable<ChatMessageModel> messages) {
     for (final message in messages) {
       final ms = message.createAt.millisecondsSinceEpoch;
@@ -712,11 +756,23 @@ String _agentRunElapsedLabel(AgentRunTimelineGroup group) {
       if (latestMs == null || ms > latestMs!) {
         latestMs = ms;
       }
+      // A persisted tool card can carry an old createdAt when a provider
+      // reuses its call id on a later turn. Text and reasoning entries are
+      // turn-owned anchors; prefer them as the start boundary so one stale
+      // tool timestamp cannot inflate the visible Xiaowan duration.
+      if (_cardTypeForElapsed(message) != 'agent_tool_summary' &&
+          (earliestContentMs == null || ms < earliestContentMs!)) {
+        earliestContentMs = ms;
+      }
     }
   }
 
   visit(group.allMessagesOldestFirst);
   if (earliestMs == null || latestMs == null || latestMs! <= earliestMs!) {
+    return '';
+  }
+  earliestMs = earliestContentMs ?? earliestMs;
+  if (latestMs! <= earliestMs!) {
     return '';
   }
   final elapsedSec = ((latestMs! - earliestMs!) / 1000).round();
@@ -740,4 +796,8 @@ String _agentRunElapsedLabel(AgentRunTimelineGroup group) {
     return '${hours}h';
   }
   return '${hours}h ${remainingMinutes}m';
+}
+
+String _cardTypeForElapsed(ChatMessageModel message) {
+  return (message.cardData?['type'] ?? '').toString().trim();
 }

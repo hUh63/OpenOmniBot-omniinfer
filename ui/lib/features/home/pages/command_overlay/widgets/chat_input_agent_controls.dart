@@ -40,8 +40,10 @@ extension _ChatInputAgentControls on _ChatInputAreaStateBase {
           onPointerDown: (_) => settings.onPointerDown?.call(),
           child: Tooltip(
             message: modelId.isEmpty
-                ? (english ? 'Select model' : '选择模型')
-                : modelId,
+                ? (english ? 'Select Provider / model' : '选择 Provider / 模型')
+                : (english
+                      ? 'Switch Provider / model: $modelId'
+                      : '切换服务商 / 模型：$modelId'),
             waitDuration: const Duration(milliseconds: 400),
             child: InkWell(
               key: const ValueKey('chat-input-model-picker-button'),
@@ -136,7 +138,6 @@ extension _ChatInputAgentControls on _ChatInputAreaStateBase {
         anchor: anchor,
         preferBelow: false,
         reverseTransitionDuration: Duration.zero,
-        dismissOnBackButton: false,
         builder: (handle) => _AgentRunSettingsMenuContent(
           width: 280,
           maxHeight: 420,
@@ -330,7 +331,6 @@ extension _ChatInputAgentControls on _ChatInputAreaStateBase {
         anchor: anchor,
         preferBelow: false,
         reverseTransitionDuration: Duration.zero,
-        dismissOnBackButton: false,
         builder: (handle) => _AgentPermissionGlassMenuContent(
           width: 196,
           selected: selected,
@@ -355,7 +355,7 @@ extension _ChatInputAgentControls on _ChatInputAreaStateBase {
       try {
         final mode = await handle.future;
         if (mode == null) return;
-        widget.onAgentPermissionModeChanged?.call(mode);
+        await widget.onAgentPermissionModeChanged?.call(mode);
       } finally {
         if (_agentPermissionMenuHandle == handle) {
           _agentPermissionMenuHandle = null;

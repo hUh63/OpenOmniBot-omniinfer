@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:ui/core/router/go_router_manager.dart';
+import 'package:ui/features/local_model/local_model_feature.dart';
 import 'package:ui/services/model_vendor_catalog.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/provider_vendor_icon.dart';
@@ -31,8 +33,8 @@ class OnboardingProviderPage extends StatelessWidget {
       title: onbTr(context, '模型配置（可选）', 'Model setup (optional)'),
       description: onbTr(
         context,
-        '小万官方内置 VLM 默认关闭。GUI 任务使用当前已配置的模型；如果尚未配置，可以登录或在这里填写 API。',
-        'The built-in Omnibot VLM is disabled by default. GUI tasks use the currently configured model; sign in or configure an API here if needed.',
+        '小万官方内置 VLM 默认启用。GUI 任务使用当前已配置的模型；如果尚未配置，可以登录或在这里填写 API。',
+        'The built-in Omnibot VLM is enabled by default. GUI tasks use the currently configured model; sign in or configure an API here if needed.',
       ),
       scrollController: scrollController,
       children: [
@@ -53,6 +55,25 @@ class OnboardingProviderPage extends StatelessWidget {
           onTap: controller.busy ? null : onOpenAccount,
         ),
         const OnboardingRowDivider(),
+        if (localModelFeature.enabled) ...[
+          OnboardingOptionRow(
+            tapKey: const ValueKey('tutorial-provider-local-model'),
+            leading: OnboardingOptionIcon(
+              icon: LucideIcons.cpu,
+              selected: false,
+            ),
+            title: onbTr(context, '本地模型', 'Local models'),
+            description: onbTr(
+              context,
+              '使用设备端推理，模型与数据均留在本机。',
+              'Run inference on this device; models and data stay local.',
+            ),
+            selected: false,
+            showSelectionIndicator: false,
+            onTap: () => GoRouterManager.push('/welcome/local_intro'),
+          ),
+          const OnboardingRowDivider(),
+        ],
         if (controller.loading)
           OnboardingLoadingRow(
             label: onbTr(

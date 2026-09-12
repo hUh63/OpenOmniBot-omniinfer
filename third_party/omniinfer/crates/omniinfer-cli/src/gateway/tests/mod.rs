@@ -278,7 +278,7 @@ fn external_test_backend_id() -> &'static str {
     if cfg!(target_os = "macos") {
         "llama.cpp-mac"
     } else if cfg!(target_os = "windows") {
-        "llama.cpp-cpu"
+        "llama.cpp-cuda"
     } else {
         "llama.cpp-linux-cuda"
     }
@@ -388,6 +388,22 @@ while [ "$#" -gt 0 ]; do
 done
 delay_file="$(dirname "$0")/startup-delay-ms"
 delay_ms="$(cat "$delay_file" 2>/dev/null || printf 0)"
+placement_mode="$(cat "$(dirname "$0")/placement-mode" 2>/dev/null || printf partial)"
+if [ "$placement_mode" = "oversized" ]; then
+  printf '%s\n' \
+    'load_tensors: offloaded 2/4 layers to GPU' \
+    'load_tensors: CPU_Mapped model buffer size = 1000000.00 GiB' \
+    'load_tensors: CUDA0 model buffer size = 1000000.00 GiB'
+else
+  printf '%s\n' \
+    'load_tensors: offloaded 2/4 layers to GPU' \
+    'load_tensors: CPU_Mapped model buffer size = 8.00 MiB' \
+    'load_tensors: CUDA0 model buffer size = 16.00 MiB' \
+    'llama_kv_cache: CPU KV buffer size = 2.00 MiB' \
+    'llama_kv_cache: CUDA0 KV buffer size = 4.00 MiB' \
+    'sched_reserve: CPU compute buffer size = 2.00 MiB' \
+    'sched_reserve: CUDA0 compute buffer size = 4.00 MiB'
+fi
 exec python3 - "$port" "$delay_ms" <<'PY'
 import json
 import sys
@@ -423,7 +439,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._json({"status": "ok"})
         elif self.path.startswith("/props"):
-            self._json({"n_ctx": 512, "slots": 1})
+            self._json({"n_ctx": 512, "total_slots": 2})
         else:
             self._json({"ok": True})
     def do_POST(self):
@@ -436,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/detokenize"):
             self._json({"content": "hello", "echo": payload})
             return
-        if self.path.startswith("/slots/0"):
+        if self.path.startswith("/slots/"):
             self._json({"ok": True})
             return
         if self.path.startswith("/v1/chat/completions") and payload.get("stream") is True:
@@ -455,6 +471,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "choices": [{"message": {"content": "fake backend"}, "finish_reason": "stop"}],
             "model_echo": payload.get("model"),
+            "enable_thinking_echo": payload.get("chat_template_kwargs", {}).get("enable_thinking"),
             "max_tokens_echo": payload.get("max_tokens"),
             "temperature_echo": payload.get("temperature"),
             "top_p_echo": payload.get("top_p"),
@@ -510,6 +527,77 @@ with socket.socket() as server:
     while True:
         connection, _ = server.accept()
         connection.close()
+PY
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&launcher, permissions).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn install_fake_stable_diffusion_server(root: &std::path::Path) {
+    let launcher = root
+        .join(".local")
+        .join("runtime")
+        .join(test_runtime_platform_dir())
+        .join("stable-diffusion.cpp-linux-vulkan")
+        .join("bin")
+        .join("sd-server");
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::write(
+        &launcher,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+host=""
+port=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --listen-ip) host="$2"; shift 2 ;;
+    --listen-port) port="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'listening on: http://%s:%s\n' "$host" "$port"
+exec python3 - "$host" "$port" <<'PY'
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+host, port = sys.argv[1], int(sys.argv[2])
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def _json(self, payload, status=200):
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-Sdcpp-Test", "passthrough")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+    def do_GET(self):
+        if self.path.startswith("/sdcpp/v1/capabilities"):
+            self._json({"backend": "fake-sdcpp", "path": self.path})
+        elif self.path.startswith("/sdcpp/v1/jobs/job-42"):
+            self._json({"id": "job-42", "status": "completed"})
+        else:
+            self._json({"error": "not found"}, 404)
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+        payload = json.loads(body.decode() or "{}")
+        if self.path == "/sdcpp/v1/vid_gen":
+            self._json({"id": "job-42", "status": "queued", "request": payload}, 202)
+        elif self.path == "/sdcpp/v1/jobs/job-42/cancel":
+            self._json({"id": "job-42", "status": "cancelled"})
+        else:
+            self._json({"error": "not found"}, 404)
+
+HTTPServer((host, port), Handler).serve_forever()
 PY
 "#,
     )
@@ -624,6 +712,20 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             }
         }
+        let oversized = std::fs::read_to_string(executable.with_file_name("placement-mode"))
+            .is_ok_and(|value| value.trim() == "oversized");
+        println!("load_tensors: offloaded 2/4 layers to GPU");
+        if oversized {
+            println!("load_tensors: CPU_Mapped model buffer size = 1000000.00 GiB");
+            println!("load_tensors: CUDA0 model buffer size = 1000000.00 GiB");
+        } else {
+            println!("load_tensors: CPU_Mapped model buffer size = 8.00 MiB");
+            println!("load_tensors: CUDA0 model buffer size = 16.00 MiB");
+            println!("llama_kv_cache: CPU KV buffer size = 2.00 MiB");
+            println!("llama_kv_cache: CUDA0 KV buffer size = 4.00 MiB");
+            println!("sched_reserve: CPU compute buffer size = 2.00 MiB");
+            println!("sched_reserve: CUDA0 compute buffer size = 4.00 MiB");
+        }
     }
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
     for stream in listener.incoming().flatten() {
@@ -665,7 +767,7 @@ fn response_payload(request_line: &str, body: &str) -> (String, &'static str) {
         return (r#"{"status":"ok"}"#.to_string(), "application/json");
     }
     if request_line.starts_with("GET /props") {
-        return (r#"{"n_ctx":512,"slots":1}"#.to_string(), "application/json");
+        return (r#"{"n_ctx":512,"total_slots":2}"#.to_string(), "application/json");
     }
     if request_line.starts_with("POST /tokenize") {
         return (
@@ -679,7 +781,7 @@ fn response_payload(request_line: &str, body: &str) -> (String, &'static str) {
             "application/json",
         );
     }
-    if request_line.starts_with("POST /slots/0") {
+    if request_line.starts_with("POST /slots/") {
         return (r#"{"ok":true}"#.to_string(), "application/json");
     }
     if request_line.starts_with("POST /v1/chat/completions") && wants_stream(body) {
@@ -703,9 +805,19 @@ fn response_payload(request_line: &str, body: &str) -> (String, &'static str) {
             .unwrap_or_else(|| "null".to_string());
         let top_p = extract_json_number(body, "top_p")
             .unwrap_or_else(|| "null".to_string());
+        let enable_thinking = if body
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .contains(r#""enable_thinking":true"#)
+        {
+            "true"
+        } else {
+            "false"
+        };
         return (
             format!(
-                r#"{{"choices":[{{"message":{{"content":"fake backend"}},"finish_reason":"stop"}}],"model_echo":{model},"max_tokens_echo":{max_tokens},"temperature_echo":{temperature},"top_p_echo":{top_p},"usage":{{"prompt_tokens":3,"completion_tokens":2}}}}"#
+                r#"{{"choices":[{{"message":{{"content":"fake backend"}},"finish_reason":"stop"}}],"model_echo":{model},"enable_thinking_echo":{enable_thinking},"max_tokens_echo":{max_tokens},"temperature_echo":{temperature},"top_p_echo":{top_p},"usage":{{"prompt_tokens":3,"completion_tokens":2}}}}"#
             ),
             "application/json",
         );

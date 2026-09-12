@@ -36,7 +36,6 @@ class ChatMessageList extends StatefulWidget {
   final Future<void> Function() onBeforeTaskExecute;
   final void Function(String taskId)? onCancelTask;
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
-  final ValueChanged<ChatMessageModel>? onContinueAgentMessage;
   final void Function(List<String> requiredPermissionIds)? onRequestAuthorize;
   final double bottomOverlayInset;
   final void Function(ChatMessageModel message, LongPressStartDetails details)?
@@ -44,7 +43,7 @@ class ChatMessageList extends StatefulWidget {
   final ValueChanged<ChatMessageModel>? onLatestUserMessageEditTap;
   final Future<void> Function()? onLoadMore;
   final bool hasMore;
-  final Set<String> activeAgentTaskIds;
+  final Set<String> activeAgentTurnIds;
   final bool useAcpPresentation;
   final String? activeAcpAgentId;
   final Set<String>? expandedAgentRunTaskIds;
@@ -56,6 +55,7 @@ class ChatMessageList extends StatefulWidget {
   final List<HomeQuickPrompt> emptyGreetingQuickPrompts;
   final List<String> emptyGreetingPinnedQuickPromptIds;
   final ValueChanged<HomeQuickPrompt>? onQuickPromptSelected;
+  final String? emptyGreetingAgentName;
   final String? emptyGreetingAgentWorkspaceName;
   final VoidCallback? onEmptyGreetingAgentWorkspaceTap;
   final ValueChanged<bool>? onInternalInputFocusChanged;
@@ -68,14 +68,13 @@ class ChatMessageList extends StatefulWidget {
     required this.onBeforeTaskExecute,
     this.onCancelTask,
     this.onRetryAgentMessage,
-    this.onContinueAgentMessage,
     this.onRequestAuthorize,
     this.bottomOverlayInset = 0,
     this.onUserMessageLongPressStart,
     this.onLatestUserMessageEditTap,
     this.onLoadMore,
     this.hasMore = false,
-    this.activeAgentTaskIds = const <String>{},
+    this.activeAgentTurnIds = const <String>{},
     this.useAcpPresentation = false,
     this.activeAcpAgentId,
     this.expandedAgentRunTaskIds,
@@ -87,6 +86,7 @@ class ChatMessageList extends StatefulWidget {
     this.emptyGreetingQuickPrompts = const <HomeQuickPrompt>[],
     this.emptyGreetingPinnedQuickPromptIds = const <String>[],
     this.onQuickPromptSelected,
+    this.emptyGreetingAgentName,
     this.emptyGreetingAgentWorkspaceName,
     this.onEmptyGreetingAgentWorkspaceTap,
     this.onInternalInputFocusChanged,
@@ -152,9 +152,11 @@ class _ChatMessageListState extends State<ChatMessageList> {
   ObservableChatMessageList? _timelineCacheSource;
   int _timelineCacheStructureRevision = -1;
   Set<String>? _timelineCacheActiveTaskIds;
+  String? _timelineCacheAgentId;
   final Map<String, GlobalKey> _entryRowKeys = <String, GlobalKey>{};
   int _navigatorJumpSerial = 0;
   bool _navigatorJumpUserInterrupted = false;
+  static const String _kListEntryKeyPrefix = 'chat-timeline-entry:';
 
   Set<String> get _expandedAgentRunTaskIds =>
       widget.expandedAgentRunTaskIds ?? _localExpandedAgentRunTaskIds;
@@ -392,7 +394,8 @@ class _ChatMessageListState extends State<ChatMessageList> {
     }
     _suspendAutoStickForAgentRunToggle();
     final nextExpandedTaskIds = Set<String>.from(_expandedAgentRunTaskIds);
-    if (nextExpandedTaskIds.contains(normalizedTaskId)) {
+    final wasExpanded = nextExpandedTaskIds.contains(normalizedTaskId);
+    if (wasExpanded) {
       nextExpandedTaskIds.remove(normalizedTaskId);
     } else {
       nextExpandedTaskIds.add(normalizedTaskId);
@@ -406,6 +409,21 @@ class _ChatMessageListState extends State<ChatMessageList> {
           ..addAll(nextExpandedTaskIds);
       });
       widget.onExpandedAgentRunTaskIdsChanged?.call(nextExpandedTaskIds);
+    }
+    if (!wasExpanded) {
+      // Expanding a run increases its height below the header. When the run
+      // is near the latest edge, the newly revealed reasoning can otherwise
+      // land underneath the composer and look like it was not restored at
+      // all. Scroll the whole run into view after the expansion animation has
+      // laid out, without changing the user's position when they are reading
+      // an older part of the conversation.
+      final wasNearLatest = _isNearLatest(null);
+      if (wasNearLatest) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          unawaited(_animateToEntryKey('agent-run-$normalizedTaskId'));
+        });
+      }
     }
   }
 
@@ -533,6 +551,10 @@ class _ChatMessageListState extends State<ChatMessageList> {
 
   GlobalKey _rowKeyForEntry(String entryKey) {
     return _entryRowKeys.putIfAbsent(entryKey, GlobalKey.new);
+  }
+
+  ValueKey<String> _listKeyForEntry(String entryKey) {
+    return ValueKey<String>('$_kListEntryKeyPrefix$entryKey');
   }
 
   void _pruneEntryRowKeys(List<AgentRunTimelineEntry> entries) {
@@ -699,7 +721,7 @@ class _ChatMessageListState extends State<ChatMessageList> {
     if (observable == null) {
       return buildAgentRunTimelineEntries(
         List<ChatMessageModel>.from(messageSource),
-        activeTaskIds: widget.activeAgentTaskIds,
+        activeTaskIds: widget.activeAgentTurnIds,
         conversationAgentId: widget.activeAcpAgentId,
       );
     }
@@ -707,18 +729,20 @@ class _ChatMessageListState extends State<ChatMessageList> {
     if (cached != null &&
         identical(_timelineCacheSource, observable) &&
         _timelineCacheStructureRevision == observable.structureRevision &&
-        setEquals(_timelineCacheActiveTaskIds, widget.activeAgentTaskIds)) {
+        setEquals(_timelineCacheActiveTaskIds, widget.activeAgentTurnIds) &&
+        _timelineCacheAgentId == widget.activeAcpAgentId) {
       return cached;
     }
     final entries = buildAgentRunTimelineEntries(
       List<ChatMessageModel>.from(observable),
-      activeTaskIds: widget.activeAgentTaskIds,
+      activeTaskIds: widget.activeAgentTurnIds,
       conversationAgentId: widget.activeAcpAgentId,
     );
     _timelineEntriesCache = entries;
     _timelineCacheSource = observable;
     _timelineCacheStructureRevision = observable.structureRevision;
-    _timelineCacheActiveTaskIds = Set<String>.from(widget.activeAgentTaskIds);
+    _timelineCacheActiveTaskIds = Set<String>.from(widget.activeAgentTurnIds);
+    _timelineCacheAgentId = widget.activeAcpAgentId;
     return entries;
   }
 
@@ -749,7 +773,6 @@ class _ChatMessageListState extends State<ChatMessageList> {
         onBeforeTaskExecute: widget.onBeforeTaskExecute,
         onCancelTask: widget.onCancelTask,
         onRetryAgentMessage: widget.onRetryAgentMessage,
-        onContinueAgentMessage: widget.onContinueAgentMessage,
         parentScrollController: widget.scrollController,
         onParentScrollHandoff: _handleParentScrollHandoff,
         onRequestAuthorize: widget.onRequestAuthorize,
@@ -844,6 +867,7 @@ class _ChatMessageListState extends State<ChatMessageList> {
                   pinnedQuickPromptIds:
                       widget.emptyGreetingPinnedQuickPromptIds,
                   onQuickPromptSelected: widget.onQuickPromptSelected,
+                  agentName: widget.emptyGreetingAgentName,
                   agentWorkspaceName: widget.emptyGreetingAgentWorkspaceName,
                   onAgentWorkspaceTap: widget.onEmptyGreetingAgentWorkspaceTap,
                 ),
@@ -851,9 +875,18 @@ class _ChatMessageListState extends State<ChatMessageList> {
             )
           : const SizedBox.expand();
       if (pageBackgroundColor == null) {
-        return content;
+        return Padding(
+          padding: EdgeInsets.only(bottom: reservedBottomInset),
+          child: content,
+        );
       }
-      return ColoredBox(color: pageBackgroundColor, child: content);
+      return ColoredBox(
+        color: pageBackgroundColor,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: reservedBottomInset),
+          child: content,
+        ),
+      );
     }
 
     String? latestUserMessageId;
@@ -877,16 +910,11 @@ class _ChatMessageListState extends State<ChatMessageList> {
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
       itemCount: timelineEntries.length,
       findChildIndexCallback: (key) {
-        if (key is! GlobalKey) {
+        if (key is! ValueKey<String> ||
+            !key.value.startsWith(_kListEntryKeyPrefix)) {
           return null;
         }
-        final entryKey = _entryRowKeys.entries
-            .where((item) => identical(item.value, key))
-            .map((item) => item.key)
-            .firstOrNull;
-        if (entryKey == null) {
-          return null;
-        }
+        final entryKey = key.value.substring(_kListEntryKeyPrefix.length);
         final dataIndex = timelineEntries.indexWhere(
           (entry) => entry.key == entryKey,
         );
@@ -897,15 +925,20 @@ class _ChatMessageListState extends State<ChatMessageList> {
         final entry = timelineEntries[dataIndex];
         final isOldestEntry = dataIndex == timelineEntries.length - 1;
         final needTopPadding = isOldestEntry && !entry.isUserMessage;
-        // GlobalKey 供锚点跳转定位已布局的行；行内部仍用 ValueKey 维持
-        // 原有的复用语义。
+        // The list child uses a local ValueKey so sliver reordering does not
+        // reparent a GlobalKey during a live ACP shape change. The nested
+        // GlobalKey is only an already-laid-out scroll anchor; keeping those
+        // identities separate avoids the framework's child == _child race.
         return KeyedSubtree(
-          key: _rowKeyForEntry(entry.key),
-          child: _buildTimelineListRow(
-            messageSource: messageSource,
-            entry: entry,
-            latestUserMessageId: latestUserMessageId,
-            padding: EdgeInsets.only(top: needTopPadding ? 24.0 : 0.0),
+          key: _listKeyForEntry(entry.key),
+          child: KeyedSubtree(
+            key: _rowKeyForEntry(entry.key),
+            child: _buildTimelineListRow(
+              messageSource: messageSource,
+              entry: entry,
+              latestUserMessageId: latestUserMessageId,
+              padding: EdgeInsets.only(top: needTopPadding ? 24.0 : 0.0),
+            ),
           ),
         );
       },
@@ -954,7 +987,6 @@ class _ChatTimelineListRow extends StatelessWidget {
     this.onLatestUserMessageEditTap,
     this.onCancelTask,
     this.onRetryAgentMessage,
-    this.onContinueAgentMessage,
     this.parentScrollController,
     this.onParentScrollHandoff,
     this.onRequestAuthorize,
@@ -974,7 +1006,6 @@ class _ChatTimelineListRow extends StatelessWidget {
   final ValueChanged<ChatMessageModel>? onLatestUserMessageEditTap;
   final void Function(String taskId)? onCancelTask;
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
-  final ValueChanged<ChatMessageModel>? onContinueAgentMessage;
   final ScrollController? parentScrollController;
   final VoidCallback? onParentScrollHandoff;
   final void Function(List<String> requiredPermissionIds)? onRequestAuthorize;
@@ -1003,7 +1034,6 @@ class _ChatTimelineListRow extends StatelessWidget {
         onBeforeTaskExecute: onBeforeTaskExecute,
         onCancelTask: onCancelTask,
         onRetryAgentMessage: onRetryAgentMessage,
-        onContinueAgentMessage: onContinueAgentMessage,
         parentScrollController: parentScrollController,
         onParentScrollHandoff: onParentScrollHandoff,
         onRequestAuthorize: onRequestAuthorize,
@@ -1025,8 +1055,6 @@ class _ChatTimelineListRow extends StatelessWidget {
       onBeforeTaskExecute: onBeforeTaskExecute,
       onCancelTask: onCancelTask,
       onRetryAgentMessage: () => onRetryAgentMessage?.call(currentMessage),
-      onContinueAgentMessage: () =>
-          onContinueAgentMessage?.call(currentMessage),
       enableThinkingCollapse: true,
       useAgentToolPresentation: useAcpPresentation,
       showThinkingAvatarOverride: null,

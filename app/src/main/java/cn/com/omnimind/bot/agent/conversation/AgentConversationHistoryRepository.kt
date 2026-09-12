@@ -3,13 +3,17 @@ package cn.com.omnimind.bot.agent
 import android.content.Context
 import cn.com.omnimind.baselib.database.AgentConversationEntry
 import cn.com.omnimind.baselib.database.AgentConversationEntryHeader
-import cn.com.omnimind.baselib.database.AgentConversationEntryRecord
 import cn.com.omnimind.baselib.database.Conversation
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 
 class AgentConversationHistoryRepository(
     @Suppress("UNUSED_PARAMETER")
@@ -26,16 +30,119 @@ class AgentConversationHistoryRepository(
     )
 
     companion object {
+        // Android's CursorWindow is bounded. Reading a whole conversation in
+        // one Room query makes a few large ACP/tool payloads exhaust that
+        // window and breaks the next prompt. Keep each native read bounded;
+        // the repository still returns the same complete logical snapshot.
+        private const val SAFE_HISTORY_PAGE_SIZE = 16
+
         const val ENTRY_TYPE_USER_MESSAGE = "user_message"
         const val ENTRY_TYPE_ASSISTANT_MESSAGE = "assistant_message"
         const val ENTRY_TYPE_TOOL_EVENT = "tool_event"
         const val ENTRY_TYPE_UI_CARD = "ui_card"
+        /** Raw ACP notifications retained outside the user-facing projection. */
+        const val ENTRY_TYPE_STREAM_EVENT = "stream_event"
 
         const val STATUS_RUNNING = "running"
         const val STATUS_SUCCESS = "success"
         const val STATUS_ERROR = "error"
         const val STATUS_TIMEOUT = "timeout"
         const val STATUS_INTERRUPTED = "interrupted"
+
+        internal fun preserveFullToolPayload(existing: Map<String, Any?>, incoming: Map<String, Any?>): Map<String, Any?> {
+            if (incoming["payloadCompacted"] == true && existing.isNotEmpty()) return existing
+            return incoming.toMutableMap().apply {
+                listOf("toolCallId", "sessionId", "turnId", "modelToolCallId",
+                    "modelAssistantMessageJson", "modelToolResultMessageJson").forEach { key ->
+                    // Presentation snapshots may have empty placeholders before
+                    // the canonical tool messages arrive. Only retain real values.
+                    existing[key]?.takeIf { it.toString().isNotBlank() }
+                        ?.let { put(key, it) }
+                }
+            }
+        }
+
+        internal fun resolveCompactionToolCutoff(
+            entries: List<AgentConversationEntry>,
+            compactedMessages: List<ChatCompletionMessage>,
+            afterEntryId: Long
+        ): Long? {
+            if (compactedMessages.lastOrNull()?.role != "tool") return null
+            val assistant = compactedMessages.lastOrNull { !it.toolCalls.isNullOrEmpty() }
+                ?: return null
+            val results = compactedMessages.takeLastWhile { it.role == "tool" }.associateBy { it.toolCallId }
+            if (!assistant.toolCalls.orEmpty().all { it.id in results }) return null
+            val required = assistant.toolCalls.orEmpty().map { it.id }.toSet()
+            val codec = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+            fun resultId(payload: Map<String, Any?>): String? =
+                payload["toolCallId"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: payload["modelToolCallId"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: payload["modelToolResultMessageJson"]?.toString()?.let {
+                        runCatching { codec.decodeFromString(ChatCompletionMessage.serializer(), it).toolCallId }.getOrNull()
+                    }
+            val groups = entries.filter { it.entryType == ENTRY_TYPE_TOOL_EVENT && it.id > afterEntryId && it.status != STATUS_RUNNING }
+                .map { entry -> entry to AgentConversationHistorySupport.readMap(entry.payloadJson) }
+                .filter { (entry, payload) -> "restored_${entry.entryId}" in required || resultId(payload) in required }
+                .groupBy { (_, payload) -> listOf(payload["sessionId"], payload["turnId"], payload["taskId"]) }
+            return groups.values.mapNotNull { group ->
+                val ids = group.map { (entry, payload) ->
+                    "restored_${entry.entryId}".takeIf { it in required } ?: resultId(payload)
+                }
+                if (ids.size == required.size && ids.toSet() == required) group.maxOf { it.first.id } else null
+            }.singleOrNull()
+
+        }
+
+        internal suspend fun awaitCompactionToolCutoff(
+            entries: Flow<List<AgentConversationEntry>>,
+            compactedMessages: List<ChatCompletionMessage>,
+            afterEntryId: Long,
+        ): Long = withTimeoutOrNull(30_000) {
+            entries.map { resolveCompactionToolCutoff(it, compactedMessages, afterEntryId) }
+                .filterNotNull().first()
+        } ?: error("工具历史尚未完成保存，未提交不完整的压缩检查点。")
+
+        /**
+         * Applies pagination after the compatibility reader has merged the
+         * canonical Agent bucket with legacy Xiaowan buckets. Paginating the
+         * database query first loses legacy `normal` rows because they live in
+         * a separate conversationMode partition.
+         */
+        internal fun pageConversationEntries(
+            entries: List<AgentConversationEntry>,
+            limit: Int,
+            offset: Int
+        ): Pair<List<AgentConversationEntry>, Boolean> {
+            // Compatibility buckets are merged before this boundary and are
+            // not guaranteed to arrive in the same order in tests, Room
+            // implementations, or future storage adapters. Pagination must be
+            // based on one deterministic newest-first timeline; otherwise the
+            // first page can expose the oldest message and make later context
+            // appear missing.
+            val ordered = entries
+                .distinctBy { it.entryId }
+                .sortedWith(
+                    compareByDescending<AgentConversationEntry> { it.createdAt }
+                        .thenByDescending { it.id }
+                )
+            val safeOffset = offset.coerceAtLeast(0)
+            val remaining = ordered.drop(safeOffset)
+            val page = if (limit > 0) remaining.take(limit) else remaining
+            return page to (safeOffset + page.size < ordered.size)
+        }
+
+        /**
+         * Produces one chronological fork snapshot from canonical and legacy
+         * storage buckets.  The caller supplies buckets in precedence order;
+         * this keeps a migrated `agent` row authoritative over an equivalent
+         * legacy `normal` row without changing either source bucket.
+         */
+        internal fun entriesForFork(entries: List<AgentConversationEntry>): List<AgentConversationEntry> {
+            return entries
+                .filter { it.entryType != ENTRY_TYPE_STREAM_EVENT }
+                .distinctBy { it.entryId }
+                .sortedWith(compareBy<AgentConversationEntry> { it.createdAt }.thenBy { it.id })
+        }
 
     }
 
@@ -149,16 +256,61 @@ class AgentConversationHistoryRepository(
         fallbackStatus: String = STATUS_RUNNING,
         fallbackSummary: String = ""
     ) = withContext(Dispatchers.IO) {
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        val normalizedEntryId = entryId.trim()
         val existing = loadThreadEntryByIdSafe(
             conversationId = conversationId,
-            conversationMode = conversationMode,
-            entryId = entryId
+            conversationMode = effectiveConversationMode,
+            entryId = normalizedEntryId
         )
+        // ACP tool/call ids are scoped to a single provider turn. Providers
+        // are allowed to reuse ids such as `call_1` on the next prompt, while
+        // our conversation table keys entries by conversation + entryId. If
+        // we reuse the raw id here, the new turn updates the old row and
+        // inherits its createdAt, which makes the UI show a wrong duration and
+        // can make the old turn lose its tool card entirely.
+        val incomingTaskId = payload["taskId"]?.toString()?.trim().orEmpty()
+        val existingTaskId = existing
+            ?.takeIf { it.entryType == ENTRY_TYPE_TOOL_EVENT }
+            ?.let { AgentConversationHistorySupport.readMap(it.payloadJson)["taskId"] }
+            ?.toString()
+            ?.trim()
+            .orEmpty()
+        val storageEntryId = if (
+            normalizedEntryId.isNotEmpty() &&
+            incomingTaskId.isNotEmpty() &&
+            existingTaskId.isNotEmpty() &&
+            existingTaskId != incomingTaskId
+        ) {
+            "$incomingTaskId-$normalizedEntryId"
+        } else {
+            normalizedEntryId
+        }
+        val storageExisting = if (storageEntryId == normalizedEntryId) {
+            existing
+        } else {
+            loadThreadEntryByIdSafe(
+                conversationId = conversationId,
+                conversationMode = effectiveConversationMode,
+                entryId = storageEntryId
+            )
+        }
+        val storagePayload = payload.toMutableMap().apply {
+            put("cardId", storageEntryId)
+            val streamMeta = (get("streamMeta") as? Map<*, *>)
+                ?.entries
+                ?.associate { (key, value) -> key.toString() to value }
+                ?.toMutableMap()
+            if (streamMeta != null) {
+                streamMeta["entryId"] = storageEntryId
+                put("streamMeta", streamMeta)
+            }
+        }
         val mergedPayload = mergeToolPayload(
-            existing = existing?.takeIf { it.entryType == ENTRY_TYPE_TOOL_EVENT }?.let {
+            existing = storageExisting?.takeIf { it.entryType == ENTRY_TYPE_TOOL_EVENT }?.let {
                 AgentConversationHistorySupport.readMap(it.payloadJson)
             }.orEmpty(),
-            incoming = payload,
+            incoming = storagePayload,
             fallbackStatus = fallbackStatus,
             fallbackSummary = fallbackSummary
         )
@@ -171,28 +323,62 @@ class AgentConversationHistoryRepository(
 
         upsertEntry(
             AgentConversationEntry(
-                id = existing?.id ?: 0,
+                id = storageExisting?.id ?: 0,
                 conversationId = conversationId,
-                conversationMode = conversationMode,
-                entryId = entryId,
+                conversationMode = effectiveConversationMode,
+                entryId = storageEntryId,
                 entryType = ENTRY_TYPE_TOOL_EVENT,
                 status = normalizedStatus,
                 summary = normalizedSummary,
                 payloadJson = gson.toJson(mergedPayload),
-                createdAt = existing?.createdAt ?: System.currentTimeMillis(),
+                createdAt = storageExisting?.createdAt ?: System.currentTimeMillis(),
                 updatedAt = System.currentTimeMillis()
             )
         )
         refreshConversationMetadata(conversationId)
     }
 
+    suspend fun persistHiddenStreamEvent(
+        conversationId: Long,
+        conversationMode: String,
+        entryId: String,
+        payload: Map<String, Any?>,
+        createdAt: Long = System.currentTimeMillis()
+    ) = withContext(Dispatchers.IO) {
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        upsertEntry(
+            AgentConversationEntry(
+                conversationId = conversationId,
+                conversationMode = effectiveConversationMode,
+                entryId = entryId,
+                entryType = ENTRY_TYPE_STREAM_EVENT,
+                status = STATUS_SUCCESS,
+                summary = "ACP stream event",
+                payloadJson = gson.toJson(payload),
+                createdAt = createdAt,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
     suspend fun replaceThreadMessagesFromUiSnapshot(
         conversationId: Long,
         conversationMode: String,
-        messages: List<Map<String, Any?>>
-    ) = withContext(Dispatchers.IO) {
+        messages: List<Map<String, Any?>>,
+        allowHistoryRemoval: Boolean = false
+    ) = DatabaseHelper.withTransaction {
+        // Keep entry identities and their checkpoint in one atomic snapshot.
+        // Compaction must never observe the temporary delete/reinsert gap.
         val existingConversation = DatabaseHelper.getConversationById(conversationId)
-        val existingEntries = loadThreadEntriesAscSafe(conversationId, conversationMode)
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        if (messages.isEmpty() && !allowHistoryRemoval) return@withTransaction
+        val existingEntries = if (allowHistoryRemoval) {
+            loadThreadEntriesAscSafePaged(conversationId, effectiveConversationMode)
+        } else {
+            // Reconcile one row at a time below. Retaining all raw tool bodies
+            // alongside their decoded maps defeats the bounded display projection.
+            emptyList()
+        }
         val existingToolPayloads = existingEntries
             .filter { it.entryType == ENTRY_TYPE_TOOL_EVENT }
             .associate { entry ->
@@ -209,7 +395,9 @@ class AgentConversationHistoryRepository(
             incomingMessages = messages
         )
         var remappedCutoffEntryDbId: Long? = null
-        DatabaseHelper.deleteAgentConversationThread(conversationId, conversationMode)
+        if (allowHistoryRemoval) conversationModeCandidates(effectiveConversationMode).forEach { storageMode ->
+            DatabaseHelper.deleteAgentConversationThread(conversationId, storageMode)
+        }
         ConversationSnapshotOrdering.prepareForStorage(mergedMessages).forEach { prepared ->
             val message = prepared.payload
             val restoredToolPayload =
@@ -225,6 +413,8 @@ class AgentConversationHistoryRepository(
                 (message["user"] as? Number)?.toInt() == 1 -> ENTRY_TYPE_USER_MESSAGE
                 else -> ENTRY_TYPE_ASSISTANT_MESSAGE
             }
+            val existingEntry = existingEntries.firstOrNull { it.entryId == entryId }
+                ?: if (!allowHistoryRemoval) loadThreadEntryByIdSafe(conversationId, effectiveConversationMode, entryId) else null
             val status = when {
                 restoredToolPayload != null -> restoredToolPayload["status"]?.toString()?.trim()
                     ?.ifEmpty { null }
@@ -238,24 +428,21 @@ class AgentConversationHistoryRepository(
                 else -> extractSummaryFromMessagePayload(message)
             }
             val payloadJson = if (restoredToolPayload != null) {
-                val existingToolPayload = existingToolPayloads[entryId].orEmpty()
-                val replayPreservedPayload = restoredToolPayload.toMutableMap().apply {
-                    listOf(
-                        "modelToolCallId",
-                        "modelAssistantMessageJson",
-                        "modelToolResultMessageJson"
-                    ).forEach { key ->
-                        existingToolPayload[key]?.let { value -> put(key, value) }
-                    }
+                if (restoredToolPayload["payloadCompacted"] == true && existingEntry != null) {
+                    existingEntry.payloadJson
+                } else {
+                    val existingToolPayload = existingToolPayloads[entryId]
+                        ?: existingEntry?.let { AgentConversationHistorySupport.readMap(it.payloadJson) }.orEmpty()
+                    gson.toJson(preserveFullToolPayload(existingToolPayload, restoredToolPayload))
                 }
-                gson.toJson(replayPreservedPayload)
             } else {
                 gson.toJson(message)
             }
             val insertedId = upsertEntry(
                 AgentConversationEntry(
+                    id = existingEntry?.id ?: 0,
                     conversationId = conversationId,
-                    conversationMode = conversationMode,
+                    conversationMode = effectiveConversationMode,
                     entryId = entryId,
                     entryType = type,
                     status = status,
@@ -269,19 +456,15 @@ class AgentConversationHistoryRepository(
                 remappedCutoffEntryDbId = insertedId
             }
         }
-        if (preservedSummary != null && remappedCutoffEntryDbId != null) {
+        if (allowHistoryRemoval && preservedSummary != null && remappedCutoffEntryDbId != null) {
             val refreshedConversation = DatabaseHelper.getConversationById(conversationId)
             if (refreshedConversation != null) {
-                DatabaseHelper.updateConversation(
-                    refreshedConversation.copy(
-                        contextSummary = preservedSummary,
-                        contextSummaryCutoffEntryDbId = remappedCutoffEntryDbId,
-                        contextSummaryUpdatedAt = existingConversation?.contextSummaryUpdatedAt
-                            ?: refreshedConversation.contextSummaryUpdatedAt
-                    )
+                DatabaseHelper.commitConversationContextCheckpoint(
+                    conversationId, preservedSummary, remappedCutoffEntryDbId,
+                    refreshedConversation.contextSummaryUpdatedAt, System.currentTimeMillis()
                 )
             }
-        } else {
+        } else if (allowHistoryRemoval && preservedSummary != null) {
             resetContextSummary(conversationId)
         }
         refreshConversationMetadata(conversationId)
@@ -292,13 +475,18 @@ class AgentConversationHistoryRepository(
         conversationMode: String,
         finalizeInterruptedEntries: Boolean = true
     ): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
-        val entries = loadThreadEntriesDescSafe(conversationId, conversationMode)
-        val displayEntries = if (finalizeInterruptedEntries) {
-            normalizeEntriesForDisplay(entries)
-        } else {
-            entries
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        val messagePayloads = mutableListOf<Map<String, Any?>>()
+        var offset = 0
+        while (true) {
+            val page = DatabaseHelper.getLogicalAgentConversationPage(
+                conversationId, conversationModeCandidates(effectiveConversationMode), SAFE_HISTORY_PAGE_SIZE, offset)
+            if (page.isEmpty()) break
+            val displayEntries = if (finalizeInterruptedEntries) normalizeEntriesForDisplay(page) else page
+            messagePayloads += displayEntries.mapNotNull(::entryToMessagePayload)
+            offset += page.size
+            if (page.size < SAFE_HISTORY_PAGE_SIZE) break
         }
-        val messagePayloads = displayEntries.mapNotNull { entry -> entryToMessagePayload(entry) }
         ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
     }
 
@@ -308,18 +496,21 @@ class AgentConversationHistoryRepository(
         limit: Int,
         offset: Int
     ): Pair<List<Map<String, Any?>>, Boolean> = withContext(Dispatchers.IO) {
-        val totalCount = DatabaseHelper.countAgentConversationThreadEntries(
-            conversationId, conversationMode
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        // Deduplicate compatibility identities in SQL BEFORE paging. Hydrate only
+        // the visible page plus one lookahead, never the entire large transcript.
+        val pageSize = limit.coerceIn(1, Int.MAX_VALUE - 1)
+        val page = DatabaseHelper.getLogicalAgentConversationPage(
+            conversationId, conversationModeCandidates(effectiveConversationMode), pageSize + 1, offset.coerceAtLeast(0)
         )
-        val entries = loadThreadEntriesDescPagedSafe(conversationId, conversationMode, limit, offset)
-        val normalized = if (offset == 0) {
-            normalizeEntriesForDisplay(entries)
-        } else {
-            entries
-        }
+        val entries = page.take(pageSize)
+        val hasMore = page.size > pageSize
+        // Every page is historical UI. A card from an older page must not
+        // stay visually running merely because it was not in the first page
+        // loaded after process restore.
+        val normalized = normalizeEntriesForDisplay(entries)
         val messagePayloads = normalized.mapNotNull { entry -> entryToMessagePayload(entry) }
         val sorted = ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
-        val hasMore = offset + entries.size < totalCount
         Pair(sorted, hasMore)
     }
 
@@ -327,13 +518,31 @@ class AgentConversationHistoryRepository(
         conversationId: Long,
         conversationMode: String
     ) = withContext(Dispatchers.IO) {
-        DatabaseHelper.deleteAgentConversationThread(conversationId, conversationMode)
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        conversationModeCandidates(effectiveConversationMode).forEach { storageMode ->
+            DatabaseHelper.deleteAgentConversationThread(conversationId, storageMode)
+        }
         resetContextSummary(conversationId)
         refreshConversationMetadata(conversationId)
     }
 
     suspend fun deleteConversation(conversationId: Long) = withContext(Dispatchers.IO) {
         DatabaseHelper.deleteAgentConversationEntries(conversationId)
+    }
+
+    /**
+     * Removes legacy ACP transport records created by the pre-ACP history
+     * bridge. They are not conversation content and must not affect headers,
+     * counts, pagination, or prompt reconstruction.
+     */
+    suspend fun purgeLegacyStreamEvents(): Int = withContext(Dispatchers.IO) {
+        val affectedConversationIds = DatabaseHelper.getAgentConversationIdsWithStreamEvents()
+        if (affectedConversationIds.isEmpty()) return@withContext 0
+        val deleted = DatabaseHelper.deleteAgentConversationStreamEvents()
+        for (conversationId in affectedConversationIds) {
+            refreshConversationMetadata(conversationId)
+        }
+        deleted
     }
 
     suspend fun buildPromptSeed(
@@ -344,8 +553,11 @@ class AgentConversationHistoryRepository(
             return@withContext PromptSeed(emptyList())
         }
         val conversation = DatabaseHelper.getConversationById(conversationId)
-        val normalizedEntries = normalizeInterruptedToolEntries(
-            loadThreadEntriesAscSafe(conversationId, conversationMode)
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        val normalizedEntries = AgentConversationHistorySupport.normalizeInterruptedEntries(
+            loadThreadEntriesAscSafePaged(conversationId, effectiveConversationMode,
+                if (conversation?.contextSummary.isNullOrBlank()) 0 else conversation?.contextSummaryCutoffEntryDbId ?: 0,
+                promptProjection = newPromptProjection())
         )
         AgentConversationHistorySupport.buildPromptSeedFromEntries(
             entries = normalizedEntries,
@@ -359,8 +571,10 @@ class AgentConversationHistoryRepository(
         conversationMode: String
     ): ContextCompactionCandidate? = withContext(Dispatchers.IO) {
         val conversation = DatabaseHelper.getConversationById(conversationId) ?: return@withContext null
-        val normalizedEntries = normalizeInterruptedToolEntries(
-            loadThreadEntriesAscSafe(conversationId, conversationMode)
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        val normalizedEntries = AgentConversationHistorySupport.normalizeInterruptedEntries(
+            loadThreadEntriesAscSafePaged(conversationId, effectiveConversationMode, conversation.contextSummaryCutoffEntryDbId ?: 0,
+                promptProjection = newPromptProjection())
         )
         val selection = AgentConversationHistorySupport.selectEntriesToCompact(
             entries = normalizedEntries,
@@ -373,42 +587,102 @@ class AgentConversationHistoryRepository(
         )
     }
 
+    /** Resolve Pi's retained-entry boundary against the canonical replay journal.
+     * In-flight projection is allowed to lag: no match means no durable cutoff yet.
+     */
+    suspend fun findCompactionToolCutoff(
+        conversationId: Long,
+        conversationMode: String,
+        compactedMessages: List<ChatCompletionMessage>
+    ): Long? = withContext(Dispatchers.IO) {
+        val conversation = getConversation(conversationId) ?: return@withContext null
+        val afterEntryId = conversation.contextSummaryCutoffEntryDbId ?: 0
+        val required = compactedMessages.lastOrNull { !it.toolCalls.isNullOrEmpty() }
+            ?.toolCalls.orEmpty().map { it.id }.toSet()
+        if (required.isEmpty() || compactedMessages.lastOrNull()?.role != "tool") return@withContext null
+        // ACP projection commits asynchronously. Wait for the actual journal
+        // identity instead of silently discarding a successful summary. Room
+        // invalidations wake this wait; no user turn or network request is replayed.
+        val entries = DatabaseHelper.observeAgentToolHeadersAfter(conversationId, afterEntryId).map { headers ->
+                val projection = newPromptProjection()
+                headers.filter { header ->
+                    !header.entryId.startsWith("tool:") || required.any { callId ->
+                        header.entryId == callId.removePrefix("restored_") ||
+                            header.entryId.contains(":$callId:")
+                    }
+                }.distinctBy { it.entryId }.mapNotNull { header ->
+                    loadThreadEntryByIdSafe(conversationId, header.conversationMode, header.entryId)
+                        ?.let(projection::project)
+                }
+            }
+        awaitCompactionToolCutoff(entries, compactedMessages, afterEntryId)
+    }
+
     suspend fun updateContextSummary(
         conversationId: Long,
         summary: String,
         cutoffEntryDbId: Long,
+        expectedRevision: Long,
         updatedAt: Long = System.currentTimeMillis()
     ) = withContext(Dispatchers.IO) {
-        val conversation = DatabaseHelper.getConversationById(conversationId) ?: return@withContext
-        DatabaseHelper.updateConversation(
-            conversation.copy(
-                contextSummary = summary.trim(),
-                contextSummaryCutoffEntryDbId = cutoffEntryDbId,
-                contextSummaryUpdatedAt = updatedAt,
-                updatedAt = maxOf(conversation.updatedAt, updatedAt)
-            )
-        )
+        check(DatabaseHelper.commitConversationContextCheckpoint(conversationId, summary.trim(), cutoffEntryDbId, expectedRevision, updatedAt)) {
+            "压缩期间历史检查点已改变，未提交过期摘要。"
+        }
     }
 
     suspend fun updatePromptTokenUsage(
         conversationId: Long,
         promptTokens: Int,
-        threshold: Int,
         updatedAt: Long = System.currentTimeMillis()
     ) = withContext(Dispatchers.IO) {
-        val conversation = DatabaseHelper.getConversationById(conversationId) ?: return@withContext
-        DatabaseHelper.updateConversation(
-            conversation.copy(
-                latestPromptTokens = promptTokens.coerceAtLeast(0),
-                promptTokenThreshold = threshold.coerceAtLeast(1),
-                latestPromptTokensUpdatedAt = updatedAt,
-                updatedAt = maxOf(conversation.updatedAt, updatedAt)
-            )
-        )
+        DatabaseHelper.updateConversationPromptUsage(conversationId, promptTokens, updatedAt)
     }
 
     suspend fun getConversation(conversationId: Long): Conversation? = withContext(Dispatchers.IO) {
         DatabaseHelper.getConversationById(conversationId)
+    }
+
+    /**
+     * Copies the durable, user-visible ACP history into a newly forked
+     * conversation.  The ACP agent owns the remote session context, while
+     * OmniBot owns the conversation projection; keeping this operation here
+     * makes the fork seam work for every Harness and also reads legacy
+     * Xiaowan buckets without rewriting or deleting them.
+     *
+     * Hidden raw stream events are deliberately not copied.  They are a
+     * transport replay aid, not conversation content, and copying them would
+     * make a fork look like it had received the same notifications twice.
+     */
+    suspend fun copyConversationHistory(
+        sourceConversationId: Long,
+        targetConversationId: Long,
+        sourceConversationMode: String = "agent",
+        targetConversationMode: String = "agent"
+    ): Int = withContext(Dispatchers.IO) {
+        if (sourceConversationId == targetConversationId) return@withContext 0
+        val sourceEntries = entriesForFork(
+            conversationModeCandidates(sourceConversationMode)
+            .flatMap { storageMode ->
+                DatabaseHelper.getAgentConversationEntriesAsc(
+                    conversationId = sourceConversationId,
+                    conversationMode = storageMode
+                )
+            }
+        )
+        if (sourceEntries.isEmpty()) return@withContext 0
+
+        val targetMode = canonicalConversationMode(targetConversationMode)
+        sourceEntries.forEach { entry ->
+            DatabaseHelper.upsertAgentConversationEntry(
+                entry.copy(
+                    id = 0,
+                    conversationId = targetConversationId,
+                    conversationMode = targetMode,
+                )
+            )
+        }
+        refreshConversationMetadata(targetConversationId)
+        sourceEntries.size
     }
 
     private suspend fun upsertMessageEntry(
@@ -421,16 +695,17 @@ class AgentConversationHistoryRepository(
         status: String,
         createdAt: Long
     ) = withContext(Dispatchers.IO) {
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
         val existing = loadThreadEntryByIdSafe(
             conversationId = conversationId,
-            conversationMode = conversationMode,
+            conversationMode = effectiveConversationMode,
             entryId = entryId
         )
         val resolvedPayload = if (
             entryType == ENTRY_TYPE_UI_CARD &&
             existing?.entryType == ENTRY_TYPE_UI_CARD
         ) {
-            AgentConversationHistorySupport.preserveDeepThinkingContent(
+            AgentConversationHistorySupport.mergeUiCardPayload(
                 existingPayload = AgentConversationHistorySupport.readMap(
                     existing.payloadJson
                 ),
@@ -443,7 +718,7 @@ class AgentConversationHistoryRepository(
             AgentConversationEntry(
                 id = existing?.id ?: 0,
                 conversationId = conversationId,
-                conversationMode = conversationMode,
+                conversationMode = effectiveConversationMode,
                 entryId = entryId,
                 entryType = entryType,
                 status = status,
@@ -458,8 +733,17 @@ class AgentConversationHistoryRepository(
 
     private suspend fun upsertEntry(entry: AgentConversationEntry): Long {
         return DatabaseHelper.upsertAgentConversationEntry(
-            AgentConversationHistorySupport.prepareEntryForStorage(entry)
+            AgentConversationHistorySupport.prepareEntryForStorage(
+                entry.copy(conversationMode = canonicalConversationMode(entry.conversationMode))
+            )
         )
+    }
+
+    private fun canonicalConversationMode(mode: String): String {
+        return when (mode.trim().lowercase()) {
+            "", "normal", "agent", "codex", "acp", "coding" -> "agent"
+            else -> mode.trim().lowercase().ifEmpty { "agent" }
+        }
     }
 
     private suspend fun refreshConversationMetadata(conversationId: Long) {
@@ -478,14 +762,7 @@ class AgentConversationHistoryRepository(
     }
 
     private suspend fun resetContextSummary(conversationId: Long) {
-        val conversation = DatabaseHelper.getConversationById(conversationId) ?: return
-        DatabaseHelper.updateConversation(
-            conversation.copy(
-                contextSummary = null,
-                contextSummaryCutoffEntryDbId = null,
-                contextSummaryUpdatedAt = 0
-            )
-        )
+        DatabaseHelper.clearConversationContextCheckpoint(conversationId)
     }
 
     private suspend fun normalizeInterruptedToolEntries(
@@ -536,7 +813,16 @@ class AgentConversationHistoryRepository(
         val cardData = AgentConversationHistorySupport.buildDisplaySafeToolCardData(
             entry = entry,
             payload = payload
-        )
+        ).toMutableMap()
+        if (entry.payloadJson.length > 8192) {
+            val workspace = AgentWorkspaceManager(context)
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(entry.payloadJson.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+            val file = java.io.File(workspace.offloadsDirectory("history-${entry.conversationId}"), "${entry.id}-$digest.json")
+            if (!file.exists()) file.writeText(entry.payloadJson)
+            val artifact = workspace.buildArtifactForFile(file, "history", "完整工具记录").toPayload()
+            cardData["artifacts"] = (cardData["artifacts"] as? List<*>).orEmpty() + artifact
+        }
         return AgentConversationHistorySupport.buildCardMessagePayload(
             messageId = messageId,
             cardData = cardData,
@@ -587,78 +873,126 @@ class AgentConversationHistoryRepository(
         conversationMode: String,
         entryId: String
     ): AgentConversationEntry? {
-        val record = DatabaseHelper.getAgentConversationEntryByThreadAndIdSafe(
-            conversationId = conversationId,
-            conversationMode = conversationMode,
-            entryId = entryId,
-            payloadLimit = AgentConversationHistorySupport.MAX_STORAGE_ENTRY_PAYLOAD_CHARS,
-            summaryLimit = AgentConversationHistorySupport.MAX_STORAGE_SUMMARY_CHARS
-        ) ?: return null
-        return materializeEntries(listOf(record)).singleOrNull()
+        for (storageMode in conversationModeCandidates(conversationMode)) {
+            val entry = DatabaseHelper.getAgentConversationEntryByThreadAndId(
+                conversationId = conversationId,
+                conversationMode = storageMode,
+                entryId = entryId
+            )
+            if (entry != null) return entry
+        }
+        return null
     }
 
-    private suspend fun loadThreadEntriesAscSafe(
+    private fun newPromptProjection() = AgentHistoryToolOutputProjection(offload = { entry ->
+        val workspace = AgentWorkspaceManager(context)
+        val file = java.io.File(workspace.offloadsDirectory("history-${entry.conversationId}"),
+            "${entry.id}-${entry.updatedAt}-prompt.json")
+        // Historical tools are immutable after completion, but write the actual
+        // snapshot even when a running row changed without changing its timestamp.
+        val temporary = java.io.File.createTempFile("history-", ".tmp", file.parentFile)
+        try {
+            temporary.writer().use { it.write(entry.payloadJson) }
+            check(temporary.renameTo(file)) { "Could not save complete history record" }
+        } finally {
+            temporary.delete()
+        }
+        workspace.buildArtifactForFile(file, "history", "完整工具记录").workspacePath
+    })
+
+    private suspend fun loadThreadEntriesAscSafePaged(
         conversationId: Long,
-        conversationMode: String
+        conversationMode: String,
+        afterEntryId: Long = 0,
+        promptProjection: AgentHistoryToolOutputProjection? = null
     ): List<AgentConversationEntry> {
-        val records = DatabaseHelper.getAgentConversationEntriesAscSafe(
-            conversationId = conversationId,
-            conversationMode = conversationMode,
-            payloadLimit = AgentConversationHistorySupport.MAX_STORAGE_ENTRY_PAYLOAD_CHARS,
-            summaryLimit = AgentConversationHistorySupport.MAX_STORAGE_SUMMARY_CHARS
-        )
-        return materializeEntries(records)
+        return loadThreadEntriesDescSafePaged(conversationId, conversationMode, afterEntryId, promptProjection).asReversed()
     }
 
-    private suspend fun loadThreadEntriesDescSafe(
+    private suspend fun loadThreadEntriesDescSafePaged(
         conversationId: Long,
-        conversationMode: String
+        conversationMode: String,
+        afterEntryId: Long = 0,
+        promptProjection: AgentHistoryToolOutputProjection? = null
     ): List<AgentConversationEntry> {
-        val records = DatabaseHelper.getAgentConversationEntriesDescSafe(
-            conversationId = conversationId,
-            conversationMode = conversationMode,
-            payloadLimit = AgentConversationHistorySupport.MAX_STORAGE_ENTRY_PAYLOAD_CHARS,
-            summaryLimit = AgentConversationHistorySupport.MAX_STORAGE_SUMMARY_CHARS
-        )
-        return materializeEntries(records)
+        val entries = conversationModeCandidates(conversationMode).flatMap { storageMode ->
+            loadThreadEntriesDescSafePagedForMode(conversationId, storageMode, afterEntryId, promptProjection)
+        }
+        return entries
+            // Canonical `agent` entries come first; an old `codex` row with
+            // the same logical entry id must not be shown twice.
+            .distinctBy { entry -> entry.entryId }
+            .sortedWith(compareByDescending<AgentConversationEntry> { it.createdAt }
+                .thenByDescending { it.id })
+    }
+
+    private suspend fun loadThreadEntriesDescSafePagedForMode(
+        conversationId: Long,
+        conversationMode: String,
+        afterEntryId: Long = 0,
+        promptProjection: AgentHistoryToolOutputProjection? = null
+    ): List<AgentConversationEntry> {
+        val entries = mutableListOf<AgentConversationEntry>()
+        var offset = 0
+        while (true) {
+            val page = loadThreadEntriesDescPagedSafe(
+                conversationId = conversationId,
+                conversationMode = conversationMode,
+                limit = SAFE_HISTORY_PAGE_SIZE,
+                offset = offset,
+                afterEntryId = afterEntryId
+            )
+            if (page.isEmpty()) break
+            entries += if (promptProjection == null) page else page.map(promptProjection::project)
+            offset += page.size
+            if (page.size < SAFE_HISTORY_PAGE_SIZE) break
+        }
+        return entries
+    }
+
+    private fun conversationModeCandidates(conversationMode: String): List<String> {
+        val normalized = conversationMode.trim().lowercase().ifEmpty { "agent" }
+        return if (normalized in setOf("normal", "agent", "codex", "acp", "coding")) {
+            // `normal` is the pre-ACP Xiaowan bucket. Keep it readable while
+            // all new writes use canonical `agent`.
+            listOf("agent", "codex", "normal")
+        } else {
+            listOf(normalized)
+        }
+    }
+
+    /**
+     * The Conversation row is the durable ownership boundary. UI callers may
+     * still arrive through an old route and say `normal`/`codex`; allowing
+     * that hint to select a different history bucket is what made context
+     * disappear after a refresh or session/load. Use the requested mode only
+     * for a not-yet-materialized conversation.
+     */
+    private suspend fun resolveConversationMode(
+        conversationId: Long,
+        requestedMode: String
+    ): String {
+        val persistedMode = DatabaseHelper.getConversationById(conversationId)
+            ?.mode
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        return canonicalConversationMode(persistedMode ?: requestedMode)
     }
 
     private suspend fun loadThreadEntriesDescPagedSafe(
         conversationId: Long,
         conversationMode: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        afterEntryId: Long = 0
     ): List<AgentConversationEntry> {
-        val records = DatabaseHelper.getAgentConversationEntriesDescPagedSafe(
+        return DatabaseHelper.getAgentConversationEntriesDescPaged(
             conversationId = conversationId,
             conversationMode = conversationMode,
             limit = limit,
             offset = offset,
-            payloadLimit = AgentConversationHistorySupport.MAX_STORAGE_ENTRY_PAYLOAD_CHARS,
-            summaryLimit = AgentConversationHistorySupport.MAX_STORAGE_SUMMARY_CHARS
+            afterEntryId = afterEntryId
         )
-        return materializeEntries(records)
-    }
-
-    private suspend fun materializeEntries(
-        records: List<AgentConversationEntryRecord>
-    ): List<AgentConversationEntry> {
-        if (records.isEmpty()) return emptyList()
-        val materialized = records.map(AgentConversationHistorySupport::materializeRecord)
-        repairRecoveredEntries(materialized)
-        return materialized.map { it.entry }
-    }
-
-    private suspend fun repairRecoveredEntries(
-        entries: List<AgentConversationHistorySupport.MaterializedEntry>
-    ) {
-        entries
-            .asSequence()
-            .filter { it.needsRepair }
-            .map { it.entry }
-            .forEach { repaired ->
-                upsertEntry(repaired)
-            }
     }
 
     private fun toStringAnyMap(value: Any?): Map<String, Any?> {

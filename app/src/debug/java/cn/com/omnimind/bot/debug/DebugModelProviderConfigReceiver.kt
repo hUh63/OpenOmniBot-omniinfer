@@ -31,7 +31,9 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
                 val result = runCatching {
                     when (operation) {
                         OPERATION_QUERY -> queryState()
+                        "verify_bound_provider" -> verifyBoundProvider(intent)
                         OPERATION_CONFIGURE -> configure(appContext, intent)
+                        OPERATION_BIND_EXISTING -> bindExisting(intent)
                         else -> error("unsupported operation: $operation")
                     }
                 }.getOrElse { error ->
@@ -106,12 +108,66 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
         )
     }
 
+    /**
+     * Debug-only device verification helper. It changes only the scene binding
+     * and never reads or accepts a credential, so a real Provider already saved
+     * on the device can be used without copying its API key into adb history.
+     */
+    private fun bindExisting(intent: Intent?): Map<String, Any?> {
+        val profileId = intent.stringExtra("profileId", "profile_id")
+        val modelId = intent.stringExtra("modelId", "model_id")
+        val sceneIds = parseSceneIds(intent.stringExtra("sceneIds", "scene_ids"))
+        require(profileId.isNotBlank()) { "profileId is empty" }
+        require(modelId.isNotBlank()) { "modelId is empty" }
+        val profile = ModelProviderConfigStore.getProfile(profileId)
+            ?: error("provider is not configured: $profileId")
+        require(profile.isConfigured()) { "provider is not configured: $profileId" }
+        sceneIds.forEach { sceneId ->
+            SceneModelBindingStore.saveBinding(
+                sceneId = sceneId,
+                providerProfileId = profileId,
+                modelId = modelId,
+            )
+        }
+        return queryState() + mapOf(
+            "boundExistingProfileId" to profileId,
+            "boundExistingModelId" to modelId,
+            "boundExistingSceneIds" to sceneIds,
+        )
+    }
+
     private fun queryState(): Map<String, Any?> = linkedMapOf(
         "success" to true,
         "editingProfileId" to ModelProviderConfigStore.getEditingProfileId(),
         "profiles" to ModelProviderConfigStore.listProfiles().map { it.toSafePayload() },
         "sceneBindings" to SceneModelBindingStore.getBindingEntries().map { it.toPayload() },
     )
+
+    /** Uses the existing binding and credentials in-process; never exports a key. */
+    private suspend fun verifyBoundProvider(intent: Intent?): Map<String, Any?> {
+        val binding = SceneModelBindingStore.getBinding("scene.dispatch.model")
+        val profileId = intent.stringExtra("profileId").ifBlank { binding?.providerProfileId.orEmpty() }
+        val modelId = intent.stringExtra("modelId").ifBlank { binding?.modelId.orEmpty() }
+        require(profileId.isNotBlank() && modelId.isNotBlank()) { "Provider and model required" }
+        val profile = checkNotNull(ModelProviderConfigStore.getProfile(profileId))
+        val results = listOf("chat_completions", "responses", "anthropic").map { wire ->
+            val base = if (wire == "anthropic")
+                cn.com.omnimind.bot.agent.runtime.normalizeClaudeCodeBaseUrl(profile.baseUrl)
+                else profile.baseUrl
+            val result = cn.com.omnimind.assists.controller.http.HttpController.checkProviderModelAvailability(
+                model = modelId, apiBase = base, apiKey = profile.apiKey,
+                customHeaders = profile.customHeaders,
+                protocolType = if (wire == "anthropic") "anthropic" else "openai_compatible",
+                wireApi = wire,
+            )
+            mapOf("wire" to wire, "available" to result.available, "code" to result.code,
+                "message" to cn.com.omnimind.bot.agent.AgentRuntimeErrorSupport.safeDiagnosticMessage(
+                    IllegalStateException(result.message)))
+        }
+        return mapOf("success" to true, "profileId" to profile.id,
+            "modelId" to modelId, "checks" to results,
+            "harnessAcceptance" to false)
+    }
 
     private fun seedFlutterManualModelId(context: Context, profileId: String, modelId: String) {
         val preferences = context.getSharedPreferences(
@@ -165,6 +221,7 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
         private const val TAG = "DebugModelProviderConfigReceiver"
         private const val RESULT_FILE = "debug-model-provider-config-result.json"
         private const val OPERATION_CONFIGURE = "configure"
+        private const val OPERATION_BIND_EXISTING = "bind_existing"
         private const val OPERATION_QUERY = "query"
         private const val DEFAULT_PROFILE_ID = "debug-runtime-provider"
         private const val DEFAULT_PROFILE_NAME = "OmniMind GPT 5.6 (Debug)"

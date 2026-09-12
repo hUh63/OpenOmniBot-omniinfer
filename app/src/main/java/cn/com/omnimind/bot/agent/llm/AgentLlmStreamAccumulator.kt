@@ -20,11 +20,19 @@ import cn.com.omnimind.baselib.llm.decodeChatCompletionUsage
 import java.util.SortedMap
 import java.util.TreeMap
 
+internal class AgentIncompleteToolCallException(
+    val toolCallIndex: Int
+) : IllegalStateException("tool_call[$toolCallIndex] missing function.name")
+
+internal class AgentProviderStreamException(
+    val statusCode: Int?,
+    val providerCode: String?,
+    message: String,
+) : IllegalStateException(message)
+
 class AgentLlmStreamAccumulator(
     private val json: Json,
     private val includeReasoningInAssistantMessage: Boolean = false,
-    private val bufferLeadingTextUntilInlineThinkTag: Boolean = false,
-    private val guardLeadingReasoningLeak: Boolean = false,
     private val captureAnthropicContentBlocks: Boolean = false,
     private val anthropicSourceModel: String? = null
 ) {
@@ -32,19 +40,6 @@ class AgentLlmStreamAccumulator(
         private const val TAG = "AgentLlmStreamAccumulator"
         private const val THINK_OPEN_TAG = "<think>"
         private const val THINK_CLOSE_TAG = "</think>"
-        private const val LEADING_VISIBLE_BUFFER_MAX_CHARS = 900
-        private const val LEADING_VISIBLE_BUFFER_MAX_CHUNKS = 6
-        private val INLINE_THINK_TAGS = listOf(THINK_OPEN_TAG, THINK_CLOSE_TAG)
-        private val LEADING_REASONING_LEAK_STRONG_PATTERNS = listOf(
-            Regex("# Understanding the User's Question", RegexOption.IGNORE_CASE)
-        )
-        private val LEADING_REASONING_LEAK_SECONDARY_PATTERNS = listOf(
-            Regex("The user is asking", RegexOption.IGNORE_CASE),
-            Regex("Let me consider", RegexOption.IGNORE_CASE),
-            Regex("I should provide", RegexOption.IGNORE_CASE),
-            Regex("Let me structure a response", RegexOption.IGNORE_CASE),
-            Regex("Given that the user", RegexOption.IGNORE_CASE)
-        )
     }
 
     private val contentBuffer = StringBuilder()
@@ -60,12 +55,14 @@ class AgentLlmStreamAccumulator(
     private var seenDoneSignal = false
     private var lastChunkPreview: String = ""
     private var thinkSectionOpen = false
-    private var inlineThinkTagObserved = false
     private var autoInlineThinkTagMode = false
-    private var leadingVisibleBufferChunks = 0
-    private var leadingVisibleBufferReleased = false
-    private var outOfBandReasoningObserved = false
     private var lastNamedToolCallIndex: Int? = null
+    /**
+     * Some OpenAI-compatible gateways send the same reasoning value through
+     * multiple aliases in one SSE object (`reasoning_content`, `reasoning`,
+     * and `thinking`). Those aliases describe one payload, not three deltas.
+     */
+    private val reasoningPayloadsInChunk = mutableSetOf<String>()
 
     private var chunkIndex = 0
 
@@ -85,6 +82,7 @@ class AgentLlmStreamAccumulator(
     }
 
     private fun consumeSingleChunk(trimmed: String): Boolean {
+        reasoningPayloadsInChunk.clear()
         if (trimmed == "[DONE]") {
             seenDoneSignal = true
             return true
@@ -106,6 +104,9 @@ class AgentLlmStreamAccumulator(
 
         extractProviderError(root)?.let { error ->
             providerError = error
+            // An explicit upstream failure terminates this response even if
+            // partial text/tool inputs were already emitted and EOF never arrives.
+            return true
         }
         usage = decodeUsage(root["usage"]) ?: usage
         decodeTokensPerSecond = decodeTimings(root["timings"]) ?: decodeTokensPerSecond
@@ -118,22 +119,26 @@ class AgentLlmStreamAccumulator(
             chunkHasPayload = chunkHasPayload || thisChoiceHasPayload
         }
 
-        // 兼容不同 Provider 的非标准 top-level text / message 回流
+        // 兼容不同 Provider 的非标准 top-level text / message 回流。
+        // reasoning 需要始终解析：部分网关会把正文放在 choices.delta，
+        // 同时把 reasoning 放在顶层；不能因为已经有正文就丢掉思考内容。
         if (!chunkHasPayload) {
             chunkHasPayload = appendTextPayload(root["text"]) || chunkHasPayload
             chunkHasPayload = appendTextPayload(root["message"]) || chunkHasPayload
             chunkHasPayload = appendTextPayload(root["output_text"]) || chunkHasPayload
-            appendReasoningPayload(root["reasoning_content"])
-            appendReasoningPayload(root["reasoning"])
-            appendReasoningPayload(root["thinking"])
+        }
+        appendReasoningPayload(root["reasoning_content"])
+        appendReasoningPayload(root["reasoning"])
+        appendReasoningPayload(root["thinking"])
 
-            val outputObj = root["output"] as? JsonObject
-            if (outputObj != null) {
+        val outputObj = root["output"] as? JsonObject
+        if (outputObj != null) {
+            if (!chunkHasPayload) {
                 chunkHasPayload = appendTextPayload(outputObj["text"]) || chunkHasPayload
                 chunkHasPayload = appendTextPayload(outputObj["content"]) || chunkHasPayload
-                appendReasoningPayload(outputObj["reasoning_content"])
-                appendReasoningPayload(outputObj["reasoning"])
             }
+            appendReasoningPayload(outputObj["reasoning_content"])
+            appendReasoningPayload(outputObj["reasoning"])
         }
 
         // Log parsed deltas
@@ -230,6 +235,17 @@ class AgentLlmStreamAccumulator(
 
     fun currentContent(): String = AgentTextSanitizer.sanitizeUtf16(contentBuffer.toString())
 
+    /** Partial input is display-only. Never invent an identity or parse it for execution. */
+    fun currentToolCalls(): List<AssistantToolCall> = toolCallBuilders.values.mapNotNull { builder ->
+        val id = builder.id?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        val name = builder.name?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        AssistantToolCall(
+            id = id,
+            type = builder.type ?: "function",
+            function = AssistantToolCallFunction(name = name, arguments = builder.arguments.toString()),
+        )
+    }
+
     fun hasDoneSignal(): Boolean = seenDoneSignal
 
     fun currentFinishReason(): String? = finishReason
@@ -245,20 +261,23 @@ class AgentLlmStreamAccumulator(
 
     fun canFinalizeOnClosed(): Boolean {
         return hasDoneSignal() ||
-            !finishReason.isNullOrBlank() ||
-            (hasUsagePayload() && hasAssistantPayload())
+            !finishReason.isNullOrBlank()
     }
 
     fun buildTurn(): ChatCompletionTurn {
         if (!seenChunk) {
             throw IllegalStateException("chat completion stream ended without chunks")
         }
+        providerError?.let { error ->
+            throw AgentProviderStreamException(error.statusCode, error.code, buildProviderErrorMessage(error))
+        }
         flushInlineTextBuffer(final = true)
         reconcileMisindexedToolCallArguments()
+        discardDanglingToolCallPlaceholders()
         val toolCalls = toolCallBuilders.entries.map { (index, builder) ->
             val name = builder.name?.trim().orEmpty()
             if (name.isBlank()) {
-                throw IllegalStateException("tool_call[$index] missing function.name")
+                throw AgentIncompleteToolCallException(index)
             }
             AssistantToolCall(
                 id = builder.id?.takeIf { it.isNotBlank() } ?: "tool_call_$index",
@@ -278,9 +297,6 @@ class AgentLlmStreamAccumulator(
             )
         }
         if (content.isBlank() && toolCalls.isEmpty()) {
-            providerError?.let { error ->
-                throw IllegalStateException(buildProviderErrorMessage(error))
-            }
             throw IllegalStateException(
                 "assistant turn has neither content nor tool_calls; finish_reason=${finishReason.orEmpty()}, last_chunk=$lastChunkPreview"
             )
@@ -339,6 +355,20 @@ class AgentLlmStreamAccumulator(
         val block = replay["block"] as? JsonObject ?: return false
         anthropicContentBlocks[index] = block
         return true
+    }
+
+    private fun discardDanglingToolCallPlaceholders() {
+        if (toolCallBuilders.values.none { !it.name.isNullOrBlank() }) return
+
+        val danglingIndices = toolCallBuilders.entries
+            .filter { (_, builder) ->
+                builder.name.isNullOrBlank() && builder.arguments.isEmpty()
+            }
+            .map { it.key }
+        danglingIndices.forEach { index ->
+            toolCallBuilders.remove(index)
+            OmniLog.w(TAG, "discarded dangling tool call placeholder at index=$index")
+        }
     }
 
     private fun reconcileMisindexedToolCallArguments() {
@@ -615,7 +645,9 @@ class AgentLlmStreamAccumulator(
         if (text.isEmpty()) {
             return
         }
-        markOutOfBandReasoningObserved()
+        if (!reasoningPayloadsInChunk.add(text)) {
+            return
+        }
         appendReasoningText(text)
     }
 
@@ -633,18 +665,10 @@ class AgentLlmStreamAccumulator(
         if (text.isEmpty()) {
             return
         }
-        if (shouldTrackLeadingVisibleGuard()) {
-            leadingVisibleBufferChunks++
-        }
-        if (shouldBufferLeadingInlineText()) {
-            inlineTextBuffer.append(text)
-            flushInlineTextBuffer(final = false)
-            return
-        }
         if (!autoInlineThinkTagMode && !thinkSectionOpen) {
-            val containsThinkTag = text.contains(THINK_OPEN_TAG) || text.contains(THINK_CLOSE_TAG)
-            val hasTrailingTagPrefix = partialInlineTagSuffixLength(text) > 0
-            if (!containsThinkTag && !hasTrailingTagPrefix) {
+            val hasOpenThinkTag = text.contains(THINK_OPEN_TAG)
+            val hasTrailingOpenTagPrefix = partialInlineOpenTagSuffixLength(text) > 0
+            if (!hasOpenThinkTag && !hasTrailingOpenTagPrefix) {
                 contentBuffer.append(text)
                 return
             }
@@ -655,7 +679,7 @@ class AgentLlmStreamAccumulator(
     }
 
     private fun flushInlineTextBuffer(final: Boolean) {
-        if (!autoInlineThinkTagMode && !bufferLeadingTextUntilInlineThinkTag) {
+        if (!autoInlineThinkTagMode) {
             if (inlineTextBuffer.isNotEmpty()) {
                 appendVisibleText(inlineTextBuffer.toString())
                 inlineTextBuffer.setLength(0)
@@ -671,7 +695,6 @@ class AgentLlmStreamAccumulator(
                     appendReasoningText(bufferText.substring(0, closeIndex))
                     inlineTextBuffer.delete(0, closeIndex + THINK_CLOSE_TAG.length)
                     thinkSectionOpen = false
-                    inlineThinkTagObserved = true
                     continue
                 }
 
@@ -698,32 +721,18 @@ class AgentLlmStreamAccumulator(
                 appendVisibleText(bufferText.substring(0, openIndex))
                 inlineTextBuffer.delete(0, openIndex + THINK_OPEN_TAG.length)
                 thinkSectionOpen = true
-                inlineThinkTagObserved = true
                 continue
             }
 
             if (closeIndex >= 0 && contentBuffer.isEmpty()) {
                 appendReasoningText(bufferText.substring(0, closeIndex))
                 inlineTextBuffer.delete(0, closeIndex + THINK_CLOSE_TAG.length)
-                inlineThinkTagObserved = true
                 continue
-            }
-
-            if (shouldApplyLeadingVisibleGuard()) {
-                detectLeadingReasoningLeak(bufferText)
-                if (final || shouldReleaseLeadingVisibleBuffer(bufferText)) {
-                    releaseLeadingVisibleBuffer(bufferText)
-                }
-                return
             }
 
             if (final) {
                 appendVisibleText(bufferText)
                 inlineTextBuffer.setLength(0)
-                return
-            }
-
-            if (shouldDelayVisibleInlineBufferCommit()) {
                 return
             }
 
@@ -738,90 +747,10 @@ class AgentLlmStreamAccumulator(
         }
     }
 
-    private fun shouldBufferLeadingInlineText(): Boolean {
-        return bufferLeadingTextUntilInlineThinkTag &&
-            !outOfBandReasoningObserved &&
-            !autoInlineThinkTagMode &&
-            !thinkSectionOpen &&
-            !inlineThinkTagObserved &&
-            !leadingVisibleBufferReleased &&
-            contentBuffer.isEmpty()
-    }
-
-    private fun shouldDelayVisibleInlineBufferCommit(): Boolean {
-        return !inlineThinkTagObserved &&
-            !outOfBandReasoningObserved &&
-            contentBuffer.isEmpty() &&
-            bufferLeadingTextUntilInlineThinkTag
-    }
-
-    private fun markOutOfBandReasoningObserved() {
-        if (outOfBandReasoningObserved) {
-            return
-        }
-        outOfBandReasoningObserved = true
-        if (
-            inlineTextBuffer.isNotEmpty() &&
-            !thinkSectionOpen &&
-            !inlineThinkTagObserved
-        ) {
-            appendVisibleText(inlineTextBuffer.toString())
-            inlineTextBuffer.setLength(0)
-        }
-    }
-
-    private fun shouldTrackLeadingVisibleGuard(): Boolean {
-        return guardLeadingReasoningLeak &&
-            !leadingVisibleBufferReleased &&
-            !inlineThinkTagObserved &&
-            !thinkSectionOpen &&
-            contentBuffer.isEmpty()
-    }
-
-    private fun shouldApplyLeadingVisibleGuard(): Boolean {
-        return guardLeadingReasoningLeak &&
-            !leadingVisibleBufferReleased &&
-            !inlineThinkTagObserved &&
-            !thinkSectionOpen &&
-            contentBuffer.isEmpty()
-    }
-
-    private fun shouldReleaseLeadingVisibleBuffer(bufferText: String): Boolean {
-        return bufferText.length >= LEADING_VISIBLE_BUFFER_MAX_CHARS ||
-            leadingVisibleBufferChunks >= LEADING_VISIBLE_BUFFER_MAX_CHUNKS
-    }
-
-    private fun releaseLeadingVisibleBuffer(bufferText: String) {
-        appendVisibleText(bufferText)
-        inlineTextBuffer.setLength(0)
-        leadingVisibleBufferReleased = true
-    }
-
-    private fun detectLeadingReasoningLeak(bufferText: String) {
-        val strongMatch = LEADING_REASONING_LEAK_STRONG_PATTERNS.firstOrNull {
-            it.containsMatchIn(bufferText)
-        }
-        if (strongMatch != null) {
-            throw AgentStreamReasoningLeakException(
-                "guarded route leaked reasoning-looking content before visible release: ${strongMatch.pattern}"
-            )
-        }
-        val secondaryMatches = LEADING_REASONING_LEAK_SECONDARY_PATTERNS.filter {
-            it.containsMatchIn(bufferText)
-        }
-        if (secondaryMatches.size < 2) {
-            return
-        }
-        throw AgentStreamReasoningLeakException(
-            "guarded route leaked reasoning-looking content before visible release: ${
-                secondaryMatches.joinToString(" + ") { it.pattern }
-            }"
-        )
-    }
 
     private fun partialInlineTagSuffixLength(text: String): Int {
         var longest = 0
-        INLINE_THINK_TAGS.forEach { tag ->
+        listOf(THINK_OPEN_TAG, THINK_CLOSE_TAG).forEach { tag ->
             val upperBound = minOf(text.length, tag.length - 1)
             for (candidate in upperBound downTo 1) {
                 if (text.endsWith(tag.substring(0, candidate))) {
@@ -833,11 +762,20 @@ class AgentLlmStreamAccumulator(
         return longest
     }
 
+    private fun partialInlineOpenTagSuffixLength(text: String): Int {
+        val upperBound = minOf(text.length, THINK_OPEN_TAG.length - 1)
+        for (candidate in upperBound downTo 1) {
+            if (text.endsWith(THINK_OPEN_TAG.substring(0, candidate))) {
+                return candidate
+            }
+        }
+        return 0
+    }
+
     private fun appendVisibleText(text: String) {
         if (text.isEmpty()) {
             return
         }
-        leadingVisibleBufferReleased = true
         contentBuffer.append(text)
     }
 
@@ -845,7 +783,18 @@ class AgentLlmStreamAccumulator(
         if (text.isEmpty()) {
             return
         }
-        reasoningBuffer.append(text)
+        val existing = reasoningBuffer.toString()
+        when {
+            existing.isEmpty() -> reasoningBuffer.append(text)
+            // A few gateways expose cumulative snapshots instead of deltas.
+            // Only append the suffix that was not already accumulated.
+            text.startsWith(existing) -> reasoningBuffer.append(text.removePrefix(existing))
+            // A shorter snapshot is a replay/reset of the current provider
+            // value. Keep the already received text; the next snapshot will
+            // either extend it or the stream will complete with this value.
+            existing.startsWith(text) -> Unit
+            else -> reasoningBuffer.append(text)
+        }
     }
 
     private fun extractText(element: JsonElement?): String? {

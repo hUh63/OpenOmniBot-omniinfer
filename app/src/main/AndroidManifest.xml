@@ -115,15 +115,6 @@
             android:windowSoftInputMode="adjustResize" />
 
         <activity
-            android:name=".activity.PluginAppActivity"
-            android:documentLaunchMode="intoExisting"
-            android:exported="true"
-            android:launchMode="standard"
-            android:taskAffinity="cn.com.omnimind.bot.vibe"
-            android:theme="@style/Theme.OmnibotApp"
-            android:windowSoftInputMode="adjustResize" />
-
-        <activity
             android:name=".activity.QuickLogEntryActivity"
             android:exported="true"
             android:excludeFromRecents="true"
@@ -182,15 +173,6 @@
             </intent-filter>
         </receiver>
         <receiver
-            android:name=".im.ImChannelBootReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
-        <receiver
             android:name=".quicklog.QuickLogWidgetProvider"
             android:enabled="true"
             android:exported="false">
@@ -221,7 +203,7 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
         <service
-            android:name=".im.ImChannelForegroundService"
+            android:name="cn.com.omnimind.bot.task.runtime.TaskRuntimeService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

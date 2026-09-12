@@ -10,6 +10,78 @@ import java.io.File
 import java.nio.file.Files
 
 class EnvironmentSetupLogicTest {
+    @Test
+    fun inventoryParsing_preservesEmptyVersionsAndUnknownStatus() {
+        val parsed = EnvironmentSetupLogic.parseInventoryProbeOutput(
+            "noise\n__OMNI_ENV__\tnpm\tMISSING\t\n" +
+                "__OMNI_ENV__\tgit\tREADY\t\r\n" +
+                "__OMNI_ENV__\tpython\tERROR\t\n" +
+                "__OMNI_ENV__\tuv\tINVALID\tno\n" +
+                "__OMNI_ENV__\tpip\tMISSING"
+        )
+        assertEquals(false, parsed.getValue("npm").ready)
+        assertEquals(true, parsed.getValue("git").ready)
+        assertEquals(null, parsed.getValue("git").version)
+        assertEquals(null, parsed.getValue("python").ready)
+        assertEquals(false, parsed.getValue("pip").ready)
+        assertTrue(!parsed.containsKey("uv"))
+    }
+
+    @Test
+    fun inventoryProbe_checksExitStatusAndContinuesAfterComponentFailure() {
+        // The host macOS has no /root; emulate only the core cwd check.
+        val command = "cd() { :; }; git() { echo broken-binary; return 7; }; ssh() { echo OpenSSH-test; };\n" +
+            EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("git", "ssh_client"))
+        val shell = if (File("/bin/dash").canExecute()) "/bin/dash" else "/bin/sh"
+        val process = ProcessBuilder(shell, "-c", command).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertEquals(output, 0, process.waitFor())
+        val parsed = EnvironmentSetupLogic.parseInventoryProbeOutput(output)
+        assertEquals(null, parsed.getValue("git").ready)
+        assertEquals(null, parsed.getValue("git").version)
+        assertEquals(true, parsed.getValue("ssh_client").ready)
+        assertEquals("OpenSSH-test", parsed.getValue("ssh_client").version)
+    }
+
+    @Test
+    fun inventoryProbe_isolatesBadSubstitutionAndAcceptsEmptySuccessfulVersion() {
+        val command = "cd() { :; }; git() { eval 'echo ${'$'}{broken!}'; }; ssh() { :; };\n" +
+            EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("git", "ssh_client"))
+        val shell = if (File("/bin/dash").canExecute()) "/bin/dash" else "/bin/sh"
+        val process = ProcessBuilder(shell, "-c", command).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertEquals(output, 0, process.waitFor())
+        val parsed = EnvironmentSetupLogic.parseInventoryProbeOutput(output)
+        assertEquals(null, parsed.getValue("git").ready)
+        assertEquals(true, parsed.getValue("ssh_client").ready)
+        assertEquals(null, parsed.getValue("ssh_client").version)
+    }
+
+    @Test
+    fun inventoryProbe_coreFailureRemainsFatal() {
+        val process = ProcessBuilder("/bin/sh", "-c", "cd() { return 1; };\n" +
+            EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("git")))
+            .redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertTrue(output, process.waitFor() != 0)
+        assertTrue(EnvironmentSetupLogic.parseInventoryProbeOutput(output).isEmpty())
+    }
+
+    @Test
+    fun deepSeekHealthProbe_executesPathExpansionInShell() {
+        // Make the installed-package branch reachable without installing tools.
+        val command = "dsh() { :; }; test() { return 0; }; " +
+            EnvironmentSetupLogic.packageDefinitions.single { it.id == "deepseek_harness" }.command +
+            "\nprintf 'probe-finished\n'"
+        val shell = if (File("/bin/dash").canExecute()) "/bin/dash" else "/bin/sh"
+        val process = ProcessBuilder(shell, "-c", command)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertEquals(output, 0, process.waitFor())
+        assertTrue(output, output.contains("probe-finished"))
+    }
+
 
     @Test
     fun buildInstallCommands_usesAlpinePackagesAndUvBootstrap() {
@@ -111,7 +183,8 @@ class EnvironmentSetupLogicTest {
     fun buildInstallCommands_installsClaudeCodeAndOpenCodeInManagedNpmPath() {
         val commands = EnvironmentSetupLogic.buildInstallCommands(
             selectedPackageIds = listOf("claude_code", "opencode"),
-            repositorySetupCommand = ""
+            repositorySetupCommand = "",
+            harnessInstallCommands = mapOf("opencode" to "catalog-opencode-installer")
         )
 
         val apkAdd = commands.first { it.contains("omnibot_apk_add") }
@@ -120,19 +193,15 @@ class EnvironmentSetupLogicTest {
         assertTrue(commands.count { it == "npm config set prefix /root/.npm-global" } == 1)
         assertTrue(
             commands.contains(
-                "npm install -g --no-audit --no-fund @anthropic-ai/claude-code@latest"
+                "npm install -g --no-audit --no-fund @agentclientprotocol/claude-agent-acp@latest"
             )
         )
         assertTrue(
             commands.contains(
-                "ln -sf /root/.npm-global/bin/claude /usr/local/bin/claude || true"
+                "ln -sf /root/.npm-global/bin/claude-agent-acp /usr/local/bin/claude-agent-acp || true"
             )
         )
-        assertTrue(
-            commands.contains(
-                "npm install -g --no-audit --no-fund opencode-ai@latest"
-            )
-        )
+        assertTrue(commands.contains("catalog-opencode-installer"))
         assertTrue(
             commands.contains(
                 "ln -sf /root/.npm-global/bin/opencode /usr/local/bin/opencode || true"
@@ -147,35 +216,41 @@ class EnvironmentSetupLogicTest {
         )
 
         assertTrue(command.contains("/root/.npm-global/bin"))
-        assertTrue(command.contains("command -v claude"))
-        assertTrue(command.contains("claude --version"))
+        assertTrue(command.contains("command -v claude-agent-acp"))
+        assertTrue(!command.contains("claude-agent-acp --version"))
         assertTrue(command.contains("command -v opencode"))
         assertTrue(command.contains("opencode --version"))
     }
 
     @Test
-    fun buildInstallCommands_installsLatestDeepSeekHarnessRuntime() {
+    fun buildInstallCommands_installsOfficialDeepSeekAcpWithoutResettingProfiles() {
         val commands = EnvironmentSetupLogic.buildInstallCommands(
             selectedPackageIds = listOf("deepseek_harness"),
-            repositorySetupCommand = ""
+            repositorySetupCommand = "",
+            harnessInstallCommands = mapOf(
+                "deepseek_harness" to File("src/main/assets/acp/install/deepseek-harness.sh").readText(),
+            ),
         )
-
-        val apkAdd = commands.first { it.contains("omnibot_apk_add") }
-        assertTrue(apkAdd.contains("nodejs"))
-        assertTrue(apkAdd.contains("npm"))
-        assertTrue(apkAdd.contains("build-base"))
-        assertTrue(apkAdd.contains("python3"))
-        val npmInstall = commands.first { it.contains("install_deepseek_harness_packages") }
-        assertTrue(npmInstall.contains("@deepseek-ai/dsh-acp-demo@next"))
-        assertTrue(npmInstall.contains("@deepseek-ai/dsh-llm-deepseek@next"))
-        assertTrue(!npmInstall.contains("0.1.0-rc.6"))
-        assertTrue(npmInstall.contains("omnibot-node-gyp-copy"))
-        assertTrue(npmInstall.contains("exec /bin/ln"))
-        assertTrue(
-            commands.contains(
-                "ln -sf /root/.npm-global/bin/dsh-acp-demo /usr/local/bin/dsh-acp-demo || true"
-            )
-        )
+        val install = commands.first { it.contains("@deepseek-ai/dsh@0.1.5-rc.1") }
+        assertTrue(install.contains("@deepseek-ai/dsh-acp-app/cordis.patch.yml"))
+        assertTrue(install.contains("dsh-acp-android --profile acp --help"))
+        assertTrue(install.contains("profiles/acp/package.json"))
+        assertTrue(install.contains("profiles/acp/cordis.patch.yml"))
+        assertTrue(install.contains("--expose-internals"))
+        assertTrue(install.contains("dsh-acp-android"))
+        assertTrue(install.contains("node-pty"))
+        assertTrue(install.contains("npm rebuild --prefix"))
+        assertTrue(install.contains("command -v apk"))
+        assertTrue(install.contains("command -v apt-get"))
+        assertTrue(install.contains("registry.npmmirror.com"))
+        assertTrue(install.contains("registry.npmjs.org"))
+        assertTrue(!install.contains("@openma/"))
+        assertTrue(!install.contains("dsh plugin"))
+        assertTrue(!install.contains("headless.patch"))
+        assertTrue(!install.contains("PROFILE_LAYOUT_MARKER"))
+        assertTrue(!install.contains("rm -rf"))
+        assertTrue(!install.contains("pnpm install"))
+        assertTrue(!install.contains("npm cache clean"))
     }
 
     @Test
@@ -184,12 +259,42 @@ class EnvironmentSetupLogicTest {
             listOf("deepseek_harness")
         )
 
-        assertTrue(command.contains("command -v dsh-acp-demo"))
-        assertTrue(command.contains("@deepseek-ai/dsh-acp-demo/package.json"))
-        assertTrue(command.contains("@deepseek-ai/dsh-user-approval/package.json"))
-        assertTrue(command.contains("node-pty"))
-        assertTrue(command.contains("createRequire"))
-        assertTrue(command.contains("node -p"))
+        assertTrue(command.contains("command -v dsh"))
+        assertTrue(command.contains("command -v dsh-acp-android"))
+        assertTrue(command.contains("profiles/acp/package.json"))
+        assertTrue(command.contains("@deepseek-ai/dsh-acp-app"))
+        assertTrue(!command.contains("await import('@openma/deepseek-harness-acp/plugin')"))
+        assertTrue(!command.contains("await import('@openma/deepseek-harness-acp/stdio')"))
+    }
+
+    @Test
+    fun buildInstallCommands_installsOfficialKimiCodeRuntime() {
+        val commands = EnvironmentSetupLogic.buildInstallCommands(
+            selectedPackageIds = listOf("kimi"),
+            repositorySetupCommand = "",
+        )
+
+        val apkAdd = commands.first { it.contains("omnibot_apk_add") }
+        assertTrue(apkAdd.contains("nodejs"))
+        assertTrue(apkAdd.contains("npm"))
+        assertTrue(apkAdd.contains("git"))
+        val npmInstall = commands.first { it.contains("@moonshot-ai/kimi-code@latest") }
+        assertTrue(npmInstall.contains("--no-audit"))
+        assertTrue(npmInstall.contains("registry.npmmirror.com"))
+        assertTrue(
+            commands.contains(
+                "ln -sf /root/.npm-global/bin/kimi /usr/local/bin/kimi || true",
+            ),
+        )
+    }
+
+    @Test
+    fun buildInventoryProbeCommand_requiresKimiCodeNodeVersion() {
+        val command = EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("kimi"))
+
+        assertTrue(command.contains("command -v kimi"))
+        assertTrue(command.contains("major === 22 && minor < 19"))
+        assertTrue(command.contains("kimi --version"))
     }
 
     @Test
@@ -253,7 +358,11 @@ class EnvironmentSetupLogicTest {
         val commands = EnvironmentSetupLogic.buildInstallCommands(
             selectedPackageIds = listOf("deepseek_harness"),
             repositorySetupCommand = "",
-            workingMode = WorkingMode.UBUNTU
+            workingMode = WorkingMode.UBUNTU,
+            harnessInstallCommands = mapOf(
+                "deepseek_harness" to
+                    File("src/main/assets/acp/install/deepseek-harness.sh").readText(),
+            ),
         )
 
         val aptInstall = commands.last { it.startsWith("apt-get update") }
@@ -287,8 +396,7 @@ class EnvironmentSetupLogicTest {
         assertTrue(script.contains("node -e 'process.cwd();"))
         assertTrue(script.contains("python3 -c 'import os; os.getcwd()'"))
         assertTrue(script.contains("pip3 --version"))
-        assertTrue(script.contains("setup_status=${'$'}?"))
-        assertTrue(script.contains("|| return \"${'$'}setup_status\""))
+        assertTrue(script.contains("/bin/sh -e -c"))
         assertTrue(script.indexOf("run_setup && run_validate") < script.indexOf("选中的环境已准备完成"))
     }
 
@@ -304,7 +412,15 @@ class EnvironmentSetupLogicTest {
     @Test
     fun buildSetupScript_isShellSafeForEveryPackageCombination() {
         val packageIds = EnvironmentSetupLogic.packageDefinitions.map { it.id }
-        val tempDir = Files.createTempDirectory("omni-setup-script-test").toFile()
+        val workingModes = listOf(WorkingMode.ALPINE, WorkingMode.UBUNTU)
+        val processes = workingModes.associateWith { workingMode ->
+            ProcessBuilder("/bin/sh", "-n")
+                .redirectErrorStream(true)
+                .start()
+        }
+        val writers = processes.mapValues { (_, process) ->
+            process.outputStream.bufferedWriter()
+        }
 
         try {
             val total = 1 shl packageIds.size
@@ -312,7 +428,7 @@ class EnvironmentSetupLogicTest {
                 val selectedPackageIds = packageIds.filterIndexed { index, _ ->
                     mask and (1 shl index) != 0
                 }
-                listOf(WorkingMode.ALPINE, WorkingMode.UBUNTU).forEach { workingMode ->
+                workingModes.forEach { workingMode ->
                     val repositorySetupCommand = if (workingMode == WorkingMode.UBUNTU) {
                         UbuntuRepositoryManager.buildRepositorySetupCommand(
                             UbuntuPackageMirror.TSINGHUA
@@ -323,32 +439,38 @@ class EnvironmentSetupLogicTest {
                     val distroCommands = EnvironmentSetupLogic.buildInstallCommands(
                         selectedPackageIds = selectedPackageIds,
                         repositorySetupCommand = repositorySetupCommand,
+                        workingMode = workingMode,
+                        harnessInstallCommands = mapOf(
+                            "deepseek_harness" to File("src/main/assets/acp/install/deepseek-harness.sh").readText(),
+                            "opencode" to File("src/main/assets/acp/install/opencode.sh").readText(),
+                        ),
+                    )
+                    val script = EnvironmentSetupLogic.buildSetupScript(
+                        commands = distroCommands,
+                        selectedPackageIds = selectedPackageIds,
                         workingMode = workingMode
                     )
-                    val scriptFile = File(tempDir, "setup-$workingMode-$mask.sh")
-                    scriptFile.writeText(
-                        EnvironmentSetupLogic.buildSetupScript(
-                            commands = distroCommands,
-                            selectedPackageIds = selectedPackageIds,
-                            workingMode = workingMode
-                        )
-                    )
-
-                    val process = ProcessBuilder("/bin/sh", "-n", scriptFile.absolutePath)
-                        .redirectErrorStream(true)
-                        .start()
-                    val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-                    val exitCode = process.waitFor()
-
-                    assertEquals(
-                        "Shell syntax check failed for mode=$workingMode $selectedPackageIds: $output",
-                        0,
-                        exitCode
-                    )
+                    val writer = writers.getValue(workingMode)
+                    writer.write("# combination mask=$mask\n")
+                    writer.write(script)
+                    writer.write("\n")
                 }
             }
         } finally {
-            tempDir.deleteRecursively()
+            writers.values.forEach { writer ->
+                runCatching { writer.close() }
+            }
+        }
+
+        processes.forEach { (workingMode, process) ->
+            val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            val exitCode = process.waitFor()
+
+            assertEquals(
+                "Shell syntax check failed for mode=$workingMode: $output",
+                0,
+                exitCode
+            )
         }
     }
 }

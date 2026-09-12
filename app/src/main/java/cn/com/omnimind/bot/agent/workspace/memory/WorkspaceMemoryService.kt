@@ -32,6 +32,7 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
@@ -57,7 +58,9 @@ data class WorkspaceMemorySearchHit(
     val text: String,
     val source: String,
     val date: String?,
-    val score: Double
+    val score: Double,
+    /** Stable long-term entry slug; null for daily memory and lesson chunks. */
+    val slug: String? = null
 )
 
 data class WorkspaceMemorySearchResult(
@@ -71,7 +74,6 @@ data class WorkspaceMemoryPromptContext(
     val soul: String,
     val longTermMemory: String,
     val todayShortMemory: String,
-    val longTermIndexSummary: String = ""
 )
 
 data class WorkspaceShortMemoryEntry(
@@ -93,7 +95,8 @@ internal data class MemoryChunk(
     val id: String,
     val source: String,
     val date: String?,
-    val text: String
+    val text: String,
+    val slug: String? = null
 )
 
 internal data class MemoryIndexEntry(
@@ -101,6 +104,7 @@ internal data class MemoryIndexEntry(
     val source: String,
     val date: String?,
     val text: String,
+    val slug: String? = null,
     val embedding: List<Double> = emptyList(),
     val embeddingConfigId: String? = null,
     val embeddingDimensions: Int? = null,
@@ -135,6 +139,7 @@ internal fun MemoryIndexEntry.canReuseFor(
     shouldRequestEmbeddings: Boolean,
 ): Boolean {
     if (text != chunk.text) return false
+    if (slug != chunk.slug) return false
     if (!config.configured || !shouldRequestEmbeddings) return true
     val storedDimensions = embeddingDimensions ?: return false
     return requestedEmbeddingConfigId != null &&
@@ -162,6 +167,13 @@ internal fun cosineSimilarity(a: List<Double>, b: List<Double>): Double {
     if (normA <= 0 || normB <= 0) return 0.0
     return dot / (sqrt(normA) * sqrt(normB))
 }
+
+/** Every persisted short-memory day participates in semantic recall. */
+internal fun shortMemoryFilesForIndex(files: Array<File>?): List<File> =
+    files
+        ?.filter { it.isFile && it.name.endsWith(".md") }
+        ?.sortedByDescending { it.name }
+        .orEmpty()
 
 internal fun explicitByokEmbeddingProfile(
     bindingProviderProfileId: String?,
@@ -195,10 +207,6 @@ class WorkspaceMemoryService(
         private const val KEY_ROLLUP_ENABLED = "workspace_memory_rollup_enabled_v1"
         private const val KEY_ROLLUP_LAST_RUN_AT = "workspace_memory_rollup_last_run_at_v1"
         private const val KEY_ROLLUP_LAST_SUMMARY = "workspace_memory_rollup_last_summary_v1"
-        private const val MAX_ROLLUP_LONG_TERM_CANDIDATES = 8
-        // Minimum normalized length before we treat substring containment as a
-        // duplicate — avoids a very short entry swallowing unrelated ones.
-        private const val DEDUP_MIN_CONTAINMENT_LEN = 8
         private val QUICK_LOG_MARKER_REGEX =
             Regex("^\\[quick-log:([A-Za-z0-9-]+)]\\s*(.*)$")
         private val DAILY_TIME_PREFIX_REGEX =
@@ -207,6 +215,9 @@ class WorkspaceMemoryService(
             Regex("^(?:Quick log|\\u65e5\\u5fd7\\u901f\\u8bb0)[:\\uff1a]?\\s*", RegexOption.IGNORE_CASE)
         private val SHORT_MEMORY_FILE_DATE_FORMAT =
             DateTimeFormatter.ofPattern("yy-MM-dd")
+        // Services are created per request, so this lock must be process-wide
+        // to protect read-modify-write memory updates across ACP agents.
+        private val MEMORY_WRITE_LOCKS = ConcurrentHashMap<String, Any>()
     }
 
     private val gson = Gson()
@@ -217,6 +228,11 @@ class WorkspaceMemoryService(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
     private val platformEmbeddingGateway = PlatformEmbeddingGateway()
+
+    private fun memoryWriteLock(): Any {
+        val key = context.applicationContext.filesDir.absolutePath
+        return MEMORY_WRITE_LOCKS.getOrPut(key) { Any() }
+    }
 
     private fun currentLocale(): PromptLocale = AppLocaleManager.resolvePromptLocale(context)
 
@@ -266,7 +282,9 @@ class WorkspaceMemoryService(
 
     fun writeLongTermMemory(content: String) {
         ensureInitialized()
-        workspaceManager.longTermMemoryMarkdownFile().writeText(content.trimEnd() + "\n")
+        synchronized(memoryWriteLock()) {
+            workspaceManager.longTermMemoryMarkdownFile().writeText(content.trimEnd() + "\n")
+        }
     }
 
     fun readDailyMemory(date: LocalDate = LocalDate.now()): String {
@@ -283,54 +301,44 @@ class WorkspaceMemoryService(
         date: LocalDate = LocalDate.now()
     ): File {
         ensureInitialized()
-        val normalized = text.trim()
-        require(normalized.isNotEmpty()) { "memory text is empty" }
-        val file = workspaceManager.dailyShortMemoryFile(date)
-        if (!file.exists()) {
-            file.parentFile?.mkdirs()
-            file.writeText(
-                "# ${date.format(DateTimeFormatter.ISO_LOCAL_DATE)} Daily Memory\n\n"
-            )
+        return synchronized(memoryWriteLock()) {
+            val normalized = text.trim()
+            require(normalized.isNotEmpty()) { "memory text is empty" }
+            val file = workspaceManager.dailyShortMemoryFile(date)
+            if (!file.exists()) {
+                file.parentFile?.mkdirs()
+                file.writeText(
+                    "# ${date.format(DateTimeFormatter.ISO_LOCAL_DATE)} Daily Memory\n\n"
+                )
+            }
+            val timestamp = DateTimeFormatter.ofPattern("HH:mm:ss")
+                .format(LocalDateTime.now())
+            file.appendText("- [$timestamp] $normalized\n")
+            file
         }
-        val timestamp = DateTimeFormatter.ofPattern("HH:mm:ss")
-            .format(LocalDateTime.now())
-        file.appendText("- [$timestamp] $normalized\n")
-        return file
-    }
-
-    /**
-     * Append a short-term memory only if it is not a near-duplicate of an entry
-     * already written today (exact normalized match, or mutual substring once
-     * both sides are long enough). Used by the per-turn reflection writer so
-     * recurring facts ("user prefers Chinese") don't pile up every turn.
-     * Returns true when a new line was written.
-     */
-    fun appendDailyMemoryIfNovel(
-        text: String,
-        date: LocalDate = LocalDate.now()
-    ): Boolean {
-        ensureInitialized()
-        val normalized = text.trim()
-        if (normalized.isEmpty()) return false
-        val key = normalizeText(normalized)
-        if (key.isEmpty()) return false
-        val existingKeys = parseDailyShortMemoryEntries(date, readDailyMemory(date))
-            .map { normalizeText(it.content) }
-            .filter { it.isNotEmpty() }
-        if (isDuplicateNormalized(key, existingKeys)) return false
-        appendDailyMemory(normalized, date)
-        return true
     }
 
     fun listShortMemoryEntries(
-        days: Int = 14,
-        limit: Int = 240
+        days: Int? = null,
+        limit: Int? = null
     ): List<WorkspaceShortMemoryEntry> {
         ensureInitialized()
         val now = LocalDate.now()
         val entries = mutableListOf<WorkspaceShortMemoryEntry>()
-        for (offset in 0 until days.coerceIn(1, 90)) {
-            val date = now.minusDays(offset.toLong())
+        val dates = days?.let { requestedDays ->
+            generateSequence(0) { offset -> offset + 1 }
+                .take(requestedDays.coerceAtLeast(0))
+                .map { offset -> now.minusDays(offset.toLong()) }
+                .toList()
+        } ?: workspaceManager.shortMemoriesDirectory()
+            .listFiles()
+            .orEmpty()
+            .asSequence()
+            .filter { file -> file.isFile && file.name.endsWith(".md") }
+            .mapNotNull { file -> parseLocalDateFromFileName(file.nameWithoutExtension) }
+            .sortedDescending()
+            .toList()
+        dates.forEach { date ->
             entries += parseDailyShortMemoryEntries(
                 date = date,
                 content = readDailyMemory(date)
@@ -344,7 +352,36 @@ class WorkspaceMemoryService(
         return sorted.filter { entry ->
             val quickLogId = entry.quickLogId
             quickLogId == null || seenQuickLogIds.add(quickLogId)
-        }.take(limit.coerceIn(1, 1000))
+        }.let { uniqueEntries ->
+            limit?.let(uniqueEntries::take) ?: uniqueEntries
+        }
+    }
+
+    fun deleteShortMemoryEntries(expected: List<WorkspaceShortMemoryEntry>): Int {
+        ensureInitialized()
+        require(expected.isNotEmpty()) { "No memories selected" }
+        return synchronized(memoryWriteLock()) {
+            // Resolve all targets against unchanged snapshots before rewriting any day.
+            val plans = expected.groupBy { it.date }.map { (dateText, requested) ->
+                val date = LocalDate.parse(dateText, DateTimeFormatter.ISO_LOCAL_DATE)
+                val file = workspaceManager.dailyShortMemoryFile(date)
+                require(file.isFile) { "Memory changed; reload before deleting" }
+                val content = file.readText()
+                val entries = parseDailyShortMemoryEntries(date, content)
+                val indexes = selectShortMemoryIndexes(entries, requested)
+                val updated = removeShortMemoryBlocks(content, indexes) { line ->
+                    parseDailyShortMemoryEntries(date, line).isNotEmpty()
+                }
+                Triple(file, updated, indexes.size)
+            }
+            plans.forEach { (file, content, _) -> file.writeText(content) }
+            // Remove affected derived chunks immediately; the existing search path
+            // rebuilds them from the remaining source text on its next query.
+            val sources = plans.map { ".omnibot/memory/short-memories/${it.first.name}" }.toSet()
+            val indexFile = File(workspaceManager.memoryIndexDirectory(), "index.json")
+            if (indexFile.exists()) saveIndex(indexFile, loadIndex(indexFile).filterNot { it.source in sources })
+            plans.sumOf { it.third }
+        }
     }
 
     fun appendQuickLogMemory(
@@ -358,23 +395,25 @@ class WorkspaceMemoryService(
         require(normalizedLogId.isNotEmpty()) { "log id is empty" }
         require(normalizedContent.isNotEmpty()) { "memory text is empty" }
 
-        val file = workspaceManager.dailyShortMemoryFile(date)
-        if (!file.exists()) {
-            file.parentFile?.mkdirs()
-            file.writeText("# ${date.format(DateTimeFormatter.ISO_LOCAL_DATE)} Daily Memory\n\n")
+        return synchronized(memoryWriteLock()) {
+            val file = workspaceManager.dailyShortMemoryFile(date)
+            if (!file.exists()) {
+                file.parentFile?.mkdirs()
+                file.writeText("# ${date.format(DateTimeFormatter.ISO_LOCAL_DATE)} Daily Memory\n\n")
+            }
+            val timestamp = DateTimeFormatter.ofPattern("HH:mm:ss").format(LocalDateTime.now())
+            file.appendText("- [$timestamp] ${buildQuickLogBody(normalizedLogId, normalizedContent)}\n")
+            parseDailyShortMemoryEntries(date, file.readText())
+                .lastOrNull { it.quickLogId == normalizedLogId }
+                ?: WorkspaceShortMemoryEntry(
+                    id = normalizedLogId,
+                    date = date.format(DateTimeFormatter.ISO_LOCAL_DATE),
+                    time = timestamp,
+                    content = normalizedContent,
+                    timestampMillis = parseTimestampMillis(date, timestamp),
+                    quickLogId = normalizedLogId
+                )
         }
-        val timestamp = DateTimeFormatter.ofPattern("HH:mm:ss").format(LocalDateTime.now())
-        file.appendText("- [$timestamp] ${buildQuickLogBody(normalizedLogId, normalizedContent)}\n")
-        return parseDailyShortMemoryEntries(date, file.readText())
-            .lastOrNull { it.quickLogId == normalizedLogId }
-            ?: WorkspaceShortMemoryEntry(
-                id = normalizedLogId,
-                date = date.format(DateTimeFormatter.ISO_LOCAL_DATE),
-                time = timestamp,
-                content = normalizedContent,
-                timestampMillis = parseTimestampMillis(date, timestamp),
-                quickLogId = normalizedLogId
-            )
     }
 
     fun updateQuickLogMemory(
@@ -394,22 +433,24 @@ class WorkspaceMemoryService(
             ?.sortedByDescending { it.name }
             .orEmpty()
 
-        candidateFiles.forEach { file ->
-            val date = parseLocalDateFromFileName(file.nameWithoutExtension) ?: return@forEach
-            val lines = file.readLines().toMutableList()
-            val updated = updateQuickLogLineInMemoryFile(
-                lines = lines,
-                normalizedLogId = normalizedLogId,
-                normalizedPreviousContent = normalizeQuickLogContent(previousContent),
-                normalizedNewContent = normalizedNewContent
-            )
-            if (updated) {
-                writeDailyMemoryLines(file, lines)
-                return parseDailyShortMemoryEntries(date, file.readText())
-                    .firstOrNull { it.quickLogId == normalizedLogId }
+        return synchronized(memoryWriteLock()) {
+            candidateFiles.forEach { file ->
+                val date = parseLocalDateFromFileName(file.nameWithoutExtension) ?: return@forEach
+                val lines = file.readLines().toMutableList()
+                val updated = updateQuickLogLineInMemoryFile(
+                    lines = lines,
+                    normalizedLogId = normalizedLogId,
+                    normalizedPreviousContent = normalizeQuickLogContent(previousContent),
+                    normalizedNewContent = normalizedNewContent
+                )
+                if (updated) {
+                    writeDailyMemoryLines(file, lines)
+                    return@synchronized parseDailyShortMemoryEntries(date, file.readText())
+                        .firstOrNull { it.quickLogId == normalizedLogId }
+                }
             }
+            null
         }
-        return null
     }
 
     fun deleteQuickLogMemory(logId: String, contentHint: String): Boolean {
@@ -423,66 +464,47 @@ class WorkspaceMemoryService(
             ?.sortedByDescending { it.name }
             .orEmpty()
 
-        candidateFiles.forEach { file ->
-            val lines = file.readLines().toMutableList()
-            val deleted = deleteQuickLogLineFromMemoryFile(
-                lines = lines,
-                normalizedLogId = normalizedLogId,
-                normalizedContentHint = normalizeQuickLogContent(contentHint)
-            )
-            if (deleted) {
-                writeDailyMemoryLines(file, lines)
-                return true
+        return synchronized(memoryWriteLock()) {
+            candidateFiles.forEach { file ->
+                val lines = file.readLines().toMutableList()
+                val deleted = deleteQuickLogLineFromMemoryFile(
+                    lines = lines,
+                    normalizedLogId = normalizedLogId,
+                    normalizedContentHint = normalizeQuickLogContent(contentHint)
+                )
+                if (deleted) {
+                    writeDailyMemoryLines(file, lines)
+                    return@synchronized true
+                }
             }
+            false
         }
-        return false
     }
 
-    fun upsertLongTermMemory(text: String): Boolean {
+    fun appendLongTermMemory(text: String): Boolean {
         ensureInitialized()
         val normalized = text.trim()
         require(normalized.isNotEmpty()) { "memory text is empty" }
         val file = workspaceManager.longTermMemoryMarkdownFile()
-        val current = file.readText()
-        val existingKeys = current.lineSequence()
-            .map { it.trim() }
-            .filter { it.startsWith("- ") }
-            .map { normalizeText(it.removePrefix("- ").trim()) }
-            .filter { it.isNotEmpty() }
-            .toList()
-        if (isDuplicateNormalized(normalizeText(normalized), existingKeys)) {
-            return false
+        return synchronized(memoryWriteLock()) {
+            file.appendText("- $normalized\n")
+            true
         }
-        file.appendText("- $normalized\n")
-        return true
     }
 
-    fun buildPromptContext(
-        maxLongChars: Int = 2400,
-        maxDailyChars: Int = 1400
-    ): WorkspaceMemoryPromptContext {
+    fun buildPromptContext(): WorkspaceMemoryPromptContext {
         ensureInitialized()
         val soul = readSoul().trim()
-        val longMemory = truncateText(
-            readLongTermMemory().trim(),
-            maxLongChars
-        )
-        val todayDaily = truncateText(
-            summarizeTodayShortMemory(),
-            maxDailyChars
-        )
-        val indexSummary = runCatching {
-            LongTermMemoryIndex(workspaceManager).summaryForPrompt()
-        }.getOrDefault("")
+        val longMemory = readLongTermMemory().trim()
+        val todayDaily = summarizeTodayShortMemory()
         return WorkspaceMemoryPromptContext(
             soul = soul,
             longTermMemory = longMemory,
             todayShortMemory = todayDaily,
-            longTermIndexSummary = indexSummary
         )
     }
 
-    fun searchMemory(query: String, limit: Int = 8): WorkspaceMemorySearchResult {
+    fun searchMemory(query: String, limit: Int = Int.MAX_VALUE): WorkspaceMemorySearchResult {
         ensureInitialized()
         val normalizedQuery = query.trim()
         require(normalizedQuery.isNotEmpty()) { "query is empty" }
@@ -526,10 +548,11 @@ class WorkspaceMemoryService(
                 text = entry.text,
                 source = entry.source,
                 date = entry.date,
-                score = score
+                score = score,
+                slug = entry.slug
             )
         }.sortedByDescending { it.score }
-            .take(limit.coerceIn(1, 20))
+            .take(limit)
             .filter { it.score > 0.01 }
 
         return WorkspaceMemorySearchResult(
@@ -567,7 +590,7 @@ class WorkspaceMemoryService(
             )
         }
 
-        val longTermSnapshot = truncateText(readLongTermMemory().trim(), 2400)
+        val longTermSnapshot = readLongTermMemory().trim()
         val rollupInference = inferRollupByLlm(
             date = date,
             dailyLines = lines,
@@ -575,15 +598,14 @@ class WorkspaceMemoryService(
         )
         val longTermCandidates = (
             rollupInference?.longTermCandidates
-                ?.take(MAX_ROLLUP_LONG_TERM_CANDIDATES)
                 ?.takeIf { it.isNotEmpty() }
                 ?: selectHeuristicLongTermCandidates(lines)
-            ).distinct()
+            )
 
         var writes = 0
         longTermCandidates.forEach { item ->
             val normalized = sanitizeLongTermCandidate(item)
-            if (normalized.isNotEmpty() && upsertLongTermMemory(normalized)) {
+            if (normalized.isNotEmpty() && appendLongTermMemory(normalized)) {
                 writes += 1
             }
         }
@@ -647,7 +669,7 @@ class WorkspaceMemoryService(
     }
 
     fun getRollupStatusForUi(): WorkspaceMemoryRollupStatus {
-        val enabled = mmkv?.decodeBool(KEY_ROLLUP_ENABLED, true) ?: true
+        val enabled = mmkv?.decodeBool(KEY_ROLLUP_ENABLED, false) ?: false
         val lastRunAt = mmkv?.decodeLong(KEY_ROLLUP_LAST_RUN_AT, 0L)?.takeIf { it > 0 }
         val lastSummary = mmkv?.decodeString(KEY_ROLLUP_LAST_SUMMARY)?.trim()?.ifEmpty { null }
         return WorkspaceMemoryRollupStatus(
@@ -663,7 +685,7 @@ class WorkspaceMemoryService(
     }
 
     fun isRollupEnabled(): Boolean {
-        return mmkv?.decodeBool(KEY_ROLLUP_ENABLED, true) ?: true
+        return mmkv?.decodeBool(KEY_ROLLUP_ENABLED, false) ?: false
     }
 
     private fun saveRollupStatus(summary: String) {
@@ -671,7 +693,7 @@ class WorkspaceMemoryService(
         mmkv?.encode(KEY_ROLLUP_LAST_SUMMARY, summary)
     }
 
-    private fun summarizeTodayShortMemory(maxItems: Int = 30): String {
+    private fun summarizeTodayShortMemory(): String {
         val today = readDailyMemory(LocalDate.now())
         if (today.isBlank()) {
             return emptyTodayShortMemoryText()
@@ -694,7 +716,6 @@ class WorkspaceMemoryService(
                 val prefix = if (timeText.isEmpty()) "" else "[$timeText] "
                 "- $prefix$content"
             }
-            .take(maxItems)
             .toList()
         return if (lines.isEmpty()) emptyTodayShortMemoryText() else lines.joinToString("\n")
     }
@@ -715,7 +736,7 @@ class WorkspaceMemoryService(
                 lines += normalized
             }
         }
-        return lines.take(220)
+        return lines
     }
 
     private fun isRollupMetadataLine(item: String): Boolean {
@@ -749,7 +770,6 @@ class WorkspaceMemoryService(
             }
             .map(::sanitizeLongTermCandidate)
             .filter { it.isNotEmpty() }
-            .take(MAX_ROLLUP_LONG_TERM_CANDIDATES)
     }
 
     private fun inferRollupByLlm(
@@ -828,8 +848,8 @@ class WorkspaceMemoryService(
                                 "description",
                                 JsonPrimitive(
                                     t(
-                                        "当日短期记忆的一句话总结，不超过80字。",
-                                        "A one-sentence summary of the day's short-term memory, within 80 words."
+                                        "当日短期记忆的总结。",
+                                        "A summary of the day's short-term memory."
                                     )
                                 )
                             )
@@ -854,7 +874,6 @@ class WorkspaceMemoryService(
                                     put("type", JsonPrimitive("string"))
                                 }
                             )
-                            put("maxItems", JsonPrimitive(MAX_ROLLUP_LONG_TERM_CANDIDATES))
                         }
                     )
                 }
@@ -885,7 +904,7 @@ class WorkspaceMemoryService(
                     )
                 )
             ),
-            maxCompletionTokens = 768,
+            maxCompletionTokens = null,
             temperature = 0.2,
             tools = listOf(
                 ChatCompletionTool(
@@ -912,7 +931,7 @@ class WorkspaceMemoryService(
                 规则：
                 1. 只保留长期稳定且对未来任务有帮助的信息（偏好、长期约束、稳定事实）。
                 2. 忽略一次性临时细节、随机聊天内容、瞬时状态。
-                3. 候选长期记忆每条一句话，中文为主，最多 ${MAX_ROLLUP_LONG_TERM_CANDIDATES} 条，避免重复。
+                3. 候选长期记忆每条一句话，中文为主，避免重复。
                 4. 如果没有可沉淀内容，longTermCandidates 返回空数组。
                 5. 必须通过工具 $ROLLUP_SUBMIT_TOOL 提交结果，不要输出普通文本。
             """.trimIndent()
@@ -923,7 +942,7 @@ class WorkspaceMemoryService(
                 Rules:
                 1. Keep only stable information that will still help future tasks, such as preferences, long-term constraints, and durable facts.
                 2. Ignore one-off temporary details, random chat content, and transient states.
-                3. Each long-term candidate must be a single sentence, up to ${MAX_ROLLUP_LONG_TERM_CANDIDATES} items total, with no duplicates.
+                3. Each long-term candidate must be a single sentence, with no duplicates.
                 4. If nothing should be promoted, return an empty longTermCandidates array.
                 5. You must submit the result through the $ROLLUP_SUBMIT_TOOL tool and must not output normal text.
             """.trimIndent()
@@ -935,10 +954,7 @@ class WorkspaceMemoryService(
         dailyLines: List<String>,
         longTermMemory: String
     ): String {
-        val dailyBlock = truncateText(
-            dailyLines.joinToString("\n") { "- $it" },
-            12_000
-        )
+        val dailyBlock = dailyLines.joinToString("\n") { "- $it" }
         val longTermBlock = longTermMemory.ifBlank { emptyLongTermMemoryText() }
         return when (currentLocale()) {
             PromptLocale.ZH_CN -> """
@@ -948,7 +964,7 @@ class WorkspaceMemoryService(
                 $dailyBlock
 
                 现有长期记忆（用于避免重复）：
-                ${truncateText(longTermBlock, 2600)}
+                $longTermBlock
             """.trimIndent()
             PromptLocale.EN_US -> """
                 Date: $date
@@ -957,7 +973,7 @@ class WorkspaceMemoryService(
                 $dailyBlock
 
                 Existing long-term memory (to avoid duplicates):
-                ${truncateText(longTermBlock, 2600)}
+                $longTermBlock
             """.trimIndent()
         }
     }
@@ -967,10 +983,7 @@ class WorkspaceMemoryService(
         dailyLines: List<String>,
         longTermMemory: String
     ): String {
-        val dailyBlock = truncateText(
-            dailyLines.joinToString("\n") { "- $it" },
-            12_000
-        )
+        val dailyBlock = dailyLines.joinToString("\n") { "- $it" }
         val longTermBlock = longTermMemory.ifBlank { emptyLongTermMemoryText() }
         return when (currentLocale()) {
             PromptLocale.ZH_CN -> """
@@ -979,13 +992,13 @@ class WorkspaceMemoryService(
                 规则：
                 1. 只保留长期稳定且对未来任务有帮助的信息（偏好、长期约束、稳定事实）。
                 2. 忽略一次性临时细节、随机聊天内容、瞬时状态。
-                3. 候选长期记忆每条一句话，中文为主，最多 ${MAX_ROLLUP_LONG_TERM_CANDIDATES} 条，避免重复。
+                3. 候选长期记忆每条一句话，中文为主，避免重复。
                 4. 如果没有可沉淀内容，longTermCandidates 返回空数组。
                 5. 只能输出 JSON，不要输出 Markdown 代码块或解释。
 
                 输出格式：
                 {
-                  "dailySummary": "一句话总结（不超过80字）",
+                  "dailySummary": "当日总结",
                   "longTermCandidates": ["候选1", "候选2"]
                 }
 
@@ -995,7 +1008,7 @@ class WorkspaceMemoryService(
                 $dailyBlock
 
                 现有长期记忆（用于避免重复）：
-                ${truncateText(longTermBlock, 2600)}
+                $longTermBlock
             """.trimIndent()
             PromptLocale.EN_US -> """
                 You are the Workspace memory rollup assistant. Based on the day's short-term memory, generate a daily summary and identify information that should become long-term memory.
@@ -1003,7 +1016,7 @@ class WorkspaceMemoryService(
                 Rules:
                 1. Keep only stable information that will help future tasks, such as preferences, long-term constraints, and durable facts.
                 2. Ignore one-off temporary details, random chat content, and transient states.
-                3. Each long-term candidate must be a single sentence, with at most ${MAX_ROLLUP_LONG_TERM_CANDIDATES} items and no duplicates.
+                3. Each long-term candidate must be a single sentence, with no duplicates.
                 4. If nothing should be promoted, return an empty longTermCandidates array.
                 5. Output JSON only. Do not output Markdown code fences or explanations.
 
@@ -1019,7 +1032,7 @@ class WorkspaceMemoryService(
                 $dailyBlock
 
                 Existing long-term memory (to avoid duplicates):
-                ${truncateText(longTermBlock, 2600)}
+                $longTermBlock
             """.trimIndent()
         }
     }
@@ -1045,7 +1058,7 @@ class WorkspaceMemoryService(
             return null
         }
         return RollupInference(
-            summary = summary?.take(120),
+            summary = summary,
             longTermCandidates = candidates
         )
     }
@@ -1058,7 +1071,7 @@ class WorkspaceMemoryService(
         val summary = firstNonBlank(payload, listOf("dailySummary", "summary", "todaySummary"))
         val candidates = extractLongTermCandidates(payload)
         return RollupInference(
-            summary = summary?.take(120),
+            summary = summary,
             longTermCandidates = candidates
         )
     }
@@ -1087,7 +1100,7 @@ class WorkspaceMemoryService(
                 items += normalized
             }
         }
-        return items.distinct().take(MAX_ROLLUP_LONG_TERM_CANDIDATES)
+        return items
     }
 
     private fun firstNonBlank(payload: JSONObject, keys: List<String>): String? {
@@ -1153,7 +1166,6 @@ class WorkspaceMemoryService(
             .replace(Regex("^long[- ]?term[:：]\\s*", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\s+"), " ")
             .trim()
-            .take(140)
     }
 
     private fun resolveEmbeddingConfig(): WorkspaceMemoryEmbeddingConfig {
@@ -1258,18 +1270,14 @@ class WorkspaceMemoryService(
     private fun collectChunks(): List<MemoryChunk> {
         val chunks = mutableListOf<MemoryChunk>()
         val longTermContent = readLongTermMemory()
-        chunks += splitMarkdownToChunks(
+        chunks += splitLongTermMemoryToChunks(
             source = ".omnibot/memory/MEMORY.md",
-            date = null,
             content = longTermContent
         )
 
         val shortDir = workspaceManager.shortMemoriesDirectory()
-        shortDir.listFiles()
-            ?.filter { it.isFile && it.name.endsWith(".md") }
-            ?.sortedByDescending { it.name }
-            ?.take(14)
-            ?.forEach { file ->
+        shortMemoryFilesForIndex(shortDir.listFiles())
+            .forEach { file ->
                 val date = file.nameWithoutExtension
                 chunks += splitMarkdownToChunks(
                     source = ".omnibot/memory/short-memories/${file.name}",
@@ -1278,23 +1286,6 @@ class WorkspaceMemoryService(
                 )
             }
 
-        // Past tool/environment failure lessons (self-improving-agent) so they
-        // surface proactively via search/prefetch, not only when the same tool
-        // fails again.
-        val lessonSource = "skill:self-improving-agent/ERRORS"
-        SelfImprovingSkillFailureHook
-            .collectSearchableLessons(workspaceManager.skillsRoot())
-            .forEach { lesson ->
-                val text = lesson.trim()
-                if (text.isNotEmpty()) {
-                    chunks += MemoryChunk(
-                        id = stableChunkId(lessonSource, null, text),
-                        source = lessonSource,
-                        date = null,
-                        text = text
-                    )
-                }
-            }
         return chunks
     }
 
@@ -1341,6 +1332,34 @@ class WorkspaceMemoryService(
         }
     }
 
+    /**
+     * Long-term memory has a second public address: `memory_load(slug)`.
+     * Keep that address attached to the indexed chunk instead of exposing the
+     * internal embedding chunk hash as if it were a loadable slug.
+     */
+    private fun splitLongTermMemoryToChunks(
+        source: String,
+        content: String
+    ): List<MemoryChunk> {
+        if (content.isBlank()) return emptyList()
+        return content.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("- ") }
+            .map { it.removePrefix("- ").trim() }
+            .map(::stripQuickLogDecorators)
+            .filter { it.isNotEmpty() }
+            .map { text ->
+                MemoryChunk(
+                    id = stableChunkId(source, null, text),
+                    source = source,
+                    date = null,
+                    text = text,
+                    slug = LongTermMemoryIndex.makeSlug(text)
+                )
+            }
+            .toList()
+    }
+
     private fun refreshAndLoadIndex(
         chunks: List<MemoryChunk>,
         config: WorkspaceMemoryEmbeddingConfig,
@@ -1385,13 +1404,20 @@ class WorkspaceMemoryService(
                 source = chunk.source,
                 date = chunk.date,
                 text = chunk.text,
+                slug = chunk.slug,
                 embedding = embedding,
                 embeddingConfigId = requestedEmbeddingConfigId.takeIf { embedding.isNotEmpty() },
                 embeddingDimensions = embedding.size.takeIf { it > 0 },
             )
         }
-        saveIndex(indexFile, next)
-        return next
+        return synchronized(memoryWriteLock()) {
+            // Embeddings can finish after a deletion. Never persist removed source
+            // chunks again when an in-flight index refresh completes.
+            val currentIds = collectChunks().map { it.id }.toSet()
+            val current = next.filter { it.id in currentIds }
+            saveIndex(indexFile, current)
+            current
+        }
     }
 
     private fun loadIndex(indexFile: File): List<MemoryIndexEntry> {
@@ -1434,7 +1460,7 @@ class WorkspaceMemoryService(
         }
         val requestJson = JSONObject().apply {
             put("model", modelId)
-            put("input", JSONArray().put(text.take(8_000)))
+            put("input", JSONArray().put(text))
         }
         val mergedHeaders = ProviderCustomHeaderUtils.mergeHeaders(
             builtIn = linkedMapOf(
@@ -1487,35 +1513,11 @@ class WorkspaceMemoryService(
     }
 
     private fun tokenize(text: String): List<String> {
-        return text.lowercase(Locale.getDefault())
-            .split(Regex("[^\\p{L}\\p{N}]+"))
-            .map { it.trim() }
-            .filter { it.length >= 2 }
-    }
-
-    private fun truncateText(raw: String, maxChars: Int): String {
-        if (raw.length <= maxChars) return raw
-        return raw.take(maxChars) + "\n...(truncated)"
+        return tokenizeMemoryText(text)
     }
 
     private fun normalizeText(text: String): String {
-        return text.lowercase(Locale.getDefault())
-            .replace(Regex("\\s+"), "")
-            .trim()
-    }
-
-    /**
-     * A normalized candidate counts as a duplicate of an existing entry when it
-     * matches exactly, or (once both are long enough) either contains the other.
-     * Shared by long-term upsert and per-turn short-term novelty checks.
-     */
-    private fun isDuplicateNormalized(key: String, existingKeys: List<String>): Boolean {
-        if (key.isEmpty()) return true
-        return existingKeys.any { existing ->
-            existing == key ||
-                (minOf(existing.length, key.length) >= DEDUP_MIN_CONTAINMENT_LEN &&
-                    (existing.contains(key) || key.contains(existing)))
-        }
+        return normalizeMemoryText(text)
     }
 
     private fun stableChunkId(source: String, date: String?, text: String): String {

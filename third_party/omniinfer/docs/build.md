@@ -39,7 +39,9 @@ Additional framework notes:
 - `mlx-mac` is embedded and uses Python packages instead of building `framework/mlx`
 - `framework/vllm` pins the upstream vLLM source release used for provenance and future source-build work
 - `framework/vla.cpp` is required for `vla.cpp-linux` and `vla.cpp-linux-cuda` source builds
+- `framework/stable-diffusion.cpp` is required for the Linux and Windows Vulkan diffusion backends
 - `vllm-linux-cuda` installs vLLM Python wheels into an OmniInfer-managed local venv by default, which matches vLLM's normal binary distribution path
+- `freetoken-linux-cuda` installs verified FreeToken release wheels into a versioned OmniInfer-managed environment; it does not add a source submodule
 - Windows `vllm-wsl2-cuda` and `vllm-wsl2-rocm` install pinned official Linux wheels into OmniInfer-managed WSL2 venvs; upstream vLLM has no native Windows runtime
 
 Submodule behavior:
@@ -50,6 +52,7 @@ Submodule behavior:
 - Windows `llama.cpp-*` scripts do not bootstrap submodules automatically; initialize `framework/llama.cpp` first if it is missing
 - `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm` do not bootstrap or update `framework/vllm` during normal wheel installation
 - Linux `vla.cpp-*` scripts can bootstrap `framework/vla.cpp` automatically unless you pass `--no-bootstrap`
+- Linux and Windows `stable-diffusion.cpp-*` scripts bootstrap the pinned framework and its nested submodules when needed
 
 Example:
 
@@ -84,6 +87,19 @@ bash scripts/platforms/linux/vla.cpp-linux/build.sh --from-source
 bash scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source
 ```
 
+For stable-diffusion.cpp Vulkan:
+
+```bash
+VULKAN_SDK=/opt/vulkan/1.4.357.0 \
+  bash scripts/platforms/linux/stable-diffusion.cpp-linux-vulkan/build.sh \
+    --from-source --native --lto --smoke-test
+```
+
+The pinned Vulkan backend needs recent Vulkan and SPIRV headers. The verified
+Linux toolchain uses Vulkan-Headers and SPIRV-Headers `vulkan-sdk-1.4.357.0`;
+Ubuntu 22.04's stock Vulkan `1.3.204` headers are too old. Keep a current SDK
+in an isolated prefix and set `VULKAN_SDK` instead of replacing system headers.
+
 If ZeroMQ/protobuf/cppzmq are installed in an isolated non-system prefix, pass `--dependency-prefix /path/to/prefix` so CMake and pkg-config can find them. System roots such as `/usr` are rejected. The prefix may use `lib`, `lib64`, or a Debian-style `lib/*-linux-gnu` directory. The build recursively copies only the non-system shared libraries reachable from `vla-server`, never bundles core system ABI libraries such as glibc or libstdc++, installs a launcher that searches the packaged runtime directory first, and fails if the resulting ELF dependency set is incomplete.
 
 The Rust installer owns multi-asset download, pinned SHA256 verification, staged extraction, required-file validation, atomic activation, and manifest writing. Source build scripts still own compilation from checked-out submodules. Shared llama.cpp release URLs live in `scripts/prebuilt_backends.json`, but a backend is only offered as prebuilt when that catalog contains a matching entry for the current platform.
@@ -97,6 +113,8 @@ Prebuilt versioning is explicit:
 - Each prebuilt install writes `.local/runtime/<platform>/<backend>/prebuilt.json` with the source tag and all downloaded URLs and digests.
 - Windows `llama.cpp-cuda` requires the matching llama.cpp CUDA runtime companion asset. The three required CUDA DLLs are validated before activation, and an incomplete older install is repaired on the next `backend install` invocation.
 - Existing `prebuilt.json` archive digests are compared with newly pinned catalog digests before an installed runtime is accepted. A mismatched or malformed managed manifest triggers a transactional reinstall; an unmanaged/source-built runtime without `prebuilt.json` is not overwritten merely because it exists.
+
+The source checkout currently pins llama.cpp `b10665` (`ca3d5a3e`) for Qwen3.8-Flash-Next support, while the validated prebuilt catalog remains on `b10280`. Build a llama.cpp backend with `--from-source` when the newer model architecture is required.
 
 Validate catalog structure, URL/tag consistency, and complete SHA256 coverage before committing:
 
@@ -125,6 +143,7 @@ Current desktop runtime directories:
 - Windows x64 CPU: `.local/runtime/windows/llama.cpp-cpu`
 - Windows x64 CUDA: `.local/runtime/windows/llama.cpp-cuda`
 - Windows x64 Vulkan: `.local/runtime/windows/llama.cpp-vulkan`
+- Windows x64 stable-diffusion.cpp Vulkan: `.local/runtime/windows/stable-diffusion.cpp-vulkan`
 - Windows arm64 CPU: `.local/runtime/windows/llama.cpp-windows-arm64`
 - Windows x64 SYCL: `.local/runtime/windows/llama.cpp-sycl`
 - Windows x64 HIP: `.local/runtime/windows/llama.cpp-hip`
@@ -133,9 +152,11 @@ Current desktop runtime directories:
 - Linux x64 CPU: `.local/runtime/linux/llama.cpp-linux`
 - Linux x64 ROCm: `.local/runtime/linux/llama.cpp-linux-rocm`
 - Linux x64 Vulkan: `.local/runtime/linux/llama.cpp-linux-vulkan`
+- Linux x64 stable-diffusion.cpp Vulkan: `.local/runtime/linux/stable-diffusion.cpp-linux-vulkan`
 - Linux s390x CPU: `.local/runtime/linux/llama.cpp-linux-s390x`
 - Linux x64 OpenVINO: `.local/runtime/linux/llama.cpp-linux-openvino`
 - Linux x64 vLLM CUDA: `.local/runtime/linux/vllm-linux-cuda`
+- Linux x64 FreeToken CUDA: `.local/runtime/linux/freetoken-linux-cuda`
 - Linux x64 vla.cpp CPU: `.local/runtime/linux/vla.cpp-linux`
 - Linux x64 vla.cpp CUDA: `.local/runtime/linux/vla.cpp-linux-cuda`
 - macOS Apple Silicon Metal: `.local/runtime/macos/llama.cpp-mac`
@@ -184,6 +205,7 @@ The updater verifies that the requested source tag resolves to the supplied comm
 - `scripts/platforms/windows/build-llama-arm64.ps1`
 - `scripts/platforms/windows/build-llama-sycl.ps1`
 - `scripts/platforms/windows/build-llama-hip.ps1`
+- `scripts/platforms/windows/stable-diffusion.cpp-vulkan/build.ps1`
 - `scripts/platforms/windows/build-release.ps1`
 
 ### Backend Notes
@@ -202,6 +224,12 @@ The updater verifies that the requested source tag resolves to the supplied comm
 
 - Target: Windows x64 Vulkan
 - Requires: Vulkan SDK or equivalent MSYS2 Vulkan toolchain
+
+`stable-diffusion.cpp-vulkan`:
+
+- Target: Windows x64 Vulkan image and video generation
+- Requires: Vulkan SDK 1.4.301 or newer with `glslc` and SPIRV-Headers, or matching MSYS2 UCRT64 packages
+- Builds the pinned submodule in Release mode; `-Native -Lto` enables host-specific CPU tuning and link-time optimization
 
 `llama.cpp-windows-arm64`:
 
@@ -239,6 +267,14 @@ Windows x64 Vulkan:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\platforms\windows\build-llama-vulkan.ps1
+```
+
+Windows x64 stable-diffusion.cpp Vulkan:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\platforms\windows\stable-diffusion.cpp-vulkan\build.ps1 `
+  -Clean -Native -Lto -SmokeTest
 ```
 
 Windows arm64 CPU:
@@ -293,6 +329,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\platforms\windows\
 - `scripts/platforms/linux/build-llama-s390x.sh`
 - `scripts/platforms/linux/build-llama-openvino.sh`
 - `scripts/platforms/linux/vllm-linux-cuda/build.sh`
+- `scripts/platforms/linux/freetoken-linux-cuda/build.sh`
+- `scripts/platforms/linux/stable-diffusion.cpp-linux-vulkan/build.sh`
 - `scripts/platforms/linux/build-release.sh`
 
 ### Backend Notes
@@ -301,17 +339,19 @@ Linux backend script behavior:
 
 | Backend | Default action | Source build action |
 |---|---|---|
-| `llama.cpp-linux` | Downloads official `b10280` Linux CPU archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with CPU settings |
-| `llama.cpp-linux-rocm` | Downloads official `b10280` ROCm archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with ROCm settings |
-| `llama.cpp-linux-vulkan` | Downloads official `b10280` Vulkan archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with Vulkan settings |
-| `llama.cpp-linux-s390x` | Downloads official `b10280` s390x archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` for s390x |
-| `llama.cpp-linux-openvino` | Downloads official `b10280` OpenVINO archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with OpenVINO settings |
-| `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b10280` has no Linux CUDA archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with CUDA settings |
+| `llama.cpp-linux` | Downloads official `b10280` Linux CPU archive | `--from-source` builds pinned `framework/llama.cpp` tag `b10665` (`ca3d5a3e`) with CPU settings |
+| `llama.cpp-linux-rocm` | Downloads official `b10280` ROCm archive | `--from-source` builds pinned `framework/llama.cpp` tag `b10665` (`ca3d5a3e`) with ROCm settings |
+| `llama.cpp-linux-vulkan` | Downloads official `b10280` Vulkan archive | `--from-source` builds pinned `framework/llama.cpp` tag `b10665` (`ca3d5a3e`) with Vulkan settings |
+| `llama.cpp-linux-s390x` | Downloads official `b10280` s390x archive | `--from-source` builds pinned `framework/llama.cpp` tag `b10665` (`ca3d5a3e`) for s390x |
+| `llama.cpp-linux-openvino` | Downloads official `b10280` OpenVINO archive | `--from-source` builds pinned `framework/llama.cpp` tag `b10665` (`ca3d5a3e`) with OpenVINO settings |
+| `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b10280` has no Linux CUDA archive | `--from-source` builds pinned `framework/llama.cpp` tag `b10665` (`ca3d5a3e`) with CUDA settings |
 | `vllm-linux-cuda` | Creates an OmniInfer-managed venv and installs vLLM wheels | Not a C++ source build path |
+| `freetoken-linux-cuda` | Installs pinned FreeToken v0.1.2 CUDA 13 wheels | Not a C++ source build path |
 | `mnn-linux` | Creates an OmniInfer-managed venv and installs the official `MNN==3.5.0` wheel | `--from-source` builds PyMNN from `framework/mnn` |
 | `ik_llama.cpp-linux` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/ik_llama.cpp` CPU |
 | `ik_llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/ik_llama.cpp` CUDA |
 | `omniinfer-native-linux` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/omniinfer-native` |
+| `stable-diffusion.cpp-linux-vulkan` | Fails with a clear "no prebuilt configured" message | `--from-source` builds pinned `framework/stable-diffusion.cpp` with Vulkan, WebM, WebP, native CPU tuning, and optional LTO |
 
 `llama.cpp-linux`:
 
@@ -326,6 +366,12 @@ Linux backend script behavior:
 
 - Target: Linux x64 Vulkan
 - Requires: Vulkan loader, headers, and shader tooling
+
+`stable-diffusion.cpp-linux-vulkan`:
+
+- Target: Linux x64 Vulkan image and video generation
+- Requires: recent Vulkan-Headers, SPIRV-Headers CMake metadata, loader, and `glslc`
+- Set `VULKAN_SDK` to an isolated current SDK; the build script rejects known-old headers before compilation
 
 `llama.cpp-linux-s390x`:
 
@@ -346,6 +392,15 @@ Linux backend script behavior:
 - Installs into `.local/runtime/linux/vllm-linux-cuda` without `sudo`
 - Requires a CUDA-capable NVIDIA GPU and a vLLM-compatible Python/PyTorch wheel stack
 - Accepts HuggingFace model IDs, local snapshot directories, or other model references that vLLM can load
+
+`freetoken-linux-cuda`:
+
+- Target: Linux x64 with an NVIDIA R580-or-newer driver
+- Uses FreeToken's OpenAI-compatible server through `ft serve`
+- Installs without `sudo`; the FreeToken, kernel-cache, and uv release assets are pinned by SHA256
+- Accepts local checkpoints and Hugging Face model IDs supported by FreeToken
+- Uses a log readiness marker because FreeToken's `/health` endpoint can respond before model loading is complete
+- Reserves local model bytes in host memory and FreeToken's configured GPU memory ratio; remote model IDs require an explicit `resource_budget_bytes` host reservation
 
 `mnn-linux`:
 
@@ -374,6 +429,14 @@ Linux x64 Vulkan:
 bash ./scripts/platforms/linux/build-llama-vulkan.sh
 ```
 
+Linux x64 stable-diffusion.cpp Vulkan:
+
+```bash
+VULKAN_SDK=/opt/vulkan/1.4.357.0 \
+  bash ./scripts/platforms/linux/stable-diffusion.cpp-linux-vulkan/build.sh \
+    --from-source --native --lto --smoke-test
+```
+
 Linux s390x CPU:
 
 ```bash
@@ -390,6 +453,12 @@ Linux x64 vLLM CUDA:
 
 ```bash
 bash ./scripts/platforms/linux/vllm-linux-cuda/build.sh --smoke-test
+```
+
+Linux x64 FreeToken CUDA:
+
+```bash
+bash ./scripts/platforms/linux/freetoken-linux-cuda/build.sh --smoke-test
 ```
 
 Pin a specific vLLM wheel when reproducibility matters:
@@ -413,6 +482,7 @@ bash ./scripts/platforms/linux/vllm-linux-cuda/build.sh --package 'vllm==0.9.2'
 - `vla.cpp-linux`
 - `vla.cpp-linux-cuda`
 - `vllm-linux-cuda`
+- `freetoken-linux-cuda`
 - `mnn-linux`
 
 Runtime discovery is driven by the Linux backend registry rather than a

@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
+import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.App
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalAutoStartManager
@@ -19,7 +20,6 @@ import cn.com.omnimind.bot.ui.channel.FileSaveChannel
 import cn.com.omnimind.bot.ui.platformview.AgentBrowserPlatformViewFactory
 import cn.com.omnimind.bot.ui.platformview.EmbeddedTerminalPlatformViewFactory
 import cn.com.omnimind.bot.update.AppUpdateManager
-import cn.com.omnimind.bot.util.AssistsUtil
 import cn.com.omnimind.bot.util.SchemeUtil
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
 import io.flutter.embedding.android.FlutterActivity
@@ -69,11 +69,6 @@ class MainActivity : FlutterActivity() {
         val channelStart = System.currentTimeMillis()
         channelManager.onCreate(this)
         OmniLog.d(TAG, "MainActivity channelManager.onCreate cost: ${System.currentTimeMillis() - channelStart}ms")
-
-        if (!AssistsUtil.Core.isInitialized()) {
-            AssistsUtil.Core.initCore(App.instance)
-            OmniLog.d(TAG, "MainActivity initialized remaining chat task core")
-        }
 
         SchemeUtil.pushRoute(intent, channelManager, null)
 
@@ -152,10 +147,20 @@ class MainActivity : FlutterActivity() {
         TaskRuntimeSettings.attachActivity(this)
         TaskRuntimeSettings.onActivityResumed(this)
         AppUpdateManager.requestSilentCheckIfDue(this)
-
-        if (!AssistsUtil.Core.isInitialized()) {
-            AssistsUtil.Core.initCore(App.instance)
+        lifecycleScope.launch {
+            runCatching {
+                if (OmniAccount.isConfigured()) {
+                    OmniAccount.repository().refreshSessionIfNeeded()
+                }
+            }.onFailure { error ->
+                // A foreground refresh is best effort.  The request owner
+                // still handles a real 401, while this path prevents a
+                // normally expired access token from being presented as an
+                // unexpected logout after app switching.
+                OmniLog.w(TAG, "Foreground account session refresh skipped", error)
+            }
         }
+
     }
 
     override fun onDestroy() {

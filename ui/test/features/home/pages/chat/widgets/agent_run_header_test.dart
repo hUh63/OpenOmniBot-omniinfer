@@ -6,6 +6,64 @@ import 'package:ui/features/home/pages/chat/widgets/agent_run_header.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 
 void main() {
+  testWidgets('finished fold control has its own semantics apart from reply', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    var toggled = false;
+    final start = DateTime(2026, 9, 7);
+    await tester.pumpWidget(
+      _wrap(
+        Column(
+          children: [
+            AgentRunHeader(
+              taskId: 'reasoning',
+              agentId: 'xiaowan-acp',
+              status: AgentRunStatus.finished,
+              startedAt: start,
+              finishedAt: start.add(const Duration(seconds: 12)),
+              onToggleExpanded: () => toggled = true,
+            ),
+            const Text('Visible final answer'),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final control = find.bySemanticsLabel('已处理  12s');
+    expect(control, findsOneWidget);
+    expect(
+      tester.getSemantics(control).getSemanticsData().label,
+      isNot(contains('Visible final answer')),
+    );
+    await tester.tap(control);
+    expect(toggled, isTrue);
+    semantics.dispose();
+  });
+
+  for (final outcome in {
+    AgentRunStatus.cancelled: '已取消',
+    AgentRunStatus.failed: '执行失败',
+  }.entries) {
+    testWidgets('terminal header preserves ${outcome.key}', (tester) async {
+      final end = DateTime.now();
+      await tester.pumpWidget(
+        _wrap(
+          AgentRunHeader(
+            taskId: 'terminal',
+            agentId: 'xiaowan-acp',
+            status: outcome.key,
+            startedAt: end.subtract(const Duration(seconds: 2)),
+            finishedAt: end,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining(outcome.value), findsOneWidget);
+      expect(find.textContaining('已处理'), findsNothing);
+    });
+  }
+
   testWidgets('running header shows the elapsed processing label and ticks', (
     tester,
   ) async {
@@ -31,6 +89,24 @@ void main() {
 
     await tester.pump(const Duration(seconds: 1));
     expect(find.textContaining('正在处理 6s'), findsOneWidget);
+  });
+
+  testWidgets('running header identifies the active ACP tool', (tester) async {
+    await tester.pumpWidget(
+      _wrap(
+        AgentRunHeader(
+          taskId: 'turn-file-write',
+          agentId: 'xiaowan-acp',
+          status: AgentRunStatus.running,
+          startedAt: DateTime.now(),
+          activeToolLabel: '正在写入文件：draft.md',
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('正在写入文件：draft.md'), findsOneWidget);
+    expect(find.textContaining('正在处理'), findsNothing);
   });
 
   testWidgets(
@@ -62,6 +138,29 @@ void main() {
     },
   );
 
+  testWidgets('finished header without fold history has no chevron', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _wrap(
+        AgentRunHeader(
+          taskId: 'turn-no-history',
+          agentId: 'codex-acp',
+          status: AgentRunStatus.finished,
+          startedAt: DateTime(2026, 7, 25, 15, 48, 0),
+          finishedAt: DateTime(2026, 7, 25, 15, 48, 1),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('acp-processed-label')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('agent-run-summary-chevron-turn-no-history')),
+      findsNothing,
+    );
+  });
+
   testWidgets('header renders the agent brand exactly once', (tester) async {
     await tester.pumpWidget(
       _wrap(
@@ -83,6 +182,39 @@ void main() {
       findsOneWidget,
     );
   });
+
+  for (final agentId in const <String>[
+    'xiaowan-acp',
+    'codex-acp',
+    'claude-code-acp',
+    'opencode-acp',
+    'deepseek-harness-acp',
+  ]) {
+    testWidgets('$agentId brand fills the run avatar without a nested circle', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _wrap(
+          AgentRunHeader(
+            taskId: 'turn-$agentId',
+            agentId: agentId,
+            status: AgentRunStatus.running,
+            startedAt: DateTime.now(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final runAvatar = find.byKey(
+        ValueKey('agent-run-acp-avatar-turn-$agentId'),
+      );
+      final brandIcon = tester.widget<AgentBrandIcon>(
+        find.descendant(of: runAvatar, matching: find.byType(AgentBrandIcon)),
+      );
+
+      expect(brandIcon.size, 30);
+    });
+  }
 
   testWidgets(
     'completion cross-fades the running label into the folded header',

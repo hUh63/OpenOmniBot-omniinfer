@@ -5,10 +5,10 @@ import org.junit.Test
 
 class OmniVlmMaxStepsTest {
     @Test
-    fun `VLM defaults to thirty model steps`() {
+    fun `VLM does not inject a host step limit by default`() {
         val request = OmniVlmPlugin.Request(goal = "open settings")
 
-        assertEquals(30, request.maxSteps)
-        assertEquals(30, request.runGuiArguments()["max_steps"])
+        assertEquals(null, request.maxSteps)
+        assertEquals(false, request.runGuiArguments().containsKey("max_steps"))
     }
 }

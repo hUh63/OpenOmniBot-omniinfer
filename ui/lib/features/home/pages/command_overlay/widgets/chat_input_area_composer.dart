@@ -125,16 +125,24 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
 
   /// 构建输入框内容区域（按钮、文本框等）
   Widget _buildInputContent() {
-    return ValueListenableBuilder<ChatComposerState>(
-      valueListenable: _composerStateMachine,
-      builder: (context, composerState, _) {
-        final openClawButton = _buildOpenClawButton();
-        return Row(
-          children: [
-            Expanded(child: _buildTextField()),
-            const SizedBox(width: 9),
-            _buildAnimatedButtonRow(openClawButton: openClawButton),
-          ],
+    return AnimatedBuilder(
+      // Draft restoration and platform IME updates can change the controller
+      // without producing the expected composer-state transition. The
+      // controller is the source of truth for whether send is available.
+      animation: widget.controller,
+      builder: (context, _) {
+        return ValueListenableBuilder<ChatComposerState>(
+          valueListenable: _composerStateMachine,
+          builder: (context, composerState, _) {
+            final openClawButton = _buildOpenClawButton();
+            return Row(
+              children: [
+                Expanded(child: _buildTextField()),
+                const SizedBox(width: 9),
+                _buildAnimatedButtonRow(openClawButton: openClawButton),
+              ],
+            );
+          },
         );
       },
     );
@@ -183,12 +191,17 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
 
     final contextUsageRatio = widget.contextUsageRatio;
     final rightActions = <Widget>[
-      if (contextUsageRatio != null) ...[
+      if (contextUsageRatio != null ||
+          widget.onLongPressContextUsageRing != null) ...[
         _ContextUsageRingButton(
           ratio: contextUsageRatio,
           tooltipMessage: widget.contextUsageTooltipMessage,
           onLongPress: widget.onLongPressContextUsageRing,
         ),
+        const SizedBox(width: 4),
+      ],
+      if (widget.runtimeConfigButton != null && !_shouldShowModelPicker) ...[
+        widget.runtimeConfigButton!,
         const SizedBox(width: 4),
       ],
       if (_shouldShowAgentRunSettingsSelector) ...[
@@ -359,6 +372,7 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
       isProcessing: widget.isProcessing,
       hasAttachments: widget.attachments.isNotEmpty,
       hasExternalPayload: widget.hasExternalSendPayload,
+      hasTextOverride: widget.controller.text.trim().isNotEmpty,
     );
     final canTap = action != ChatComposerPrimaryAction.disabled;
     final icon = action == ChatComposerPrimaryAction.cancel
@@ -371,6 +385,13 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
       opacity: canTap ? 1 : 0.38,
       child: IconButton(
         key: const ValueKey('chat-input-send-or-stop-button'),
+        tooltip: action == ChatComposerPrimaryAction.cancel
+            ? (Localizations.localeOf(context).languageCode == 'en'
+                  ? 'Stop'
+                  : '停止')
+            : (Localizations.localeOf(context).languageCode == 'en'
+                  ? 'Send'
+                  : '发送'),
         padding: EdgeInsets.zero,
         iconSize: 20,
         icon: AnimatedSwitcher(
@@ -475,6 +496,7 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(innerRadius),
                     child: BackdropFilter(
+                      enabled: useFrostedGlass,
                       filter: ImageFilter.blur(
                         sigmaX: useFrostedGlass ? 8 : 0,
                         sigmaY: useFrostedGlass ? 8 : 0,
@@ -500,17 +522,21 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
                 ),
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: CustomPaint(
-                      painter: _ComposerFlowBorderPainter(
-                        progress: _composerFlowController,
-                        interactive: shouldGlowStrong,
-                        focused: focused,
-                        forceStrong: false,
-                        radius: shellRadius,
-                        strokeWidth: 1.5,
-                        gradientColors: context.isDarkTheme
-                            ? _kDarkComposerFlowGradientColors
-                            : _kLightComposerFlowGradientColors,
+                    // Only the border changes on each tick. Keep it from
+                    // repainting the shell and chat page under the drawer.
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        painter: _ComposerFlowBorderPainter(
+                          progress: _composerFlowController,
+                          interactive: shouldGlowStrong,
+                          focused: focused,
+                          forceStrong: false,
+                          radius: shellRadius,
+                          strokeWidth: 1.5,
+                          gradientColors: context.isDarkTheme
+                              ? _kDarkComposerFlowGradientColors
+                              : _kLightComposerFlowGradientColors,
+                        ),
                       ),
                     ),
                   ),
@@ -541,12 +567,17 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
           ),
           const SizedBox(width: 2),
         ],
-        if (contextUsageRatio != null) ...[
+        if (contextUsageRatio != null ||
+            widget.onLongPressContextUsageRing != null) ...[
           _ContextUsageRingButton(
             ratio: contextUsageRatio,
             tooltipMessage: widget.contextUsageTooltipMessage,
             onLongPress: widget.onLongPressContextUsageRing,
           ),
+          const SizedBox(width: 4),
+        ],
+        if (widget.runtimeConfigButton != null && !_shouldShowModelPicker) ...[
+          widget.runtimeConfigButton!,
           const SizedBox(width: 4),
         ],
         if (_shouldShowAgentRunSettingsSelector) ...[

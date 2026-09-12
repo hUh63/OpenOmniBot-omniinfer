@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,9 +9,18 @@ import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
 import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/services/agent_message_kinds.dart';
+import 'package:ui/services/assists_core_service.dart';
+import 'package:ui/services/omnibot_resource_service.dart';
 
 /// 对话历史持久化服务
 class ConversationHistoryService {
+  // Acknowledged write digests only; never a history source or content cache.
+  // A fresh process submits its visible page once. Failed writes are not acknowledged.
+  static final Map<String, Map<String, Digest>> _acknowledgedWrites = {};
+
+  @visibleForTesting
+  static void resetWriteAcknowledgements() => _acknowledgedWrites.clear();
+
   static const MethodChannel _assistCore = MethodChannel(
     'cn.com.omnimind.bot/AssistCoreEvent',
   );
@@ -21,19 +32,25 @@ class ConversationHistoryService {
       'last_visible_conversation_target';
   static const String _conversationMessagesKey = 'conversation_messages_';
   static const String conversationMessagesKeyPrefix = _conversationMessagesKey;
+  static final Map<String, Future<void>> _conversationMessageWriteQueues =
+      <String, Future<void>>{};
+
+  static ConversationMode _canonicalConversationMode(ConversationMode mode) {
+    return mode == ConversationMode.normal ? ConversationMode.agent : mode;
+  }
 
   static String _conversationIdKeyForMode(ConversationMode mode) {
-    return '$_conversationIdKeyPrefix${mode.storageValue}';
+    return '$_conversationIdKeyPrefix${mode.canonicalStorageValue}';
   }
 
   static String _conversationTargetKeyForMode(ConversationMode mode) {
-    return '$_conversationTargetKeyPrefix${mode.storageValue}';
+    return '$_conversationTargetKeyPrefix${mode.canonicalStorageValue}';
   }
 
   /// 保存当前对话ID
   static Future<void> saveCurrentConversationId(
     int? conversationId, {
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final modeKey = _conversationIdKeyForMode(mode);
@@ -44,15 +61,12 @@ class ConversationHistoryService {
       }
     } else {
       await prefs.setInt(modeKey, conversationId);
-      if (mode == ConversationMode.normal) {
-        await prefs.setInt(_legacyConversationIdKey, conversationId);
-      }
     }
   }
 
   /// 获取当前对话ID
   static Future<int?> getCurrentConversationId({
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final id =
@@ -72,7 +86,7 @@ class ConversationHistoryService {
       try {
         final target = ConversationThreadTarget.fromEncodedJson(raw);
         return target.copyWith(
-          mode: mode,
+          mode: _canonicalConversationMode(mode),
           fromNativeRoute: false,
           clearRequestKey: true,
         );
@@ -86,7 +100,7 @@ class ConversationHistoryService {
     }
     return ConversationThreadTarget.existing(
       conversationId: conversationId,
-      mode: mode,
+      mode: _canonicalConversationMode(mode),
     );
   }
 
@@ -103,7 +117,7 @@ class ConversationHistoryService {
     }
 
     final sanitized = target.copyWith(
-      mode: mode,
+      mode: _canonicalConversationMode(mode),
       fromNativeRoute: false,
       clearRequestKey: true,
     );
@@ -120,6 +134,7 @@ class ConversationHistoryService {
       return;
     }
     final sanitized = target.copyWith(
+      mode: target.mode,
       fromNativeRoute: false,
       clearRequestKey: true,
     );
@@ -143,7 +158,8 @@ class ConversationHistoryService {
       return null;
     }
     try {
-      return ConversationThreadTarget.fromEncodedJson(raw);
+      final target = ConversationThreadTarget.fromEncodedJson(raw);
+      return target;
     } catch (e) {
       debugPrint('解析上次可见线程失败: $e');
       return null;
@@ -167,7 +183,9 @@ class ConversationHistoryService {
     final lastVisible = await getLastVisibleThreadTarget();
     if (lastVisible != null &&
         lastVisible.conversationId == conversationId &&
-        (mode == null || lastVisible.mode == mode)) {
+        (mode == null ||
+            lastVisible.mode.canonicalStorageValue ==
+                mode.canonicalStorageValue)) {
       await saveLastVisibleThreadTarget(null);
     }
   }
@@ -184,9 +202,60 @@ class ConversationHistoryService {
 
   static String conversationMessagesKey(
     int conversationId, {
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
   }) {
-    return '$_conversationMessagesKey${mode.storageValue}_$conversationId';
+    return '$_conversationMessagesKey${mode.canonicalStorageValue}_$conversationId';
+  }
+
+  /// Exports the durable conversation snapshot through the app's existing
+  /// share boundary. Native Room remains the source of truth; this is only a
+  /// user-visible copy and never becomes a second history protocol.
+  static Future<bool> exportConversation(
+    int conversationId, {
+    ConversationMode mode = ConversationMode.agent,
+  }) async {
+    final messages = await getConversationMessages(conversationId, mode: mode);
+    final payload = const JsonEncoder.withIndent('  ').convert({
+      'conversationId': conversationId,
+      'mode': mode.canonicalStorageValue,
+      'messages': messages.map((message) => message.toJson()).toList(),
+    });
+    return OmnibotResourceService.shareText(payload);
+  }
+
+  /// Copies the user-visible dialogue in chronological order.
+  ///
+  /// Thinking/tool/system cards intentionally stay out of the clipboard
+  /// representation. They remain available in the exported JSON snapshot,
+  /// while Copy conversation produces the readable transcript users expect.
+  static Future<bool> copyConversation(
+    int conversationId, {
+    ConversationMode mode = ConversationMode.agent,
+  }) async {
+    final messages = await getConversationMessages(conversationId, mode: mode);
+    final text = buildConversationClipboardText(messages);
+    if (text.isEmpty) {
+      return false;
+    }
+    return AssistsMessageService.copyToClipboard(text);
+  }
+
+  static String buildConversationClipboardText(
+    List<ChatMessageModel> messages,
+  ) {
+    final sections = <String>[];
+    for (final message in messages.reversed) {
+      if (message.type != 1) {
+        continue;
+      }
+      final text = (message.text ?? '').trim();
+      if (text.isEmpty) {
+        continue;
+      }
+      final role = message.user == 1 ? '用户' : '助手';
+      sections.add('$role：\n$text');
+    }
+    return sections.join('\n\n');
   }
 
   static String _legacyConversationMessagesKey(int conversationId) {
@@ -198,7 +267,22 @@ class ConversationHistoryService {
     required ConversationMode mode,
   }) {
     final keys = <String>[conversationMessagesKey(conversationId, mode: mode)];
-    if (mode == ConversationMode.normal) {
+    if (mode == ConversationMode.normal || mode == ConversationMode.agent) {
+      keys.add(
+        '$_conversationMessagesKey${ConversationMode.normal.storageValue}_$conversationId',
+      );
+      keys.add(_legacyConversationMessagesKey(conversationId));
+      // Read both the canonical generic Agent key and the old Codex-named
+      // key. Codex is a Harness, not the conversation domain mode.
+      keys.add(
+        '$_conversationMessagesKey${ConversationMode.agent.name}_$conversationId',
+      );
+      keys.add('${_conversationMessagesKey}codex_$conversationId');
+      // Older Xiaowan builds wrote these snapshots before the conversation
+      // domain switched from `normal` to canonical `agent`.
+      keys.add(
+        '$_conversationMessagesKey${ConversationMode.normal.storageValue}_$conversationId',
+      );
       keys.add(_legacyConversationMessagesKey(conversationId));
     }
     return keys;
@@ -236,40 +320,110 @@ class ConversationHistoryService {
     );
   }
 
-  /// 保存对话消息列表
+  /// 保存对话消息列表。
+  ///
+  /// Runtime snapshots merge by message identity. Only explicit user history
+  /// edits may remove missing entries; writes remain ordered per conversation.
   static Future<void> saveConversationMessages(
     int conversationId,
     List<ChatMessageModel> messages, {
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
+    bool allowHistoryRemoval = false,
+  }) {
+    final key = '${mode.canonicalStorageValue}:$conversationId';
+    final snapshot = List<ChatMessageModel>.from(messages);
+    return _enqueueConversationMessageWrite(
+      key,
+      () => _saveConversationMessages(
+        conversationId,
+        snapshot,
+        mode: mode,
+        allowHistoryRemoval: allowHistoryRemoval,
+      ),
+    );
+  }
+
+  static Future<void> _enqueueConversationMessageWrite(
+    String key,
+    Future<void> Function() write,
+  ) {
+    final previous =
+        _conversationMessageWriteQueues[key] ?? Future<void>.value();
+    final next = _runConversationMessageWrite(previous, write);
+    _conversationMessageWriteQueues[key] = next;
+    return next.whenComplete(() {
+      if (identical(_conversationMessageWriteQueues[key], next)) {
+        _conversationMessageWriteQueues.remove(key);
+      }
+    });
+  }
+
+  static Future<void> _runConversationMessageWrite(
+    Future<void> previous,
+    Future<void> Function() write,
+  ) async {
+    try {
+      await previous;
+    } catch (_) {
+      // A failed snapshot must not permanently block later snapshots for the
+      // same conversation.
+    }
+    await write();
+  }
+
+  static Future<void> _saveConversationMessages(
+    int conversationId,
+    List<ChatMessageModel> messages, {
+    required ConversationMode mode,
+    bool allowHistoryRemoval = false,
   }) async {
+    final key = '${mode.canonicalStorageValue}:$conversationId';
     final jsonList = messages.map((m) => m.toJson()).toList();
+    final previous = _acknowledgedWrites[key] ?? const <String, Digest>{};
+    final next = <String, Digest>{};
+    final changed = <Map<String, dynamic>>[];
+    for (final row in jsonList) {
+      final id = row['id']?.toString();
+      if (id == null || id.isEmpty) {
+        changed.add(row);
+        continue;
+      }
+      final digest = sha256.convert(utf8.encode(jsonEncode(row)));
+      next[id] = digest;
+      if (allowHistoryRemoval || previous[id] != digest) changed.add(row);
+    }
+    if (changed.isEmpty && !allowHistoryRemoval) return;
     final stored = await _replaceNativeConversationMessages(
       conversationId,
-      jsonList,
+      allowHistoryRemoval ? jsonList : changed,
       mode: mode,
+      allowHistoryRemoval: allowHistoryRemoval,
     );
     if (stored) {
+      _acknowledgedWrites[key] = allowHistoryRemoval
+          ? next
+          : {...previous, ...next};
       await _clearLegacyConversationMessages(conversationId, mode: mode);
       return;
     }
 
-    await _writeLegacyConversationMessages(
-      conversationId,
-      jsonList,
-      mode: mode,
-    );
+    // Legacy storage is an import source, not a competing destination for
+    // failed live writes. Surface failure so admission/flush retains its owner.
+    throw StateError('Native conversation persistence failed');
   }
 
   static Future<bool> _replaceNativeConversationMessages(
     int conversationId,
     List<Map<String, dynamic>> jsonList, {
     required ConversationMode mode,
+    bool allowHistoryRemoval = false,
   }) async {
     try {
       await _assistCore.invokeMethod('replaceConversationMessages', {
         'conversationId': conversationId,
-        'mode': mode.storageValue,
+        'mode': mode.canonicalStorageValue,
         'messages': jsonList,
+        'allowHistoryRemoval': allowHistoryRemoval,
       });
       return true;
     } on PlatformException catch (e) {
@@ -284,13 +438,32 @@ class ConversationHistoryService {
   /// 获取对话消息列表
   static Future<List<ChatMessageModel>> getConversationMessages(
     int conversationId, {
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
+    int? expectedMessageCount,
+  }) => readConversationHistory(
+    conversationId,
+    mode: mode,
+    expectedMessageCount: expectedMessageCount,
+  );
+
+  /// Compatibility reader for every supported history generation.
+  ///
+  /// Native ACP history is authoritative when complete. If it is unavailable
+  /// or empty, this reader checks the old local snapshot keys, normalizes old
+  /// Agent/tool payloads, merges both sources by stable message identity, and
+  /// only then performs a forward migration. A stale `messageCount == 0` must
+  /// never erase a non-empty legacy snapshot: an explicit clear removes both
+  /// native and legacy stores, so an existing legacy snapshot is recoverable
+  /// history rather than proof of an intentional clear.
+  static Future<List<ChatMessageModel>> readConversationHistory(
+    int conversationId, {
+    ConversationMode mode = ConversationMode.agent,
     int? expectedMessageCount,
   }) async {
     try {
       final result = await _assistCore.invokeMethod<List<dynamic>>(
         'getConversationMessages',
-        {'conversationId': conversationId, 'mode': mode.storageValue},
+        {'conversationId': conversationId, 'mode': mode.canonicalStorageValue},
       );
       final nativeMessages = _decodeMessageList(result, mode: mode);
       return _resolveNativeAndLegacyMessages(
@@ -316,7 +489,7 @@ class ConversationHistoryService {
   static Future<({List<ChatMessageModel> messages, bool hasMore})>
   getConversationMessagesPaged(
     int conversationId, {
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
     int limit = 20,
     int offset = 0,
     int? expectedMessageCount,
@@ -325,7 +498,7 @@ class ConversationHistoryService {
       final result = await _assistCore
           .invokeMethod<Map<dynamic, dynamic>>('getConversationMessagesPaged', {
             'conversationId': conversationId,
-            'mode': mode.storageValue,
+            'mode': mode.canonicalStorageValue,
             'limit': limit,
             'offset': offset,
           });
@@ -378,18 +551,22 @@ class ConversationHistoryService {
     required int offset,
     int? expectedMessageCount,
   }) async {
-    if (offset != 0) {
-      return (messages: <ChatMessageModel>[], hasMore: false);
-    }
-    final legacyMessages = await _restoreLegacyConversationMessages(
+    // An older native runtime may not implement the paged method but can
+    // still provide the complete canonical snapshot. Read that existing
+    // history boundary instead of retaining a separate legacy-only cursor:
+    // migration is then safe before later pages are requested.
+    final persistedMessages = await readConversationHistory(
       conversationId,
       mode: mode,
       expectedMessageCount: expectedMessageCount,
     );
-    final pageSize = limit <= 0 ? legacyMessages.length : limit;
+    final start = offset.clamp(0, persistedMessages.length).toInt();
+    final end = limit <= 0
+        ? persistedMessages.length
+        : (start + limit).clamp(0, persistedMessages.length).toInt();
     return (
-      messages: legacyMessages.take(pageSize).toList(),
-      hasMore: legacyMessages.length > pageSize,
+      messages: persistedMessages.sublist(start, end),
+      hasMore: end < persistedMessages.length,
     );
   }
 
@@ -404,7 +581,8 @@ class ConversationHistoryService {
           final message = ChatMessageModel.fromJson(
             Map<String, dynamic>.from(json.cast<String, dynamic>()),
           );
-          return mode == ConversationMode.agent
+          return mode == ConversationMode.agent ||
+                  mode == ConversationMode.normal
               ? canonicalizeAgentHistoryMessage(message)
               : message;
         })
@@ -438,12 +616,6 @@ class ConversationHistoryService {
     if (legacyMessages.isEmpty) {
       return nativeMessages;
     }
-    if (expectedMessageCount != null &&
-        expectedMessageCount <= nativeMessages.length) {
-      await _clearLegacyConversationMessages(conversationId, mode: mode);
-      return nativeMessages;
-    }
-
     final recoveredMessages = nativeMessages.isEmpty
         ? legacyMessages
         : _mergeMessageSnapshots(
@@ -531,6 +703,7 @@ class ConversationHistoryService {
     if (prefs == null) {
       return <ChatMessageModel>[];
     }
+    final snapshots = <List<ChatMessageModel>>[];
     for (final key in _legacyConversationMessageKeys(
       conversationId,
       mode: mode,
@@ -543,27 +716,24 @@ class ConversationHistoryService {
         final decoded = jsonDecode(raw);
         final messages = _decodeMessageList(decoded, mode: mode);
         if (messages.isNotEmpty) {
-          return messages;
+          snapshots.add(messages);
         }
       } catch (e) {
         debugPrint('解析旧版对话历史失败 key=$key: $e');
       }
     }
-    return <ChatMessageModel>[];
-  }
-
-  static Future<void> _writeLegacyConversationMessages(
-    int conversationId,
-    List<Map<String, dynamic>> jsonList, {
-    required ConversationMode mode,
-  }) async {
-    final prefs = await _optionalSharedPreferences(operation: '写入旧版对话历史兜底');
-    if (prefs == null) {
-      return;
+    if (snapshots.isEmpty) {
+      return <ChatMessageModel>[];
     }
-    await prefs.setString(
-      conversationMessagesKey(conversationId, mode: mode),
-      jsonEncode(jsonList),
+    if (snapshots.length == 1) {
+      return snapshots.single;
+    }
+    // A conversation can have been written to more than one legacy bucket
+    // during the normal -> agent migration. Read all buckets and merge by
+    // stable message identity instead of stopping at the first non-empty key.
+    return _mergeMessageSnapshots(
+      nativeMessages: const <ChatMessageModel>[],
+      legacyMessages: snapshots.expand((snapshot) => snapshot).toList(),
     );
   }
 
@@ -616,14 +786,14 @@ class ConversationHistoryService {
     required String entryId,
     required Map<String, dynamic> cardData,
     int? createdAtMillis,
-    ConversationMode mode = ConversationMode.normal,
+    ConversationMode mode = ConversationMode.agent,
   }) async {
     final normalizedEntryId = entryId.trim();
     if (normalizedEntryId.isEmpty) return;
     try {
       await _assistCore.invokeMethod('upsertConversationUiCard', {
         'conversationId': conversationId,
-        'mode': mode.storageValue,
+        'mode': mode.canonicalStorageValue,
         'entryId': normalizedEntryId,
         'cardData': cardData,
         'createdAt': createdAtMillis,
@@ -638,19 +808,25 @@ class ConversationHistoryService {
   /// 清除对话消息
   static Future<void> clearConversationMessages(
     int conversationId, {
-    ConversationMode mode = ConversationMode.normal,
-  }) async {
-    try {
-      await _assistCore.invokeMethod('clearConversationMessages', {
-        'conversationId': conversationId,
-        'mode': mode.storageValue,
-      });
-    } on PlatformException catch (e) {
-      debugPrint('清理对话历史失败: ${e.message}');
-    } catch (e) {
-      debugPrint('清理对话历史异常: $e');
-    }
-    await _clearLegacyConversationMessages(conversationId, mode: mode);
+    ConversationMode mode = ConversationMode.agent,
+  }) {
+    final key = '${mode.canonicalStorageValue}:$conversationId';
+    return _enqueueConversationMessageWrite(key, () async {
+      _acknowledgedWrites.remove(
+        '${mode.canonicalStorageValue}:$conversationId',
+      );
+      try {
+        await _assistCore.invokeMethod('clearConversationMessages', {
+          'conversationId': conversationId,
+          'mode': mode.canonicalStorageValue,
+        });
+      } on PlatformException catch (e) {
+        debugPrint('清理对话历史失败: ${e.message}');
+      } catch (e) {
+        debugPrint('清理对话历史异常: $e');
+      }
+      await _clearLegacyConversationMessages(conversationId, mode: mode);
+    });
   }
 }
 
@@ -663,5 +839,5 @@ class ConversationMessageStorageKey {
   final int conversationId;
   final ConversationMode mode;
 
-  String get threadKey => '${mode.storageValue}:$conversationId';
+  String get threadKey => '${mode.canonicalStorageValue}:$conversationId';
 }
