@@ -1,0 +1,61 @@
+name: Build LiteRT MediaTek dispatch lib
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install NDK r28b + bazelisk
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          curl -sSL -o /usr/local/bin/bazel "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64"
+          chmod +x /usr/local/bin/bazel
+          bazel --version || true
+
+      - name: Fetch LiteRT source
+        run: |
+          mkdir -p /tmp/lrt && cd /tmp/lrt
+          curl -sSL -o lrt.tar.gz "https://codeload.github.com/google-ai-edge/LiteRT/tar.gz/refs/heads/main"
+          tar xzf lrt.tar.gz
+          ls
+
+      - name: Build MediaTek dispatch for android_arm64
+        working-directory: /tmp/lrt/LiteRT-main
+        run: |
+          bazel build --config=android_arm64 -c opt //litert/vendors/mediatek/dispatch:dispatch_api_so 2>&1 | tail -60
+
+      - name: Collect shared libraries
+        run: |
+          mkdir -p /tmp/out
+          find /tmp/lrt/LiteRT-main/bazel-bin -name "*.so" -exec cp -v {} /tmp/out/ \; || true
+          ls -la /tmp/out
+
+      - name: Pack and upload as release asset
+        run: |
+          cd /tmp/out
+          tar czf /tmp/litert-mtk-dispatch.tar.gz .
+          ls -la /tmp/litert-mtk-dispatch.tar.gz
+          sha256sum /tmp/litert-mtk-dispatch.tar.gz
+          curl -sS -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Content-Type: application/gzip" --data-binary "@/tmp/litert-mtk-dispatch.tar.gz" "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/386793380/assets?name=litert-mtk-dispatch.tar.gz" -o /tmp/up.json
+          head -c 300 /tmp/up.json
+
+      - name: Upload artifact backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: litert-mtk-dispatch
+          path: /tmp/litert-mtk-dispatch.tar.gz
+          if-no-files-found: error
