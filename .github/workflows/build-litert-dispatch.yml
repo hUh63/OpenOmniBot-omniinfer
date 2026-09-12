@@ -43,7 +43,8 @@ jobs:
       - name: Collect shared libraries
         run: |
           mkdir -p /tmp/out
-          find /tmp/lrt/LiteRT-main/bazel-bin -name "*.so" -exec cp -v {} /tmp/out/ \; || true
+          cp -v /tmp/lrt/LiteRT-main/bazel-bin/litert/vendors/mediatek/dispatch/*.so /tmp/out/ || true
+          find -L /tmp/lrt/LiteRT-main/bazel-bin -name "*.so" -exec cp -v {} /tmp/out/ \; || true
           ls -la /tmp/out
 
       - name: Pack and upload as release asset
