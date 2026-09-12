@@ -22,9 +22,11 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
           echo "ANDROID_NDK=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-          curl -sSL -o /usr/local/bin/bazel "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64"
-          chmod +x /usr/local/bin/bazel
-          bazel --version || true
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL -o "$HOME/.local/bin/bazel" "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64"
+          chmod +x "$HOME/.local/bin/bazel"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bazel" --version || true
 
       - name: Fetch LiteRT source
         run: |
