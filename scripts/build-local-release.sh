@@ -32,7 +32,7 @@ Usage:
   bash scripts/build-local-release.sh [options]
 
 Options:
-  --edition standard  Build the Android release APK. Defaults to standard. Options: standard|omniinfer|all.
+  --edition standard|omniinfer  Build the Android release APK. Defaults to standard.
   --install           Build one release APK and install it with adb.
   --bundle            Unsupported; APK only for now.
   --skip-flutter      Skip `flutter pub get` in ui/.
@@ -521,7 +521,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --edition)
       if [[ $# -lt 2 ]]; then
-        echo "--edition requires the value: standard" >&2
+        echo "--edition requires the value: standard or omniinfer" >&2
         exit 1
       fi
       EDITION="$2"
@@ -630,9 +630,6 @@ case "$EDITION" in
     ;;
   omniinfer)
     EDITIONS=(omniinfer)
-    ;;
-  all)
-    EDITIONS=(standard omniinfer)
     ;;
   *)
     echo "Invalid edition: $EDITION" >&2
