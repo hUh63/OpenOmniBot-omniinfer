@@ -18,7 +18,7 @@ jobs:
           curl -sS -m 1800 -L \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/560982947" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/561011745" \
             -o /tmp/src_full.tar.gz
           ls -la /tmp/src_full.tar.gz
 
