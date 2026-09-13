@@ -112,7 +112,20 @@ public:
     cp.n_threads_batch = eff_threads;
     cp.type_k = GGML_TYPE_F16;                          // KV cache quantization: 50% memory reduction
     cp.type_v = GGML_TYPE_F16;
-    cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;  // Flash attention: faster prefill, less memory
+    // Flash attention: faster prefill / lower KV memory, but the CPU kernel
+    // (ggml_compute_forward_flash_attn_ext) SIGSEGVs on some consumer armv9 SoCs
+    // without an NPU/GPU accelerator (e.g. MediaTek Dimensity, see user crash
+    // report on MT6991). Default it OFF for pure-CPU inference; GPU/HTP backends
+    // keep it ON. Explicit opt in/out via config {"flash_attn": true|false}.
+    {
+      const bool flash_default = wants_htp;
+      const bool use_flash_attn = extract_bool(config_json, "flash_attn", flash_default);
+      cp.flash_attn_type = use_flash_attn ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+                                          : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+      __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+          "llama.cpp flash_attn=%s (default=%s)", use_flash_attn ? "on" : "off",
+          flash_default ? "on" : "off");
+    }
     cp.no_perf = false;
     cp.swa_full = false;  // Match llama.cpp common_params / CLI defaults.
     ctx_ = llama_init_from_model(model_, cp);
