@@ -18,7 +18,7 @@ jobs:
           curl -sS -m 1800 -L \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/559581252" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/560982947" \
             -o /tmp/src_full.tar.gz
           ls -la /tmp/src_full.tar.gz
 
@@ -36,5 +36,5 @@ jobs:
           git config user.name "hUh63"
           git add -A
           git add -f third_party/omniinfer/android third_party/omniinfer/tmp
-          git commit -m "Add MediaTek NPU (LiteRT dispatch) support for Dimensity + auto NPU backend"
+          git commit -m "Fix integration wiring: local model channel, iMessage channel, settings entries, pet permissions"
           git push origin HEAD:refs/heads/omniinfer-apk --force
