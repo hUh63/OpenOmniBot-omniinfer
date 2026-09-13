@@ -8,12 +8,16 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.UUID
 
 internal class RemoteCodexAppServerSession(
     private val scope: CoroutineScope,
@@ -21,9 +25,14 @@ internal class RemoteCodexAppServerSession(
     private val connectionFactory: () -> RemoteCodexAppServerConnection
 ) {
     private val gson = Gson()
+    /** Identity of this app-server transport instance, not an ACP session id. */
+    internal val connectionToken: String = UUID.randomUUID().toString()
     private val writeMutex = Mutex()
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<Map<String, Any?>>>()
     private val nextId = AtomicLong(1L)
+
+    @Volatile
+    private var initializeResult: Map<String, Any?> = emptyMap()
 
     @Volatile
     private var connection: RemoteCodexAppServerConnection? = null
@@ -40,12 +49,8 @@ internal class RemoteCodexAppServerSession(
         startedConnection.start(
             onStdoutLine = ::handleStdoutLine,
             onStderrLine = { line ->
-                onServerMessage(
-                    mapOf(
-                        "method" to "codex/stderr",
-                        "params" to mapOf("message" to line)
-                    )
-                )
+                // The bridge stderr is diagnostic output, not an Agent event.
+                // Keep it out of the ACP session stream.
             },
             onExit = { exitCode ->
                 handleConnectionExit(startedConnection, exitCode)
@@ -54,24 +59,27 @@ internal class RemoteCodexAppServerSession(
 
         try {
             withTimeout(INITIALIZE_TIMEOUT_MS) {
-                sendRequest(
+                val response = sendRequest(
                     method = "initialize",
                     params = buildInitializeParams(clientVersion),
                     timeoutMs = INITIALIZE_TIMEOUT_MS
                 )
+                initializeResult = (response["result"] as? Map<*, *>).orEmpty()
+                    .entries
+                    .associate { (key, value) -> key.toString() to value }
             }
             sendNotification("initialized", null)
             onServerMessage(
                 mapOf(
                     "method" to "codex/connected",
-                    "params" to mapOf("workspaceId" to DEFAULT_WORKSPACE_ID)
+                    "params" to mapOf("clientVersion" to clientVersion),
                 )
             )
         } catch (error: Throwable) {
             disconnect()
             if (error is TimeoutCancellationException) {
                 throw IllegalStateException(
-                    "Codex app-server did not respond to initialize.",
+                    "Remote ACP agent did not respond to initialize.",
                     error
                 )
             }
@@ -85,7 +93,7 @@ internal class RemoteCodexAppServerSession(
         timeoutMs: Long = REQUEST_TIMEOUT_MS
     ): Map<String, Any?> {
         val currentConnection = connection
-        check(currentConnection?.isRunning == true) { "Codex app-server is not connected." }
+        check(currentConnection?.isRunning == true) { "Remote ACP agent is not connected." }
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<Map<String, Any?>>()
         pending[id] = deferred
@@ -101,7 +109,25 @@ internal class RemoteCodexAppServerSession(
             }
         } catch (error: Throwable) {
             pending.remove(id)
+            if (error is TimeoutCancellationException || error is CancellationException) {
+                cancelInFlightRequest(currentConnection, id)
+            }
             throw error
+        }
+    }
+
+    private suspend fun cancelInFlightRequest(
+        requestConnection: RemoteCodexAppServerConnection,
+        requestId: Long,
+    ) {
+        withContext(NonCancellable) {
+            if (connection !== requestConnection || !requestConnection.isRunning) return@withContext
+            runCatching {
+                sendNotification(
+                    "$/cancel_request",
+                    mapOf("requestId" to requestId),
+                )
+            }
         }
     }
 
@@ -126,11 +152,14 @@ internal class RemoteCodexAppServerSession(
         val currentConnection = connection
         connection = null
         pending.forEach { (_, deferred) ->
-            deferred.completeExceptionally(IllegalStateException("Codex app-server disconnected."))
+            deferred.completeExceptionally(IllegalStateException("Remote ACP agent disconnected."))
         }
         pending.clear()
+        initializeResult = emptyMap()
         currentConnection?.close()
     }
+
+    fun initializePayload(): Map<String, Any?> = initializeResult
 
     private suspend fun handleConnectionExit(
         exitedConnection: RemoteCodexAppServerConnection,
@@ -142,14 +171,15 @@ internal class RemoteCodexAppServerSession(
         connection = null
         pending.forEach { (_, deferred) ->
             deferred.completeExceptionally(
-                IllegalStateException("Codex app-server exited.")
+                IllegalStateException("Remote ACP agent exited.")
             )
         }
         pending.clear()
         onServerMessage(
             mapOf(
                 "method" to "codex/disconnected",
-                "params" to mapOf("exitCode" to exitCode)
+                "_remoteConnectionToken" to connectionToken,
+                "params" to mapOf("exitCode" to exitCode),
             )
         )
     }
@@ -184,7 +214,7 @@ internal class RemoteCodexAppServerSession(
     private suspend fun writeJsonLine(message: Map<String, Any?>) {
         val line = gson.toJson(toJsonElement(message)) + "\n"
         val currentConnection = connection
-            ?: throw IllegalStateException("Codex app-server stdin is closed.")
+            ?: throw IllegalStateException("Remote ACP agent stdin is closed.")
         writeMutex.withLock {
             currentConnection.writeLine(line)
         }
@@ -196,13 +226,21 @@ internal class RemoteCodexAppServerSession(
 
     private fun buildInitializeParams(clientVersion: String): Map<String, Any?> {
         return mapOf(
+            "protocolVersion" to 1,
             "clientInfo" to mapOf(
                 "name" to "omnibot_android",
                 "title" to "Omnibot",
                 "version" to clientVersion
             ),
-            "capabilities" to mapOf(
-                "experimentalApi" to true
+            "clientCapabilities" to mapOf(
+                "experimentalApi" to true,
+                "fs" to mapOf(
+                    "readTextFile" to true,
+                    "writeTextFile" to true
+                ),
+                "terminal" to mapOf(
+                    "create" to true
+                )
             )
         )
     }

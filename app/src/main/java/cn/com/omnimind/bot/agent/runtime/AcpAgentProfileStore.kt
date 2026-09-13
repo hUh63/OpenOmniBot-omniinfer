@@ -1,9 +1,18 @@
 package cn.com.omnimind.bot.agent.runtime
 
 import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.util.UUID
+
+internal data class AcpAgentConfigAuditEntry(
+    val revision: Long,
+    val operation: String,
+    val paths: List<String>,
+    val createdAt: Long,
+)
 
 internal data class AcpAgentProfile(
     val id: String,
@@ -13,13 +22,14 @@ internal data class AcpAgentProfile(
     val arguments: List<String> = emptyList(),
     val environment: Map<String, String> = emptyMap(),
     val enabled: Boolean = true,
-    val builtIn: Boolean = false
+    val builtIn: Boolean = false,
+    @Transient val officialRuntime: AcpOfficialRuntime? = null,
 ) {
     fun toPayload(
         selected: Boolean = false,
         health: AcpAgentHealth = AcpAgentHealth()
     ): Map<String, Any?> {
-        val runtime = AcpAgentProfileStore.officialRuntime(this)
+        val runtime = officialRuntime
         return linkedMapOf(
             "id" to id,
             "name" to name,
@@ -36,10 +46,42 @@ internal data class AcpAgentProfile(
             "lastCheckError" to health.error,
             "lastCheckLatencyMs" to health.latencyMs,
             "lastCheckAt" to health.checkedAt,
-            "capabilities" to health.capabilities,
+            // Keep the read-only health result useful before a live ACP
+            // handshake. Negotiated values always win; declared values are
+            // only the official Harness composition contract and are shown
+            // under the same generic capabilities map for all profiles.
+            "capabilities" to mergeCapabilities(
+                declared = runtime?.declaredCapabilities.orEmpty(),
+                negotiated = health.capabilities,
+            ),
             "discoveryCommand" to runtime?.discoveryCommand,
             "managedAdapter" to (runtime?.managedAdapterPackage != null)
         )
+    }
+
+    private fun mergeCapabilities(
+        declared: Map<String, Any?>,
+        negotiated: Map<String, Any?>,
+    ): Map<String, Any?> {
+        if (declared.isEmpty()) return negotiated
+        if (negotiated.isEmpty()) return declared
+        val merged = LinkedHashMap<String, Any?>(declared)
+        negotiated.forEach { (key, value) ->
+            val declaredValue = merged[key]
+            if (declaredValue is Map<*, *> && value is Map<*, *>) {
+                val nested = LinkedHashMap<String, Any?>()
+                declaredValue.forEach { (nestedKey, nestedValue) ->
+                    nested[nestedKey.toString()] = nestedValue
+                }
+                value.forEach { (nestedKey, nestedValue) ->
+                    nested[nestedKey.toString()] = nestedValue
+                }
+                merged[key] = nested
+            } else {
+                merged[key] = value
+            }
+        }
+        return merged
     }
 }
 
@@ -49,7 +91,8 @@ internal data class AcpAgentHealth(
     val error: String? = null,
     val latencyMs: Long? = null,
     val checkedAt: Long? = null,
-    val capabilities: Map<String, Any?> = emptyMap()
+    val capabilities: Map<String, Any?> = emptyMap(),
+    val preparationRevision: String? = null,
 ) {
     companion object {
         const val STATUS_ONLINE = "online"
@@ -66,62 +109,23 @@ internal data class AcpOfficialRuntime(
         ?.let { listOf(it) }
         .orEmpty(),
     val requiresNativeBuildTools: Boolean = false,
-    val managedAdapterHealthCommand: String? = null
+    val managedAdapterHealthCommand: String? = null,
+    val harnessAdapter: AcpHarnessAdapter = AcpHarnessAdapters.standard,
+    val usesSharedProvider: Boolean = false,
+    val terminalPackageId: String? = null,
+    val managedInstallScriptPath: String? = null,
+    val managedInstallCommand: String? = null,
+    val preparationRevision: String? = null,
+    val embedded: Boolean = false,
+    /**
+     * Capabilities known from the official Harness composition, before an
+     * ACP initialize handshake has happened. These are intentionally kept
+     * separate from the negotiated ACP capabilities returned by initialize.
+     * A health probe must remain read-only, but the UI still needs to explain
+     * what an installed Harness can do.
+     */
+    val declaredCapabilities: Map<String, Any?> = emptyMap(),
 )
-
-internal const val DEEPSEEK_HARNESS_NPM_CHANNEL = "next"
-internal val DEEPSEEK_HARNESS_NPM_PACKAGE_NAMES = listOf(
-    "@deepseek-ai/dsh-acp-demo",
-    "@deepseek-ai/dsh-llm-deepseek",
-    "@deepseek-ai/dsh-sandbox-local",
-    "@deepseek-ai/dsh-sandbox-policy",
-    "@deepseek-ai/dsh-subprocess-local",
-    "@deepseek-ai/dsh-bash-sandbox",
-    "@deepseek-ai/dsh-user-approval"
-)
-internal val DEEPSEEK_HARNESS_NPM_PACKAGE_SPECS =
-    DEEPSEEK_HARNESS_NPM_PACKAGE_NAMES.map { packageName ->
-        "$packageName@$DEEPSEEK_HARNESS_NPM_CHANNEL"
-    }
-internal const val DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND =
-    "node -e 'const { createRequire } = require(\"node:module\"); " +
-        "createRequire(\"/root/.npm-global/lib/node_modules/" +
-        "@deepseek-ai/dsh-subprocess-local/package.json\")(\"node-pty\");'"
-internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
-    repair_deepseek_harness_node_pty() {
-      node_pty_dir='/root/.npm-global/lib/node_modules/@deepseek-ai/dsh-subprocess-local/node_modules/node-pty'
-      if [ -f "${'$'}node_pty_dir/package.json" ] &&
-         ! $DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND >/dev/null 2>&1; then
-        (
-          cd "${'$'}node_pty_dir"
-          node-gyp configure
-          sed -i 's|^cmd_copy = .*|cmd_copy = rm -rf "${'$'}@" \&\& cp -af "${'$'}<" "${'$'}@"|' build/Makefile
-          node-gyp build
-        )
-      fi
-    }
-    install_deepseek_harness_packages() {
-      hardlink_helper='/tmp/omnibot-node-gyp-copy'
-      rm -rf "${'$'}hardlink_helper"
-      mkdir -p "${'$'}hardlink_helper"
-      printf '%s\n' \
-        '#!/bin/sh' \
-        'if [ "${'$'}1" = "-f" ]; then exit 1; fi' \
-        'exec /bin/ln "${'$'}@"' > "${'$'}hardlink_helper/ln"
-      chmod 755 "${'$'}hardlink_helper/ln"
-      if PATH="${'$'}hardlink_helper:${'$'}PATH" npm install -g --prefix /root/.npm-global \
-          --no-audit --no-fund ${DEEPSEEK_HARNESS_NPM_PACKAGE_SPECS.joinToString(" ")}; then
-        install_status=0
-      else
-        install_status=${'$'}?
-      fi
-      rm -rf "${'$'}hardlink_helper"
-      return "${'$'}install_status"
-    }
-    install_deepseek_harness_packages
-    repair_deepseek_harness_node_pty
-    $DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND
-""".trimIndent()
 
 /**
  * ACP Agent registry inspired by AionUi's managed-agent catalog:
@@ -129,29 +133,56 @@ internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
  * custom ACP commands are persisted separately from API credentials.
  */
 internal class AcpAgentProfileStore(context: Context) {
+    private val appContext = context.applicationContext
+    private val catalog = AcpAgentCatalog.load(appContext)
     private val preferences = context.applicationContext.getSharedPreferences(
         PREFERENCES_NAME,
         Context.MODE_PRIVATE
     )
     private val gson = Gson()
+    private val configHistoryPreferences by lazy {
+        val masterKey = MasterKey.Builder(appContext)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            appContext,
+            CONFIG_HISTORY_PREFERENCES_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
 
     @Synchronized
     fun list(): List<AcpAgentProfile> {
+        migrateLegacyXiaowanAliases()
         val stored = readStoredProfiles()
             .mapNotNull(::normalize)
-            .filterNot { it.id in RETIRED_AGENT_IDS }
+            .filterNot { it.id in catalog.retiredAgentIds }
         val storedById = stored.associateBy { it.id }
-        val official = OFFICIAL_AGENTS.map { definition ->
+        val official = catalog.agents.map { definition ->
             val override = storedById[definition.id] ?: return@map definition
+            val migratedOfficialCommand =
+                definition.id == DEEPSEEK_HARNESS_AGENT_ID &&
+                    override.command == "dsh-acp"
             definition.copy(
-                command = override.command,
-                arguments = override.arguments,
+                command = if (migratedOfficialCommand) definition.command else override.command,
+                arguments = if (migratedOfficialCommand) definition.arguments else override.arguments,
                 environment = override.environment,
-                enabled = override.enabled
+                enabled = override.enabled,
+                officialRuntime = if (
+                    migratedOfficialCommand ||
+                    (override.command == definition.command &&
+                        override.arguments == definition.arguments)
+                ) {
+                    definition.officialRuntime
+                } else {
+                    null
+                },
             )
         }
         val custom = stored
-            .filterNot { it.id in OFFICIAL_AGENT_IDS }
+            .filterNot { it.id in catalog.officialIds }
             .map { it.copy(builtIn = false) }
         return official + custom
     }
@@ -175,13 +206,65 @@ internal class AcpAgentProfileStore(context: Context) {
     }
 
     fun agentIdForSession(sessionId: String): String? {
+        migrateLegacyXiaowanAliases()
         return sessionBindings()[sessionId.trim()]
             ?.takeIf(String::isNotBlank)
-            ?.takeUnless { it in RETIRED_AGENT_IDS }
+            ?.takeUnless { it in catalog.retiredAgentIds }
+    }
+
+    /** Embedded Agent settings share the existing session owner and deletion path. */
+    fun sessionConfiguration(sessionId: String): Map<String, String> {
+        val raw = preferences.getString("session_config:$sessionId", null) ?: return emptyMap()
+        return gson.fromJson(raw, object : TypeToken<Map<String, String>>() {}.type)
+    }
+
+    fun saveSessionConfiguration(sessionId: String, values: Map<String, String>) {
+        check(preferences.edit().putString("session_config:$sessionId", gson.toJson(values)).commit()) {
+            "Failed to persist ACP session configuration."
+        }
+    }
+
+    /**
+     * Remove the durable owner of an ACP session after `session/delete`.
+     *
+     * Session ownership is separate from the Room conversation binding: the
+     * conversation is intentionally preserved by the host, while a deleted
+     * ACP session must not be resurrected as belonging to the old Harness on
+     * the next load/switch.
+     */
+    @Synchronized
+    fun unbindSession(sessionId: String) {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isEmpty()) return
+        val bindings = sessionBindings().toMutableMap()
+        preferences.edit().remove("session_config:$normalizedSessionId").apply()
+        if (bindings.remove(normalizedSessionId) != null) {
+            preferences.edit()
+                .putString(KEY_SESSION_BINDINGS, gson.toJson(bindings))
+                .apply()
+        }
     }
 
     @Synchronized
     fun bindConversation(conversationId: Long, agentId: String) {
+        if (conversationId <= 0L) return
+        val normalizedAgentId = agentId.trim()
+        if (normalizedAgentId.isEmpty()) return
+        val bindings = conversationBindings().toMutableMap()
+        val key = conversationId.toString()
+        val currentAgentId = bindings[key]
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.takeUnless { it in catalog.retiredAgentIds }
+        // Existing ownership is immutable. Harness switching creates a new
+        // conversation; only retired aliases may be replaced by migration.
+        if (currentAgentId != null) return
+        bindings[key] = normalizedAgentId
+        preferences.edit().putString(KEY_CONVERSATION_BINDINGS, gson.toJson(bindings)).apply()
+    }
+
+    @Synchronized
+    fun repairConversationBinding(conversationId: Long, agentId: String) {
         if (conversationId <= 0L) return
         val normalizedAgentId = agentId.trim()
         if (normalizedAgentId.isEmpty()) return
@@ -192,9 +275,10 @@ internal class AcpAgentProfileStore(context: Context) {
 
     fun agentIdForConversation(conversationId: Long): String? {
         if (conversationId <= 0L) return null
+        migrateLegacyXiaowanAliases()
         return conversationBindings()[conversationId.toString()]
             ?.takeIf(String::isNotBlank)
-            ?.takeUnless { it in RETIRED_AGENT_IDS }
+            ?.takeUnless { it in catalog.retiredAgentIds }
     }
 
     @Synchronized
@@ -225,7 +309,7 @@ internal class AcpAgentProfileStore(context: Context) {
             ?: selected().id
         val requestedId = raw.id.trim()
         val targetId = requestedId.ifBlank { UUID.randomUUID().toString() }
-        val officialDefinition = OFFICIAL_AGENTS.firstOrNull { it.id == targetId }
+        val officialDefinition = catalog.definition(targetId)
         val candidate = if (officialDefinition != null) {
             officialDefinition.copy(
                 command = raw.command,
@@ -257,11 +341,11 @@ internal class AcpAgentProfileStore(context: Context) {
     fun delete(id: String) {
         val normalizedId = id.trim()
         require(normalizedId.isNotEmpty()) { "Agent id is required." }
-        require(normalizedId !in OFFICIAL_AGENT_IDS) {
+        require(normalizedId !in catalog.officialIds) {
             "Official ACP agents cannot be deleted."
         }
         val remaining = list().filterNot { it.builtIn || it.id == normalizedId }
-        val officialOverrides = readStoredProfiles().filter { it.id in OFFICIAL_AGENT_IDS }
+        val officialOverrides = readStoredProfiles().filter { it.id in catalog.officialIds }
         writeProfiles(officialOverrides + remaining)
         val remainingBindings = sessionBindings().filterValues { it != normalizedId }
         val remainingConversationBindings =
@@ -272,7 +356,9 @@ internal class AcpAgentProfileStore(context: Context) {
             .apply()
         clearHealth(normalizedId)
         if (preferences.getString(KEY_SELECTED_PROFILE_ID, null) == normalizedId) {
-            preferences.edit().putString(KEY_SELECTED_PROFILE_ID, DEFAULT_CODEX_AGENT_ID).apply()
+            // Xiaowan is the single built-in default entry.  Deleting a
+            // custom profile must not silently switch the user to Codex.
+            preferences.edit().putString(KEY_SELECTED_PROFILE_ID, XIAOWAN_AGENT_ID).apply()
         }
     }
 
@@ -295,6 +381,72 @@ internal class AcpAgentProfileStore(context: Context) {
         }
     }
 
+    /**
+     * Agent configuration is versioned at the existing profile store
+     * boundary. Snapshots are encrypted; the regular audit payload contains
+     * paths and operation names only, never credentials or file contents.
+     */
+    @Synchronized
+    fun recordConfigRevision(
+        agentId: String,
+        operation: String,
+        files: Map<String, String>,
+    ): AcpAgentConfigAuditEntry {
+        require(agentId.isNotBlank()) { "Agent id is required." }
+        require(files.isNotEmpty()) { "At least one config file is required." }
+        val history = readConfigAudit(agentId).toMutableList()
+        val revision = (history.maxOfOrNull { it.revision } ?: 0L) + 1L
+        val entry = AcpAgentConfigAuditEntry(
+            revision = revision,
+            operation = operation.trim().ifEmpty { "write" },
+            paths = files.keys.map(String::trim).filter(String::isNotEmpty),
+            createdAt = System.currentTimeMillis(),
+        )
+        val snapshots = readConfigSnapshots(agentId).toMutableMap()
+        snapshots[revision.toString()] = files
+        configHistoryPreferences.edit()
+            .putString(configAuditKey(agentId), gson.toJson(history + entry))
+            .putString(configSnapshotsKey(agentId), gson.toJson(snapshots))
+            .commit()
+            .also { check(it) { "Failed to persist Agent config revision." } }
+        return entry
+    }
+
+    fun configRevision(agentId: String): Long =
+        readConfigAudit(agentId).maxOfOrNull { it.revision } ?: 0L
+
+    fun configAudit(agentId: String): List<AcpAgentConfigAuditEntry> =
+        readConfigAudit(agentId)
+
+    fun configSnapshot(agentId: String, revision: Long): Map<String, String> {
+        require(revision > 0L) { "Config revision must be positive." }
+        return readConfigSnapshots(agentId)[revision.toString()]
+            ?: throw IllegalArgumentException(
+                "Unknown Agent config revision $revision for $agentId."
+            )
+    }
+
+    private fun readConfigAudit(agentId: String): List<AcpAgentConfigAuditEntry> = runCatching {
+        val raw = configHistoryPreferences.getString(configAuditKey(agentId), null)
+            ?: return@runCatching emptyList()
+        gson.fromJson<List<AcpAgentConfigAuditEntry>>(
+            raw,
+            object : TypeToken<List<AcpAgentConfigAuditEntry>>() {}.type,
+        )
+    }.getOrNull().orEmpty()
+
+    private fun readConfigSnapshots(agentId: String): Map<String, Map<String, String>> = runCatching {
+        val raw = configHistoryPreferences.getString(configSnapshotsKey(agentId), null)
+            ?: return@runCatching emptyMap()
+        gson.fromJson<Map<String, Map<String, String>>>(
+            raw,
+            object : TypeToken<Map<String, Map<String, String>>>() {}.type,
+        )
+    }.getOrNull().orEmpty()
+
+    private fun configAuditKey(agentId: String) = "audit:$agentId"
+    private fun configSnapshotsKey(agentId: String) = "snapshots:$agentId"
+
     private fun readStoredProfiles(): List<AcpAgentProfile> = runCatching {
         val json = preferences.getString(KEY_PROFILES, null)
             ?: return@runCatching emptyList()
@@ -304,13 +456,45 @@ internal class AcpAgentProfileStore(context: Context) {
         )
     }.getOrNull().orEmpty()
 
+    /**
+     * Older builds could persist the built-in Xiaowan command as a custom
+     * profile with the legacy id. Migrate that known identity and its stored
+     * references, without guessing from user-editable names or commands.
+     */
+    @Synchronized
+    private fun migrateLegacyXiaowanAliases() {
+        val stored = readStoredProfiles()
+        val aliases = stored.filter(::isLegacyXiaowanAlias)
+        if (aliases.isEmpty()) return
+        val aliasIds = aliases.mapTo(linkedSetOf()) { it.id }
+        writeProfiles(stored.filterNot { it.id in aliasIds })
+
+        val selectedId = preferences.getString(KEY_SELECTED_PROFILE_ID, null)
+        val sessionBindings = sessionBindings().mapValues { (_, agentId) ->
+            if (agentId in aliasIds) XIAOWAN_AGENT_ID else agentId
+        }
+        val conversationBindings = conversationBindings().mapValues { (_, agentId) ->
+            if (agentId in aliasIds) XIAOWAN_AGENT_ID else agentId
+        }
+        val health = readHealth().filterKeys { it !in aliasIds }
+        preferences.edit().apply {
+            if (selectedId in aliasIds) {
+                putString(KEY_SELECTED_PROFILE_ID, XIAOWAN_AGENT_ID)
+            }
+            putString(KEY_SESSION_BINDINGS, gson.toJson(sessionBindings))
+            putString(KEY_CONVERSATION_BINDINGS, gson.toJson(conversationBindings))
+            putString(KEY_HEALTH, gson.toJson(health))
+            apply()
+        }
+    }
+
     private fun writeProfiles(profiles: List<AcpAgentProfile>) {
         val persistable = profiles.filter { !it.builtIn || hasOfficialOverride(it) }
         preferences.edit().putString(KEY_PROFILES, gson.toJson(persistable)).apply()
     }
 
     private fun hasOfficialOverride(profile: AcpAgentProfile): Boolean {
-        val definition = OFFICIAL_AGENTS.firstOrNull { it.id == profile.id } ?: return true
+        val definition = catalog.definition(profile.id) ?: return true
         return profile.command != definition.command ||
             profile.arguments != definition.arguments ||
             profile.environment.isNotEmpty() ||
@@ -364,81 +548,38 @@ internal class AcpAgentProfileStore(context: Context) {
                         ?.let { it to value }
                 }
                 .toMap(),
-            builtIn = id in OFFICIAL_AGENT_IDS
+            builtIn = id in catalog.officialIds,
+            officialRuntime = catalog.definition(id)?.officialRuntime,
         )
     }
 
     companion object {
-        const val DEFAULT_CODEX_AGENT_ID = "codex-acp"
+        const val CODEX_AGENT_ID = "codex-acp"
         const val DEEPSEEK_HARNESS_AGENT_ID = "deepseek-harness-acp"
+        const val KIMI_CODE_AGENT_ID = "kimi-code-acp"
+        const val XIAOWAN_AGENT_ID = "xiaowan-acp"
+        const val DEFAULT_AGENT_ID = XIAOWAN_AGENT_ID
 
-        val OFFICIAL_AGENTS = listOf(
-            AcpAgentProfile(
-                id = DEFAULT_CODEX_AGENT_ID,
-                name = "Codex",
-                description = "OpenAI Codex through its managed ACP adapter",
-                command = "codex-acp",
-                builtIn = true
-            ),
-            AcpAgentProfile(
-                id = "claude-code-acp",
-                name = "Claude Code",
-                description = "Claude Code through the ACP adapter",
-                command = "claude-agent-acp",
-                builtIn = true
-            ),
-            AcpAgentProfile(
-                id = "opencode-acp",
-                name = "OpenCode",
-                description = "OpenCode ACP server",
-                command = "opencode",
-                arguments = listOf("acp"),
-                builtIn = true
-            ),
-            AcpAgentProfile(
-                id = DEEPSEEK_HARNESS_AGENT_ID,
-                name = "DeepSeek Harness",
-                description = "DeepSeek Harness coding agent through its official ACP server",
-                command = "dsh-acp-demo",
-                arguments = listOf("--config", DEEPSEEK_HARNESS_CORDIS_PATH),
-                builtIn = true
-            )
-        )
-        val DEFAULT_CODEX_AGENT = OFFICIAL_AGENTS.first()
-        private val OFFICIAL_AGENT_IDS = OFFICIAL_AGENTS.mapTo(linkedSetOf()) { it.id }
-        private val RETIRED_AGENT_IDS = setOf("gemini-cli-acp")
-        private val OFFICIAL_RUNTIMES = mapOf(
-            DEFAULT_CODEX_AGENT_ID to AcpOfficialRuntime(
-                discoveryCommand = "codex",
-                managedAdapterPackage = "@agentclientprotocol/codex-acp@1.1.7"
-            ),
-            "claude-code-acp" to AcpOfficialRuntime(
-                discoveryCommand = "claude",
-                managedAdapterPackage = "@agentclientprotocol/claude-agent-acp@0.61.0"
-            ),
-            "opencode-acp" to AcpOfficialRuntime(discoveryCommand = "opencode"),
-            DEEPSEEK_HARNESS_AGENT_ID to AcpOfficialRuntime(
-                discoveryCommand = "node",
-                managedAdapterPackage = DEEPSEEK_HARNESS_NPM_PACKAGE_SPECS.first(),
-                managedAdapterPackages = DEEPSEEK_HARNESS_NPM_PACKAGE_SPECS,
-                requiresNativeBuildTools = true,
-                managedAdapterHealthCommand = DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND
-            )
-        )
+        /**
+         * Compatibility accessor for callers that already have a resolved
+         * profile. The catalog owns the descriptor; this method does not
+         * contain an Agent list or a vendor lookup.
+         */
+        fun officialRuntime(profile: AcpAgentProfile): AcpOfficialRuntime? =
+            profile.officialRuntime
 
-        fun officialRuntime(profile: AcpAgentProfile): AcpOfficialRuntime? {
-            val definition = OFFICIAL_AGENTS.firstOrNull { it.id == profile.id }
-                ?: return null
-            if (
-                profile.command != definition.command ||
-                profile.arguments != definition.arguments
-            ) {
-                return null
-            }
-            return OFFICIAL_RUNTIMES[profile.id]
+        fun usesSharedProvider(profile: AcpAgentProfile): Boolean =
+            profile.officialRuntime?.usesSharedProvider == true
+
+        internal fun isLegacyXiaowanAlias(profile: AcpAgentProfile): Boolean {
+            // Names and commands are user configuration, not identity.
+            // Only the known persisted legacy id authorizes migration.
+            return profile.id.equals("legacy-xiaowan-bot", ignoreCase = true) ||
+                profile.id.equals("legacy-xiaowan-command", ignoreCase = true)
         }
 
         private const val PREFERENCES_NAME = "acp_agent_profiles"
+        private const val CONFIG_HISTORY_PREFERENCES_NAME = "acp_agent_config_history"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_SELECTED_PROFILE_ID = "selected_profile_id"
         private const val KEY_SESSION_BINDINGS = "session_bindings"

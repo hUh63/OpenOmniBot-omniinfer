@@ -13,7 +13,10 @@ internal object LiteRtLmBackendSupport {
             normalized == "litert-lm" ||
             normalized == "litert-gpu" ||
             normalized == "litertlm-gpu" ||
-            normalized == "litert-lm-gpu"
+            normalized == "litert-lm-gpu" ||
+            normalized == "litert-npu" ||
+            normalized == "litertlm-npu" ||
+            normalized == "litert-lm-npu"
     }
 
     fun create(

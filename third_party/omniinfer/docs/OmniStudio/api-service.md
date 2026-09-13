@@ -250,10 +250,17 @@ curl -X POST http://127.0.0.1:9000/omni/model/select \
   -d '{
     "model": "path/to/model.gguf",
     "backend": "llama.cpp-cuda",
-    "ctx_size": 4096,
-    "launch_args": ["-ngl", "999"]
+    "ctx_size": 4096
   }'
 ```
+
+Official llama.cpp CUDA backends use automatic placement by default. Leaving
+the GPU-layer argument unset lets llama.cpp partially offload to host memory
+when full VRAM placement does not fit. Use `"launch_args": ["-ngl", "999"]`
+only when full GPU offload is required and a pre-launch capacity failure is
+preferred. Successful automatic/partial loads expose `runtime_placement` and
+the reconciled host/CUDA budget in both the response and `GET /omni/state`;
+unsafe post-start reconciliation returns `502` and rolls back the runtime.
 
 Repeating the same resolved model, backend, `mmproj`, context size, and launch arguments is an idempotent success with `already_loaded: true`. If runtime settings differ, OmniInfer returns `409`, `requires_reload: true`, and the current and requested configurations without changing the running model.
 
@@ -274,10 +281,10 @@ curl -X POST http://127.0.0.1:9000/omni/cache/clear
 Response:
 
 ```json
-{"ok": true, "message": "KV cache cleared"}
+{"ok": true, "message": "KV cache cleared", "cache_policy": "cleared_each_run", "cleared_slots": [0, 1]}
 ```
 
-After clearing, the next request starts with a cold cache — equivalent to a fresh model load but without the weight-loading overhead.
+The gateway first reads the runtime slot count and erases every slot. If any slot cannot be erased, the request fails instead of reporting a partial clear. Cross-run RAM caches must still be disabled in the runtime launch arguments.
 
 ### Stop the Service
 

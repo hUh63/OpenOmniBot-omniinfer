@@ -12,6 +12,7 @@ object OmniInferLocalRuntime {
     const val BACKEND_OMNIINFER_MNN = "omniinfer-mnn"
     const val BACKEND_EXECUTORCH_QNN = "executorch-qnn"
     const val BACKEND_LITERT = "litert"
+    const val BACKEND_LITERT_NPU = "litert-npu"
 
     private const val MMKV_ID = "omniinfer_config"
     private const val KEY_API_PORT = "apiPort"

@@ -5,20 +5,38 @@ enum ConversationMode {
   chatOnly('chat_only'),
   openclaw('openclaw'),
   subagent('subagent'),
-  agent('codex');
+  agent('agent');
 
   const ConversationMode(this.storageValue);
 
   final String storageValue;
 
+  String get canonicalStorageValue => storageValue;
+
   static ConversationMode fromStorageValue(String? value) {
     final normalized = value?.trim().toLowerCase() ?? '';
+    switch (normalized) {
+      // `codex` is the legacy database value from an earlier build. The
+      // domain mode is generic Agent; Codex is only one possible Harness.
+      case 'agent':
+      case 'codex':
+      case 'acp':
+      case 'coding':
+      case 'normal':
+        return ConversationMode.agent;
+      case 'chat':
+      case 'chatonly':
+      case 'chat-only':
+        return ConversationMode.chatOnly;
+    }
     for (final mode in ConversationMode.values) {
       if (mode.storageValue == normalized) {
         return mode;
       }
     }
-    return ConversationMode.normal;
+    // Missing/unknown mode is a new-data boundary. `normal` is handled above
+    // as a legacy alias, so no new conversation can re-enter that split path.
+    return ConversationMode.agent;
   }
 
   String get displayLabel => switch (this) {
@@ -26,7 +44,6 @@ enum ConversationMode {
     ConversationMode.chatOnly => LegacyTextLocalizer.localize('纯聊天'),
     ConversationMode.openclaw => 'OpenClaw',
     ConversationMode.subagent => 'SubAgent',
-    // `codex` 仅保留为旧数据库的持久化值，代码语义统一使用 Agent。
     ConversationMode.agent => 'Agent',
   };
 }
@@ -63,7 +80,7 @@ class ConversationModel {
 
   ConversationModel({
     required this.id,
-    this.mode = ConversationMode.normal,
+    this.mode = ConversationMode.agent,
     this.agentCwd,
     this.agentId,
     this.isArchived = false,
@@ -258,6 +275,14 @@ class ConversationModel {
 
   bool get isActive => status == 0;
 
+  /// Whether the conversation has reached its durable terminal state.
+  ///
+  /// This is persisted conversation metadata, not a replacement for the
+  /// shared runtime's live-work signal. The sidebar combines both sources:
+  /// runtime state wins for "running", while this flag supplies the stable
+  /// completed marker after the run has been folded into history.
+  bool get isCompleted => status == 1;
+
   bool get isScheduledChild =>
       parentConversationId != null && parentConversationId! > 0;
 
@@ -269,5 +294,5 @@ class ConversationModel {
     return latestPromptTokens / promptTokenThreshold;
   }
 
-  String get threadKey => '${mode.storageValue}:$id';
+  String get threadKey => '${mode.canonicalStorageValue}:$id';
 }

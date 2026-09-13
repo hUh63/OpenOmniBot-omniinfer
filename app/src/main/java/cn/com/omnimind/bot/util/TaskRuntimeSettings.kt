@@ -60,7 +60,7 @@ object TaskRuntimeSettings {
     private var currentVisibleConversationId: Long? = null
 
     @Volatile
-    private var currentVisibleConversationMode: String = "normal"
+    private var currentVisibleConversationMode: String = "agent"
 
     private data class ActiveNotificationEntry(
         val id: Int,
@@ -78,7 +78,7 @@ object TaskRuntimeSettings {
                 if (parts.size < 3) return null
                 val notificationId = parts[0].toIntOrNull() ?: return null
                 val conversationId = parts[1].takeIf { it.isNotBlank() }?.toLongOrNull()
-                val conversationMode = parts[2].ifBlank { "normal" }
+                val conversationMode = parts[2].ifBlank { "agent" }
                 return ActiveNotificationEntry(
                     id = notificationId,
                     conversationId = conversationId,
@@ -157,7 +157,7 @@ object TaskRuntimeSettings {
     ) {
         isChatPageVisible = visible
         currentVisibleConversationId = if (visible) conversationId?.takeIf { it > 0 } else null
-        currentVisibleConversationMode = conversationMode?.trim()?.ifEmpty { "normal" } ?: "normal"
+        currentVisibleConversationMode = conversationMode?.trim()?.ifEmpty { "agent" } ?: "agent"
         if (isChatPageVisible) {
             clearOverlayHint()
             clearTaskCompletionNotificationsForVisibleChat(
@@ -280,10 +280,16 @@ object TaskRuntimeSettings {
                 }
             }
             .build()
-        NotificationManagerCompat.from(context).notify(
-            notificationId,
-            notification
-        )
+        try {
+            NotificationManagerCompat.from(context).notify(
+                notificationId,
+                notification
+            )
+        } catch (e: SecurityException) {
+            // Do not track a notification that was rejected after the permission check.
+            OmniLog.w(TAG, "Task completion notification permission unavailable: " + e.message)
+            return
+        }
         registerActiveNotification(
             context,
             ActiveNotificationEntry(
@@ -329,7 +335,10 @@ object TaskRuntimeSettings {
             if (current?.isHeld == true) return
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(
-                PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                // Keep only the CPU available for non-GUI Agent work. The
+                // Activity's FLAG_KEEP_SCREEN_ON remains the independent UI
+                // policy, and a user-initiated screen-off is never reversed.
+                PowerManager.PARTIAL_WAKE_LOCK,
                 "Omnibot:TaskRuntime"
             ).apply {
                 setReferenceCounted(false)
@@ -442,7 +451,11 @@ object TaskRuntimeSettings {
     }
 
     private fun normalizeConversationMode(mode: String?): String {
-        return mode?.trim()?.ifEmpty { "normal" } ?: "normal"
+        return when (mode?.trim()?.lowercase()) {
+            null, "", "normal", "codex", "acp", "coding" -> "agent"
+            "chat", "chatonly", "chat-only" -> "chat_only"
+            else -> mode.trim().lowercase()
+        }
     }
 
     private fun sameConversationTarget(

@@ -157,7 +157,7 @@ class _ContextThresholdSheet extends StatefulWidget {
   });
 
   final int initialThreshold;
-  final int currentUsageTokens;
+  final int? currentUsageTokens;
   final Future<bool> Function(int threshold) onThresholdSaved;
 
   @override
@@ -183,6 +183,16 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
     512000,
     1000000,
   ];
+
+  int get _sliderMaximum {
+    return <int>[
+      ..._presets,
+      widget.initialThreshold,
+      _draftThreshold.round(),
+    ].reduce(
+      (current, candidate) => current >= candidate ? current : candidate,
+    );
+  }
 
   @override
   void initState() {
@@ -224,10 +234,10 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
     bool updateText = true,
     bool clearError = true,
   }) {
-    final normalized = value.round().clamp(
-      _kMinContextTokenThreshold,
-      _kMaxContextTokenThreshold,
-    );
+    final normalized = value.round();
+    if (normalized <= 0) {
+      return;
+    }
     setState(() {
       _draftThreshold = normalized.toDouble();
       if (updateText) {
@@ -265,12 +275,11 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
       });
       return null;
     }
-    if (parsed < _kMinContextTokenThreshold ||
-        parsed > _kMaxContextTokenThreshold) {
+    if (parsed <= 0) {
       setState(() {
         _errorText = LegacyTextLocalizer.isEnglish
-            ? 'Threshold range: $_kMinContextTokenThreshold to $_kMaxContextTokenThreshold'
-            : '阈值范围为 $_kMinContextTokenThreshold 到 $_kMaxContextTokenThreshold';
+            ? 'Threshold must be positive'
+            : '阈值必须为正整数';
       });
       return null;
     }
@@ -383,9 +392,12 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
     final isDark = context.isDarkTheme;
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     final draftThreshold = _draftThreshold.round();
-    final usageRatio = widget.currentUsageTokens <= 0
-        ? 0.0
-        : widget.currentUsageTokens / draftThreshold;
+    final sliderMaximum = _sliderMaximum;
+    final currentUsageTokens = widget.currentUsageTokens;
+    final usageRatio = currentUsageTokens == null
+        ? null
+        : currentUsageTokens / draftThreshold;
+    final noUsageData = LegacyTextLocalizer.isEnglish ? 'No data yet' : '暂无数据';
     final dividerColor = isDark
         ? palette.borderSubtle
         : palette.borderSubtle.withValues(alpha: 0.9);
@@ -503,7 +515,9 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
                             label: LegacyTextLocalizer.isEnglish
                                 ? 'Current context'
                                 : '当前上下文',
-                            value: _formatTokenCount(widget.currentUsageTokens),
+                            value: currentUsageTokens == null
+                                ? noUsageData
+                                : _formatTokenCount(currentUsageTokens),
                             accent: palette.textPrimary,
                           ),
                         ),
@@ -523,8 +537,12 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
                             label: LegacyTextLocalizer.isEnglish
                                 ? 'Usage'
                                 : '占用比例',
-                            value: _formatUsagePercent(usageRatio),
-                            accent: usageRatio >= 1
+                            value: usageRatio == null
+                                ? noUsageData
+                                : _formatUsagePercent(usageRatio),
+                            accent: usageRatio == null
+                                ? palette.textSecondary
+                                : usageRatio >= 1
                                 ? warningColor
                                 : successColor,
                           ),
@@ -545,16 +563,10 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
                       trackHeight: 4,
                     ),
                     child: Slider(
-                      min: _kMinContextTokenThreshold.toDouble(),
-                      max: _kMaxContextTokenThreshold.toDouble(),
-                      divisions:
-                          (_kMaxContextTokenThreshold -
-                              _kMinContextTokenThreshold) ~/
-                          1000,
-                      value: _draftThreshold.clamp(
-                        _kMinContextTokenThreshold.toDouble(),
-                        _kMaxContextTokenThreshold.toDouble(),
-                      ),
+                      min: 1,
+                      max: sliderMaximum.toDouble(),
+                      divisions: sliderMaximum > 1 ? 1000 : null,
+                      value: _draftThreshold.clamp(1, sliderMaximum.toDouble()),
                       onChanged: (value) => _updateDraftThreshold(value),
                       onChangeEnd: (value) {
                         _updateDraftThreshold(value);
@@ -615,8 +627,7 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
                     decoration: InputDecoration(
                       labelText: '精确阈值',
                       hintText: _kDefaultContextTokenThreshold.toString(),
-                      helperText:
-                          '默认 $_kDefaultContextTokenThreshold，范围 $_kMinContextTokenThreshold - $_kMaxContextTokenThreshold',
+                      helperText: '默认 $_kDefaultContextTokenThreshold，可输入任意正整数',
                       errorText: _errorText,
                       filled: true,
                       fillColor: palette.surfaceSecondary,
@@ -653,12 +664,10 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
                       if (parsed == null) {
                         return;
                       }
-                      if (parsed < _kMinContextTokenThreshold ||
-                          parsed > _kMaxContextTokenThreshold) {
+                      if (parsed <= 0) {
                         _autoSaveTimer?.cancel();
                         setState(() {
-                          _errorText =
-                              '阈值范围为 $_kMinContextTokenThreshold 到 $_kMaxContextTokenThreshold';
+                          _errorText = '阈值必须为正整数';
                         });
                         return;
                       }

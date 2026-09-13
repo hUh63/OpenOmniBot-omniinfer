@@ -10,8 +10,6 @@ import cn.com.omnimind.bot.BuildConfig
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.OmniPluginState
 import cn.com.omnimind.bot.plugin.sandbox.SandboxPluginBridgeRuntime
-import cn.com.omnimind.bot.plugin.sandbox.SandboxPluginPool
-import cn.com.omnimind.bot.plugin.sandbox.SandboxPluginShortcutManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -67,12 +65,21 @@ class PluginPlatformChannel {
                                 ?: throw IllegalArgumentException("enabled is required")
                         )
                     )
-                    "getVlmReadiness" -> vlmReadiness()
-                    "getDashboard" -> {
-                        val pluginId = call.requirePluginId()
-                        requireEnabled(host, pluginId)
-                        SandboxPluginPool(safeContext).dashboard(pluginId)
+                    "listActions" -> host.listActions().map { action ->
+                        mapOf(
+                            "id" to action.id,
+                            "pluginId" to action.ownerPluginId,
+                            "displayName" to action.displayName,
+                            "description" to action.description,
+                            "presentation" to action.presentation.toPlatformValue(),
+                        )
                     }
+                    "invokeAction" -> host.invokeAction(
+                        pluginId = call.requirePluginId(),
+                        actionId = call.requireActionId(),
+                        args = call.argument<Map<*, *>>("arguments").toJsonObject(),
+                    ).toPlatformValue()
+                    "getVlmReadiness" -> vlmReadiness()
                     "sandboxInvoke" -> {
                         val pluginId = call.requirePluginId()
                         SandboxPluginBridgeRuntime(safeContext).invoke(
@@ -81,16 +88,8 @@ class PluginPlatformChannel {
                             params = call.argument<Map<*, *>>("params") ?: emptyMap<Any?, Any?>(),
                         )
                     }
-                    "pinToHome" -> {
-                        val pluginId = call.requirePluginId()
-                        requireEnabled(host, pluginId)
-                        SandboxPluginShortcutManager(safeContext)
-                            .pinOrUpdate(pluginId)
-                            .toMap()
-                    }
                     "uninstall" -> {
                         val pluginId = call.requirePluginId()
-                        SandboxPluginShortcutManager(safeContext).disable(pluginId)
                         host.uninstall(pluginId)
                         true
                     }
@@ -113,6 +112,11 @@ class PluginPlatformChannel {
     private fun MethodCall.requirePluginId(): String {
         return argument<String>("pluginId")?.trim()?.takeIf { it.isNotEmpty() }
             ?: throw IllegalArgumentException("pluginId is required")
+    }
+
+    private fun MethodCall.requireActionId(): String {
+        return argument<String>("actionId")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw IllegalArgumentException("actionId is required")
     }
 
     private suspend fun requireEnabled(host: OmniPluginHost, pluginId: String) {
@@ -182,6 +186,26 @@ class PluginPlatformChannel {
                 else -> content
             }
         }
+    }
+
+    private fun Map<*, *>?.toJsonObject(): JsonObject = JsonObject(
+        this.orEmpty().entries.associate { (rawKey, value) ->
+            val key = rawKey as? String
+                ?: throw IllegalArgumentException("Plugin action argument keys must be strings")
+            key to value.toJsonElement()
+        }
+    )
+
+    private fun Any?.toJsonElement(): JsonElement = when (this) {
+        null -> JsonNull
+        is JsonElement -> this
+        is String -> JsonPrimitive(this)
+        is Boolean -> JsonPrimitive(this)
+        is Number -> JsonPrimitive(this)
+        is Map<*, *> -> toJsonObject()
+        is Iterable<*> -> JsonArray(map { it.toJsonElement() })
+        is Array<*> -> JsonArray(map { it.toJsonElement() })
+        else -> JsonPrimitive(toString())
     }
 
     private companion object {

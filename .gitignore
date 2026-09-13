@@ -1,5 +1,49 @@
-build/
-.gradle/
-.idea/
 *.iml
+.gradle
+.gradle_user_home
+.idea
+.kotlin
+/local.properties
 .DS_Store
+/build
+node_modules/
+/webchat/dist/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/misc
+
+.claude/
+.codex/
+.vscode/
+.codex/
+.agents/
+claude-code-main/
+
+skills-lock.json
+
+release.jks
+*.jks
+*.keystore
+
+testbot/build
+
+log.txt
+
+output/
+
+# PC desktop port (Rust backend + Flutter macOS/Windows runner) lives on
+# its own feature branch; keep it out of main's `git status`.
+/desktop/
+reports/
+/.zcode/
+
+# Local Codex build and device-test artifacts; never include these in PRs.
+/.codex-build-*.stderr.log
+/.codex-proot-test/
+/.pnpm-store/
+/omnibot-installed.png
+
+# Optional local on-device model checkout is not part of the host app.
+/third_party/omniinfer/

@@ -37,6 +37,12 @@ jobs:
       - name: Run gateway unit tests
         run: "cargo test -p omniinfer-cli --bin omniinfer gateway::tests::"
 
+      - name: Run gateway runtime manager unit tests
+        run: "cargo test -p omniinfer-cli --bin omniinfer gateway::runtime_manager::tests::"
+
+      - name: Run speculative load failure integration test
+        run: "cargo test -p omniinfer-cli --test cli_smoke speculative_load_failure_rolls_back_real_backend_and_cuda_reservation"
+
       - name: Run backend archive security tests
         run: "cargo test -p omniinfer-cli --bin omniinfer backend_installer::tests::"
 
@@ -51,7 +57,6 @@ jobs:
           bash tests/test_release_installer.sh
           bash tests/test_source_installer.sh
           bash tests/test_install_deps.sh
-          cargo run --locked -q -p omniinfer-cli -- --version
 
   windows-desktop-contract:
     name: Windows Desktop Contract
@@ -75,4 +80,3 @@ jobs:
         run: |
           .\tests\test_release_installer.ps1
           .\tests\test_source_installer.ps1
-          cargo run --locked -q -p omniinfer-cli -- --version

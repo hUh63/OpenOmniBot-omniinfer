@@ -132,6 +132,8 @@ pub(crate) struct ModelLoadArgs {
     pub(crate) model: String,
     #[arg(long = "mmproj")]
     pub(crate) mmproj: Option<String>,
+    #[arg(long, conflicts_with = "mmproj")]
+    pub(crate) no_mmproj: bool,
     #[arg(long)]
     pub(crate) ctx_size: Option<u32>,
     /// Explicit runtime memory budget for remote model references whose size is unknown.
@@ -238,24 +240,33 @@ pub(crate) struct BenchRunArgs {
     /// Stable public HTTPS URL for the measured model artifact.
     #[arg(long)]
     pub(crate) model_url: String,
-    /// Human-readable tested device name.
+    /// Human-readable tested device name; auto-detected for known local hardware when omitted.
     #[arg(long)]
-    pub(crate) device_name: String,
-    /// SoC/device ID or exact name used by the destination catalog.
+    pub(crate) device_name: Option<String>,
+    /// Catalog SoC/device ID; inferred for known local hardware when omitted.
     #[arg(long)]
-    pub(crate) soc: String,
+    pub(crate) soc: Option<String>,
     /// Optional expected catalog backend ID; defaults to the loaded backend.
     #[arg(long)]
     pub(crate) backend_id: Option<String>,
     /// Optional human-readable backend name.
     #[arg(long)]
     pub(crate) backend_name: Option<String>,
-    /// Exact runtime/backend version under test.
+    /// Accelerator used for Prefill. Set both phase accelerators for mixed execution.
+    #[arg(long, value_enum)]
+    pub(crate) prefill_accelerator: Option<BenchmarkAccelerator>,
+    /// Accelerator used for Decode. Set both phase accelerators for mixed execution.
+    #[arg(long, value_enum)]
+    pub(crate) decode_accelerator: Option<BenchmarkAccelerator>,
+    /// Privilege level of the measured runtime process.
+    #[arg(long, value_enum, default_value_t = BenchmarkPrivilegeLevel::Standard)]
+    pub(crate) privilege_level: BenchmarkPrivilegeLevel,
+    /// Exact runtime/backend version; read from a managed prebuilt manifest when omitted.
     #[arg(long)]
-    pub(crate) backend_version: String,
-    /// Exact command used to build or install the measured runtime.
+    pub(crate) backend_version: Option<String>,
+    /// Exact build/install command; inferred for a managed prebuilt runtime when omitted.
     #[arg(long)]
-    pub(crate) build_command: String,
+    pub(crate) build_command: Option<String>,
     /// Override the runtime launch command captured from OmniInfer state.
     #[arg(long)]
     pub(crate) run_command: Option<String>,
@@ -312,6 +323,45 @@ pub(crate) struct BenchRunArgs {
     pub(crate) json: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum BenchmarkAccelerator {
+    Cpu,
+    Gpu,
+    Npu,
+    Htp,
+    Ane,
+    Other,
+}
+
+impl BenchmarkAccelerator {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+            Self::Npu => "npu",
+            Self::Htp => "htp",
+            Self::Ane => "ane",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub(crate) enum BenchmarkPrivilegeLevel {
+    #[default]
+    Standard,
+    Elevated,
+}
+
+impl BenchmarkPrivilegeLevel {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Elevated => "elevated",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ChatArgs {
     pub(crate) prompt: Option<String>,
@@ -339,6 +389,8 @@ pub(crate) struct ServeArgs {
     pub(crate) model: Option<String>,
     #[arg(long = "mmproj")]
     pub(crate) mmproj: Option<String>,
+    #[arg(long, conflicts_with = "mmproj")]
+    pub(crate) no_mmproj: bool,
     #[arg(long)]
     pub(crate) ctx_size: Option<u32>,
     #[arg(long)]

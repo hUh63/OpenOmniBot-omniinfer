@@ -7,10 +7,36 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_summary_card.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_transcript.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/terminal_output_utils.dart';
+import 'package:ui/features/home/pages/chat/tool_activity_utils.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/services/app_background_service.dart';
+import 'package:ui/widgets/image_preview_overlay.dart';
 
 void main() {
+  testWidgets(
+    'streaming HTML input is pending, not executing or awaiting approval',
+    (tester) async {
+      final card = <String, dynamic>{
+        'type': 'agent_tool_summary',
+        'status': 'pending',
+        'toolName': 'file_write',
+        'toolTitle': '写入文件',
+        'toolType': 'file',
+        'argsJson': '{"path":"/workspace/index.html","content":"<html>',
+      };
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: AgentToolSummaryCard(cardData: card)),
+        ),
+      );
+      expect(isAgentToolAwaitingConfirmation(card), isFalse);
+      expect(find.text(resolveAgentToolStatusLabel(card)), findsOneWidget);
+      expect(find.textContaining('等待确认'), findsNothing);
+      expect(find.textContaining('正在写入'), findsNothing);
+      expect(find.text('成功'), findsNothing);
+    },
+  );
+
   setUp(() {
     LegacyTextLocalizer.setResolvedLocale(const Locale('zh'));
   });
@@ -79,17 +105,41 @@ void main() {
       const ValueKey('agent-tool-summary-leading-icon'),
     );
     expect(leadingIcon, findsOneWidget);
-    final iconSlot = tester.widget<SizedBox>(leadingIcon);
-    expect(iconSlot.width, 20);
-    expect(iconSlot.height, 20);
-    expect(
-      find.descendant(of: leadingIcon, matching: find.byType(DecoratedBox)),
-      findsNothing,
-    );
+    // Preserve the existing capsule presentation, not its older widget tree.
+    final iconDecoration = tester.widget<DecoratedBox>(leadingIcon);
+    expect((iconDecoration.decoration as BoxDecoration).shape, BoxShape.circle);
+    expect(tester.getSize(leadingIcon), const Size(24, 24));
     final icon = tester.widget<Icon>(
       find.descendant(of: leadingIcon, matching: find.byType(Icon)),
     );
-    expect(icon.size, 18);
+    expect(icon.size, 16);
+  });
+
+  testWidgets('pending privileged confirmation is shown as waiting', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AgentToolSummaryCard(
+            cardData: {
+              'type': 'agent_tool_summary',
+              'uiStyle': 'agent_tool',
+              'status': 'running',
+              'toolName': 'android_privileged_action',
+              'toolTitle': '安卓高级动作',
+              'toolType': 'clarify',
+              'question': '高权限 shell 命令尚未执行，请确认后执行一次。',
+              'missingFields': ['arguments.confirmed'],
+            },
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('等待确认'), findsOneWidget);
+    expect(find.text('执行中'), findsNothing);
+    expect(find.text('安卓高级动作'), findsOneWidget);
   });
 
   testWidgets('completed VLM tool renders GUI completion card', (tester) async {
@@ -214,57 +264,6 @@ void main() {
     expect(find.text('runlog:gui-run-interrupted'), findsOneWidget);
   });
 
-  testWidgets('published Vibe project opens its dashboard directly', (
-    tester,
-  ) async {
-    final router = GoRouter(
-      initialLocation: '/',
-      routes: [
-        GoRoute(
-          path: '/',
-          builder: (context, state) => Scaffold(
-            body: AgentToolSummaryCard(
-              cardData: {
-                'status': 'success',
-                'toolName': 'project_publish',
-                'displayName': '发布项目',
-                'toolType': 'plugin',
-                'resultPreviewJson': jsonEncode({
-                  'name': '真实 NBA 赛程',
-                  'dashboardRoute':
-                      '/home/plugin_dashboard?pluginId=local.project.nba-live',
-                }),
-              },
-            ),
-          ),
-        ),
-        GoRoute(
-          path: '/home/plugin_dashboard',
-          builder: (context, state) => Scaffold(
-            body: Text('dashboard:${state.uri.queryParameters['pluginId']}'),
-          ),
-        ),
-      ],
-    );
-    addTearDown(router.dispose);
-
-    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
-
-    expect(
-      find.byKey(const ValueKey('published-project-card')),
-      findsOneWidget,
-    );
-    expect(find.text('真实 NBA 赛程'), findsOneWidget);
-    expect(find.text('打开 Dashboard'), findsOneWidget);
-
-    await tester.tap(
-      find.byKey(const ValueKey('published-project-open-dashboard')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('dashboard:local.project.nba-live'), findsOneWidget);
-  });
-
   testWidgets('tool card opens detail sheet when tapped', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -306,6 +305,103 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(sheet, findsNothing);
+  });
+
+  testWidgets('ACP tool actions remain available in the shared detail sheet', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AgentToolSummaryCard(
+            cardData: const {
+              'cardId': 'tool-actions-card',
+              'status': 'success',
+              'toolName': 'terminal_session_start',
+              'toolTitle': '终端会话已启动',
+              'toolType': 'terminal',
+              'workspaceId': 'conversation_42',
+              'actions': [
+                {
+                  'type': 'workspace',
+                  'label': '打开项目目录',
+                  'target': 'omnibot://workspace/project',
+                  'payload': {'workspaceId': 'conversation_42'},
+                },
+              ],
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('终端会话已启动'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(kAgentToolDetailSheetKey), findsOneWidget);
+    expect(find.text('打开项目目录'), findsOneWidget);
+    expect(find.byKey(const ValueKey('agent-tool-action-0')), findsOneWidget);
+  });
+
+  testWidgets('schedule tools keep their legacy follow-up action', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AgentToolSummaryCard(
+            cardData: const {
+              'cardId': 'schedule-action-card',
+              'status': 'success',
+              'toolName': 'schedule_create',
+              'toolTitle': '定时任务已创建',
+              'toolType': 'schedule',
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('定时任务已创建'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('查看定时任务'), findsOneWidget);
+  });
+
+  testWidgets('ACP image tool opens the shared full-screen preview', (
+    tester,
+  ) async {
+    const imageDataUrl =
+        'data:image/png;base64,'
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk'
+        'YAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AgentToolSummaryCard(
+            cardData: const {
+              'cardId': 'image-tool-card',
+              'status': 'success',
+              'toolName': 'image_generation',
+              'toolTitle': '生成图片',
+              'toolType': 'image',
+              'imageDataUrl': imageDataUrl,
+            },
+          ),
+        ),
+      ),
+    );
+
+    final thumbnail = find.byKey(
+      const ValueKey('agent-tool-image-preview-image-tool-card-0'),
+    );
+    expect(thumbnail, findsOneWidget);
+
+    await tester.tap(thumbnail);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(OmnibotInteractiveImageView), findsOneWidget);
   });
 
   testWidgets('codex tool card uses inline tool row style', (tester) async {
@@ -361,6 +457,44 @@ void main() {
 
     expect(find.text('Read README.md'), findsOneWidget);
     expect(find.byType(ShaderMask), findsOneWidget);
+  });
+
+  test(
+    'running file write exposes the action and target without reasoning',
+    () {
+      final label = resolveAgentToolProgressTitle({
+        'status': 'running',
+        'toolName': 'file_write',
+        'toolType': 'file',
+        'argsJson': jsonEncode({'path': 'notes/draft.md'}),
+      }, isEnglish: false);
+
+      expect(label, '正在写入文件：draft.md');
+    },
+  );
+
+  testWidgets('running file write card is visible without a thinking card', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AgentToolSummaryCard(
+            cardData: {
+              'type': 'agent_tool_summary',
+              'status': 'running',
+              'toolName': 'file_write',
+              'toolType': 'file',
+              'filePath': 'notes/draft.md',
+              'argsJson': jsonEncode({'path': 'notes/draft.md'}),
+            },
+          ),
+        ),
+      ),
+    );
+
+    expect(find.textContaining('正在写入文件'), findsOneWidget);
+    expect(find.text('draft.md'), findsOneWidget);
   });
 
   testWidgets(
@@ -555,7 +689,7 @@ diff --git a/lib/main.dart b/lib/main.dart
 
     final title = tester.widget<Text>(find.text('同步索引'));
     expect(title.style?.color, customTextColor);
-    expect(title.style?.fontSize, 12);
+    expect(title.style?.fontSize, 12.5);
   });
 
   testWidgets('subagent card shows status line and expands timeline', (

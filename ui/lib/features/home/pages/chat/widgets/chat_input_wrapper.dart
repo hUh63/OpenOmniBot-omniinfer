@@ -31,12 +31,14 @@ class ChatInputWrapper extends StatelessWidget {
   final VoidCallback? onLongPressContextUsageRing;
   final ValueChanged<double>? onInputHeightChanged;
   final ChatModelPickerSettings? modelPickerSettings;
+  final Widget? runtimeConfigButton;
   final AgentRunSettings? agentRunSettings;
   final AgentRunSettingsChanged? onAgentRunSettingsChanged;
   final FutureOr<void> Function()? onAgentRunSettingsOpened;
   final AgentPermissionMode? agentPermissionMode;
   final List<AgentPermissionMode> agentPermissionModes;
-  final ValueChanged<AgentPermissionMode>? onAgentPermissionModeChanged;
+  final FutureOr<void> Function(AgentPermissionMode)?
+  onAgentPermissionModeChanged;
   final bool useIndependentSendButton;
   final bool translucent;
 
@@ -71,6 +73,7 @@ class ChatInputWrapper extends StatelessWidget {
     this.onLongPressContextUsageRing,
     this.onInputHeightChanged,
     this.modelPickerSettings,
+    this.runtimeConfigButton,
     this.agentRunSettings,
     this.onAgentRunSettingsChanged,
     this.onAgentRunSettingsOpened,
@@ -119,6 +122,7 @@ class ChatInputWrapper extends StatelessWidget {
             contextUsageTooltipMessage: contextUsageTooltipMessage,
             onLongPressContextUsageRing: onLongPressContextUsageRing,
             modelPickerSettings: modelPickerSettings,
+            runtimeConfigButton: runtimeConfigButton,
             agentRunSettings: agentRunSettings,
             onAgentRunSettingsChanged: onAgentRunSettingsChanged,
             onAgentRunSettingsOpened: onAgentRunSettingsOpened,

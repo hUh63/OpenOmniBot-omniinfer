@@ -15,7 +15,9 @@ mkdir -p "$ROOTFS_DIR"
 
 terminate_active_child() {
     if [ -n "$ACTIVE_CHILD_PID" ]; then
-        kill "$ACTIVE_CHILD_PID" 2>/dev/null || true
+        # PRoot ignores TERM/INT. QUIT invokes its own tracee cleanup;
+        # killing only the tracer leaves descendants holding our stdio open.
+        kill -QUIT "$ACTIVE_CHILD_PID" 2>/dev/null || true
         wait "$ACTIVE_CHILD_PID" 2>/dev/null || true
         ACTIVE_CHILD_PID=
     fi
@@ -27,13 +29,13 @@ handle_termination() {
 }
 
 run_child() {
-    "$@" &
+    "$@" <&3 3<&- &
     ACTIVE_CHILD_PID=$!
     wait "$ACTIVE_CHILD_PID"
     child_status=$?
     ACTIVE_CHILD_PID=
     return "$child_status"
-}
+} 3<&0
 
 rootfs_entry_exists() {
     [ -e "$1" ] || [ -L "$1" ]
@@ -82,6 +84,26 @@ mark_rootfs_ready() {
 
 trap handle_termination HUP INT TERM
 
+mkdir -p "$PREFIX/local/bin" "$PREFIX/local/lib"
+
+install_runtime_file() {
+    src="$1"
+    dest="$2"
+    mode="$3"
+    [ -e "$src" ] || return 0
+    tmp="${dest}.$$"
+    rm -f "$tmp"
+    cp "$src" "$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$dest"
+}
+
+install_runtime_file "$PREFIX/files/proot" "$PREFIX/local/bin/proot" 755
+
+for sofile in "$PREFIX/files/"*.so.2; do
+    [ -e "$sofile" ] || continue
+    dest="$PREFIX/local/lib/$(basename "$sofile")"
+    install_runtime_file "$sofile" "$dest" 644
+done
+
 if [ -f "$ROOTFS_READY_MARKER" ]; then
     if ! rootfs_has_minimum_layout; then
         if ! clear_incomplete_rootfs; then
@@ -106,7 +128,11 @@ if [ ! -f "$ROOTFS_READY_MARKER" ]; then
         echo "Missing $TERMINAL_DISTRIBUTION rootfs archive: $ROOTFS_ARCHIVE" >&2
         exit 1
     fi
-    if ! run_child tar -xf "$ROOTFS_ARCHIVE" -C "$ROOTFS_DIR"; then
+    # Android app UIDs cannot create archive hardlinks. Use the bundled
+    # PRoot's official emulation while extracting immutable rootfs members;
+    # this does not change the separate interactive/ACP launch options.
+    if ! run_child "$LINKER" "$PREFIX/local/bin/proot" --link2symlink \
+        /system/bin/tar -xf "$ROOTFS_ARCHIVE" -C "$ROOTFS_DIR"; then
         echo "Failed to extract $TERMINAL_DISTRIBUTION rootfs." >&2
         exit 1
     fi
@@ -136,27 +162,6 @@ if [ -n "$OMNIBOT_MT_STORAGE_HOST" ] && [ -d "$OMNIBOT_MT_STORAGE_HOST" ]; then
     mkdir -p "$ROOTFS_DIR/mnt/mt" "$ROOTFS_DIR/mt"
 fi
 
-mkdir -p "$PREFIX/local/bin" "$PREFIX/local/lib"
-
-install_runtime_file() {
-    src="$1"
-    dest="$2"
-    mode="$3"
-    [ -e "$src" ] || return 0
-    tmp="${dest}.$$"
-    rm -f "$tmp"
-    cp "$src" "$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$dest"
-}
-
-install_runtime_file "$PREFIX/files/proot" "$PREFIX/local/bin/proot" 755
-
-for sofile in "$PREFIX/files/"*.so.2; do
-    [ -e "$sofile" ] || continue
-    dest="$PREFIX/local/lib/$(basename "$sofile")"
-    install_runtime_file "$sofile" "$dest" 644
-done
-
-
 ARGS="--kill-on-exit"
 ARGS="$ARGS -w /"
 
@@ -178,6 +183,11 @@ ARGS="$ARGS -b /dev"
 ARGS="$ARGS -b /data"
 ARGS="$ARGS -b /dev/urandom:/dev/random"
 ARGS="$ARGS -b /proc"
+# The host supplies DNS from Android's active network for both distributions.
+# Keep existing guest settings when no active resolver is available.
+if [ -n "${OMNIBOT_DNS_FILE:-}" ] && [ -s "$OMNIBOT_DNS_FILE" ]; then
+  ARGS="$ARGS -b $OMNIBOT_DNS_FILE:/etc/resolv.conf"
+fi
 ARGS="$ARGS -b $PREFIX"
 ARGS="$ARGS -b $PREFIX/local/stat:/proc/stat"
 ARGS="$ARGS -b $PREFIX/local/vmstat:/proc/vmstat"
@@ -220,14 +230,21 @@ ARGS="$ARGS -b $ROOTFS_DIR/tmp:/dev/shm"
 
 ARGS="$ARGS -r $ROOTFS_DIR"
 ARGS="$ARGS -0"
-ARGS="$ARGS --link2symlink"
+# PRoot's hardlink-to-symlink emulation is useful for the interactive shell,
+# but it breaks atomic writers used by official ACP runtimes.  Those writers
+# create a temporary file and then link/rename it into place; under this mode
+# the final path can point at a temporary name that no longer exists.  Keep
+# the historical default for ordinary terminal sessions and let ACP launchers
+# opt out explicitly.
+if [ "${OMNIBOT_DISABLE_PROOT_LINK2SYMLINK:-0}" != "1" ]; then
+  ARGS="$ARGS --link2symlink"
+fi
 ARGS="$ARGS --sysvipc"
 ARGS="$ARGS -L"
 
-# The final runtime must stay attached to the caller's stdio.  In a
-# non-interactive shell an asynchronously executed command gets /dev/null as
-# stdin, which makes stdio services such as ACP observe EOF and exit before
-# initialization.  Replacing the host shell also lets Process.destroy() target
-# proot directly; --kill-on-exit remains responsible for its descendants.
-trap - HUP INT TERM
-exec "$LINKER" "$PREFIX/local/bin/proot" $ARGS /bin/sh "$PREFIX/local/bin/init" "$@"
+# Keep a host owner that translates Process.destroy()'s TERM to PRoot's
+# cleanup signal. Save stdin on a separate fd before backgrounding: Android
+# mksh replaces fd 0 before applying an async command's redirections. The child
+# restores fd 0 from fd 3, then closes the extra descriptor (ACP uses stdio).
+run_child "$LINKER" "$PREFIX/local/bin/proot" $ARGS /bin/sh "$PREFIX/local/bin/init" "$@"
+exit $?

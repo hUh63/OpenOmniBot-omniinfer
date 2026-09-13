@@ -25,6 +25,8 @@ pub enum RuntimeReadinessProbe {
 pub enum ExternalServerProtocol {
     LlamaCppServer,
     VlaCppZmqServer,
+    StableDiffusionCppServer,
+    FreeTokenOpenAiServer,
     VllmOpenAiServer,
     VllmWsl2OpenAiServer,
 }
@@ -34,6 +36,8 @@ impl ExternalServerProtocol {
         match value {
             "llama.cpp-server" => Some(Self::LlamaCppServer),
             "vla.cpp-zmq-server" => Some(Self::VlaCppZmqServer),
+            "stable-diffusion.cpp-server" => Some(Self::StableDiffusionCppServer),
+            "freetoken-openai-server" => Some(Self::FreeTokenOpenAiServer),
             "vllm-openai-server" => Some(Self::VllmOpenAiServer),
             "vllm-wsl2-openai-server" => Some(Self::VllmWsl2OpenAiServer),
             _ => None,
@@ -44,13 +48,23 @@ impl ExternalServerProtocol {
         match self {
             Self::LlamaCppServer => "llama.cpp-server",
             Self::VlaCppZmqServer => "vla.cpp-zmq-server",
+            Self::StableDiffusionCppServer => "stable-diffusion.cpp-server",
+            Self::FreeTokenOpenAiServer => "freetoken-openai-server",
             Self::VllmOpenAiServer => "vllm-openai-server",
             Self::VllmWsl2OpenAiServer => "vllm-wsl2-openai-server",
         }
     }
 
     pub fn is_openai_compatible(self) -> bool {
+        !matches!(self, Self::VlaCppZmqServer | Self::StableDiffusionCppServer)
+    }
+
+    pub fn is_http_transport(self) -> bool {
         !matches!(self, Self::VlaCppZmqServer)
+    }
+
+    pub fn supports_chat(self) -> bool {
+        !matches!(self, Self::VlaCppZmqServer | Self::StableDiffusionCppServer)
     }
 
     pub fn client_endpoint(self, host: &str, port: u16) -> String {
@@ -96,6 +110,12 @@ pub enum RuntimePlanError {
     InvalidPort,
     #[error("vla.cpp ZeroMQ runtime must bind to a loopback host, got: {0}")]
     NonLoopbackVlaBind(String),
+    #[error("stable-diffusion.cpp runtime must bind to a loopback host, got: {0}")]
+    NonLoopbackDiffusionBind(String),
+    #[error("MiniMax H3 requires the stable-diffusion.cpp launch arg {0}")]
+    MissingH3Component(&'static str),
+    #[error("stable-diffusion.cpp component not found for {flag}: {path}")]
+    DiffusionComponentNotFound { flag: String, path: String },
     #[error("invalid WSL2 launcher manifest {path}: {message}")]
     InvalidWslLauncherManifest { path: String, message: String },
     #[error("WSL2 vLLM does not support this Windows model path: {0}")]
@@ -166,6 +186,16 @@ pub fn build_external_runtime_plan(
             effective_ctx_size,
             log_file_name,
         ),
+        ExternalServerProtocol::StableDiffusionCppServer => {
+            build_stable_diffusion_cpp_plan(&launcher_path, request, server_args, log_file_name)
+        }
+        ExternalServerProtocol::FreeTokenOpenAiServer => build_freetoken_plan(
+            &launcher_path,
+            request,
+            server_args,
+            effective_ctx_size,
+            log_file_name,
+        ),
         ExternalServerProtocol::VllmOpenAiServer => build_vllm_plan(
             &launcher_path,
             request,
@@ -182,6 +212,134 @@ pub fn build_external_runtime_plan(
             log_file_name,
         ),
     }
+}
+
+fn build_stable_diffusion_cpp_plan(
+    launcher_path: &Path,
+    request: &ExternalRuntimeRequest,
+    mut server_args: Vec<String>,
+    log_file_name: String,
+) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    if !is_loopback_host(&request.host) {
+        return Err(RuntimePlanError::NonLoopbackDiffusionBind(
+            request.host.clone(),
+        ));
+    }
+    validate_stable_diffusion_cpp_launch_args(&server_args, &request.model_path)?;
+    let mut command = vec![
+        launcher_path.display().to_string(),
+        "--diffusion-model".to_string(),
+        request.model_path.clone(),
+        "--listen-ip".to_string(),
+        request.host.clone(),
+        "--listen-port".to_string(),
+        request.port.to_string(),
+    ];
+    command.append(&mut server_args);
+    Ok(ExternalRuntimePlan {
+        command,
+        stop_command: None,
+        cwd: launcher_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        port: request.port,
+        ctx_size: None,
+        log_file_name,
+        proxy_model_ref: None,
+        protocol: ExternalServerProtocol::StableDiffusionCppServer,
+        client_endpoint: ExternalServerProtocol::StableDiffusionCppServer
+            .client_endpoint(&request.host, request.port),
+        readiness_probe: RuntimeReadinessProbe::TcpConnectAndLog {
+            marker: format!("listening on: http://{}:{}", request.host, request.port),
+        },
+    })
+}
+
+fn validate_stable_diffusion_cpp_launch_args(
+    args: &[String],
+    model_path: &str,
+) -> Result<(), RuntimePlanError> {
+    for token in args {
+        let flag = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+        if matches!(
+            flag,
+            "--diffusion-model" | "--listen-ip" | "--listen-port" | "--host" | "--port"
+        ) {
+            return Err(RuntimePlanError::ReservedLaunchArg(flag.to_string()));
+        }
+    }
+    for flag in ["--llm", "--vae", "--audio-vae"] {
+        if let Some(path) = extract_server_arg_value(args, &[flag])
+            && !Path::new(&path).is_file()
+        {
+            return Err(RuntimePlanError::DiffusionComponentNotFound {
+                flag: flag.to_string(),
+                path,
+            });
+        }
+    }
+    let model_name = Path::new(model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(model_path)
+        .to_ascii_lowercase();
+    if model_name.contains("minimax_h3") {
+        for flag in ["--llm", "--vae"] {
+            if extract_server_arg_value(args, &[flag]).is_none() {
+                return Err(RuntimePlanError::MissingH3Component(flag));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_freetoken_plan(
+    launcher_path: &Path,
+    request: &ExternalRuntimeRequest,
+    mut server_args: Vec<String>,
+    effective_ctx_size: Option<u32>,
+    log_file_name: String,
+) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    if extract_server_arg_value(&server_args, &["--served-model-name"]).is_none() {
+        server_args.splice(
+            0..0,
+            ["--served-model-name".to_string(), "local".to_string()],
+        );
+    }
+    let proxy_model_ref = extract_server_arg_value(&server_args, &["--served-model-name"]);
+    let mut command = vec![
+        launcher_path.display().to_string(),
+        "serve".to_string(),
+        "--model".to_string(),
+        request.model_path.clone(),
+        "--host".to_string(),
+        request.host.clone(),
+        "--port".to_string(),
+        request.port.to_string(),
+    ];
+    command.append(&mut server_args);
+    Ok(ExternalRuntimePlan {
+        command,
+        stop_command: None,
+        cwd: launcher_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        port: request.port,
+        ctx_size: effective_ctx_size,
+        log_file_name,
+        proxy_model_ref,
+        protocol: ExternalServerProtocol::FreeTokenOpenAiServer,
+        client_endpoint: ExternalServerProtocol::FreeTokenOpenAiServer
+            .client_endpoint(&request.host, request.port),
+        readiness_probe: RuntimeReadinessProbe::TcpConnectAndLog {
+            marker: format!(
+                "API server is ready to serve on {}:{}",
+                request.host, request.port
+            ),
+        },
+    })
 }
 
 fn build_llama_cpp_plan(
@@ -492,6 +650,13 @@ fn with_server_arg(mut args: Vec<String>, flags: &[&str], value: String) -> Vec<
     let mut index = 0;
     while index < args.len() {
         let token = &args[index];
+        if token
+            .split_once('=')
+            .is_some_and(|(flag, _)| flags.contains(&flag))
+        {
+            index += 1;
+            continue;
+        }
         if flags.contains(&token.as_str()) {
             index += if index + 1 < args.len() { 2 } else { 1 };
             continue;
@@ -508,6 +673,13 @@ fn extract_server_arg_value(args: &[String], flags: &[&str]) -> Option<String> {
     let mut index = 0;
     while index < args.len() {
         let token = &args[index];
+        if let Some((flag, inline_value)) = token.split_once('=')
+            && flags.contains(&flag)
+        {
+            value = Some(inline_value.to_string());
+            index += 1;
+            continue;
+        }
         if flags.contains(&token.as_str()) {
             if let Some(next) = args.get(index + 1) {
                 value = Some(next.clone());
@@ -522,8 +694,9 @@ fn extract_server_arg_value(args: &[String], flags: &[&str]) -> Option<String> {
 
 fn ctx_size_flags(protocol: &str) -> [&'static str; 2] {
     match protocol {
+        "freetoken-openai-server" => ["--max-seq-len-override", ""],
         "vllm-openai-server" | "vllm-wsl2-openai-server" => ["--max-model-len", ""],
-        "vla.cpp-zmq-server" => ["", ""],
+        "vla.cpp-zmq-server" | "stable-diffusion.cpp-server" => ["", ""],
         _ => ["-c", "--ctx-size"],
     }
 }

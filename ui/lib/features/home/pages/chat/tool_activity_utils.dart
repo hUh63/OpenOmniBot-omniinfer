@@ -173,21 +173,15 @@ List<ChatMessageModel> resolveAgentToolMessagesForTask(
 }
 
 String? resolveAgentToolTaskId(ChatMessageModel message) {
-  final fromCard = (message.cardData?['taskId'] ?? '').toString().trim();
-  if (fromCard.isNotEmpty) {
-    return fromCard;
-  }
-  final fromStream = (message.streamMeta?['parentTaskId'] ?? '')
-      .toString()
-      .trim();
-  return fromStream.isEmpty ? null : fromStream;
+  return message.runId;
 }
 
 Map<String, dynamic>? resolveActiveAgentToolCard(
   List<Map<String, dynamic>> cards,
 ) {
   for (final card in cards) {
-    if ((card['status'] ?? '').toString() == 'running') {
+    final status = (card['status'] ?? '').toString().trim().toLowerCase();
+    if (status == 'running' || status == 'pending') {
       return card;
     }
   }
@@ -266,6 +260,91 @@ String resolveAgentToolTitle(Map<String, dynamic> cardData) {
   );
 }
 
+/// Returns the user-facing label for the tool that is currently executing.
+///
+/// ACP already provides the tool lifecycle and title. This is only a display
+/// projection for the live UI: it must not become another status source. In
+/// particular, keep the action visible even when the model emits no reasoning
+/// text (which is valid for a tool-only turn).
+String resolveAgentToolProgressTitle(
+  Map<String, dynamic> cardData, {
+  required bool isEnglish,
+}) {
+  final status = (cardData['status'] ?? '').toString().trim().toLowerCase();
+  final title = resolveAgentToolTitle(cardData);
+  // ACP pending may be streaming input. It does not prove execution or approval.
+  if (status == 'pending') return title;
+  if (status != 'running' && status != 'pending') {
+    return title;
+  }
+
+  final toolType = (cardData['toolType'] ?? '').toString().trim().toLowerCase();
+  final toolName = (cardData['toolName'] ?? '').toString().trim().toLowerCase();
+  if (toolType != 'file' &&
+      !toolName.contains('file_write') &&
+      !toolName.contains('file_edit') &&
+      !toolName.endsWith('/write') &&
+      !toolName.endsWith('/edit')) {
+    return title;
+  }
+
+  final titleLower = title.toLowerCase();
+  final isWrite =
+      toolName.contains('write') ||
+      titleLower.contains('写入') ||
+      titleLower.contains('write');
+  final isEdit =
+      toolName.contains('edit') ||
+      toolName.contains('patch') ||
+      titleLower.contains('编辑') ||
+      titleLower.contains('修改') ||
+      titleLower.contains('edit');
+  final action = isWrite
+      ? (isEnglish ? 'Writing file' : '正在写入文件')
+      : isEdit
+      ? (isEnglish ? 'Editing file' : '正在编辑文件')
+      : title;
+  if (action == title) {
+    return action;
+  }
+
+  final fileName = _agentToolFileName(cardData);
+  final actionWithTarget = fileName.isEmpty
+      ? action
+      : '$action${isEnglish ? ': ' : '：'}$fileName';
+  return actionWithTarget;
+}
+
+String _agentToolFileName(Map<String, dynamic> cardData) {
+  final directPath = (cardData['filePath'] ?? '').toString().trim();
+  final argsJson = (cardData['argsJson'] ?? '').toString().trim();
+  dynamic decoded;
+  if (argsJson.isNotEmpty) {
+    try {
+      decoded = jsonDecode(argsJson);
+    } catch (_) {
+      decoded = null;
+    }
+  }
+  final args = decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+  final path = directPath.isNotEmpty
+      ? directPath
+      : (args?['path'] ??
+                    args?['filePath'] ??
+                    args?['file_path'] ??
+                    args?['filename'] ??
+                    args?['fileName'])
+                ?.toString()
+                .trim() ??
+            '';
+  if (path.isEmpty) {
+    return '';
+  }
+  final normalized = path.replaceAll('\\', '/');
+  final segments = normalized.split('/').where((part) => part.isNotEmpty);
+  return segments.isEmpty ? normalized : segments.last;
+}
+
 String resolveAgentToolTerminalOutput(Map<String, dynamic> cardData) {
   return TerminalOutputUtils.buildDisplayOutput(
     terminalOutput: (cardData['terminalOutput'] ?? '').toString(),
@@ -275,6 +354,12 @@ String resolveAgentToolTerminalOutput(Map<String, dynamic> cardData) {
 }
 
 String resolveAgentToolPreview(Map<String, dynamic> cardData) {
+  if (isAgentToolAwaitingConfirmation(cardData)) {
+    final question = (cardData['question'] ?? '').toString().trim();
+    if (question.isNotEmpty) {
+      return LegacyTextLocalizer.localize(question);
+    }
+  }
   final toolType = (cardData['toolType'] ?? '').toString();
   if (toolType == 'terminal') {
     final output = resolveAgentToolTerminalOutput(cardData).trim();
@@ -331,12 +416,18 @@ String resolveAgentToolStatusLabel(Map<String, dynamic> cardData) {
   if (status == 'interrupted') {
     return LegacyTextLocalizer.localize('中断');
   }
+  if (status == 'pending') {
+    return LegacyTextLocalizer.localize('准备中');
+  }
   switch (status) {
     case 'success':
       return LegacyTextLocalizer.localize('成功');
     case 'error':
       return LegacyTextLocalizer.localize('失败');
     default:
+      if (isAgentToolAwaitingConfirmation(cardData)) {
+        return LegacyTextLocalizer.localize('等待确认');
+      }
       if (toolType == 'terminal') return LegacyTextLocalizer.localize('运行中');
       if (toolType == 'browser') return LegacyTextLocalizer.localize('浏览中');
       if (toolType == 'search') return LegacyTextLocalizer.localize('搜索中');
@@ -346,6 +437,31 @@ String resolveAgentToolStatusLabel(Map<String, dynamic> cardData) {
       if (toolType == 'review') return LegacyTextLocalizer.localize('审阅中');
       return LegacyTextLocalizer.localize('执行中');
   }
+}
+
+/// ACP pending alone is not evidence of approval. Official permission requests
+/// have their own request card; only recognize explicit legacy confirmation here.
+bool isAgentToolAwaitingConfirmation(Map<String, dynamic> cardData) {
+  final toolType = (cardData['toolType'] ?? '').toString().trim().toLowerCase();
+  final status = (cardData['status'] ?? '').toString().trim().toLowerCase();
+  if (toolType != 'clarify' || (status != 'running' && status != 'pending')) {
+    return false;
+  }
+  final question = (cardData['question'] ?? '').toString().trim();
+  if (question.isEmpty) return false;
+  final fields = <String>[
+    if (cardData['missingFields'] is Iterable)
+      ...(cardData['missingFields'] as Iterable).map(
+        (value) => value.toString(),
+      ),
+    if (cardData['missing_fields'] is Iterable)
+      ...(cardData['missing_fields'] as Iterable).map(
+        (value) => value.toString(),
+      ),
+  ];
+  return fields.any(
+    (field) => field.trim().toLowerCase().endsWith('confirmed'),
+  );
 }
 
 String resolveAgentToolTypeLabel(Map<String, dynamic> cardData) {

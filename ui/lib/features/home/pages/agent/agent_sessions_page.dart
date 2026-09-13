@@ -31,20 +31,18 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
   bool _isSwitchingWorkspace = false;
   String? _openingThreadId;
   _AgentSessionFilter _filter = _AgentSessionFilter.all;
-  StreamSubscription<Map<String, dynamic>>? _agentEventSubscription;
-  Timer? _remotePollTimer;
-  Timer? _eventRefreshDebounce;
+  Timer? _sessionPollTimer;
+  bool _isRefreshing = false;
 
   bool get _isEnglish => Localizations.localeOf(context).languageCode == 'en';
 
   @override
   void initState() {
     super.initState();
-    _agentEventSubscription = AgentRuntimeService.events.listen(
-      _handleAgentEvent,
-    );
-    _remotePollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!mounted || !_isRemoteRuntime) {
+    // All harnesses expose the same session/list snapshot. Prompt completion
+    // is a response, not a stream event; refresh without guessing from items.
+    _sessionPollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!mounted || ModalRoute.of(context)?.isCurrent == false) {
         return;
       }
       unawaited(_loadSessions(showLoading: false));
@@ -54,46 +52,16 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
 
   @override
   void dispose() {
-    _agentEventSubscription?.cancel();
-    _remotePollTimer?.cancel();
-    _eventRefreshDebounce?.cancel();
+    _sessionPollTimer?.cancel();
     super.dispose();
   }
 
   bool get _isRemoteRuntime =>
       _status.runtime == 'remote' || _status.remoteEnabled;
 
-  void _handleAgentEvent(Map<String, dynamic> event) {
-    final method =
-        (event['method'] ??
-                (event['message'] is Map
-                    ? (event['message'] as Map)['method']
-                    : null) ??
-                event['type'] ??
-                (event['message'] is Map
-                    ? (event['message'] as Map)['type']
-                    : null))
-            ?.toString()
-            .replaceAll('.', '/')
-            .trim() ??
-        '';
-    if (method.isEmpty || !_isRemoteRuntime) {
-      return;
-    }
-    if (!method.startsWith('thread/') &&
-        !method.startsWith('turn/') &&
-        !method.startsWith('item/') &&
-        !method.startsWith('rawResponseItem/')) {
-      return;
-    }
-    _eventRefreshDebounce?.cancel();
-    _eventRefreshDebounce = Timer(const Duration(milliseconds: 450), () {
-      if (!mounted) return;
-      unawaited(_loadSessions(showLoading: false));
-    });
-  }
-
   Future<void> _loadSessions({bool showLoading = true}) async {
+    if (!mounted || _isRefreshing) return;
+    _isRefreshing = true;
     if (mounted && showLoading) {
       setState(() {
         _isLoading = true;
@@ -123,16 +91,10 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         return;
       }
       final payloads = <Map<String, dynamic>>[];
-      if (status.runtime == 'remote' || status.remoteEnabled) {
-        final loadedPayload = await _listLoadedThreadsIfSupported();
-        if (loadedPayload != null) {
-          payloads.add(loadedPayload);
-        }
-      }
       String? cursor;
-      for (var page = 0; page < 8; page++) {
-        final payload = await AgentRuntimeService.listThreads(
-          limit: 100,
+      final seenCursors = <String>{};
+      while (true) {
+        final payload = await AgentRuntimeService.listSessions(
           cursor: cursor,
         );
         payloads.add(payload);
@@ -142,7 +104,7 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
               payload['nextPageCursor'] ??
               payload['next_page_cursor'],
         );
-        if (nextCursor == null || nextCursor == cursor) {
+        if (nextCursor == null || !seenCursors.add(nextCursor)) {
           break;
         }
         cursor = nextCursor;
@@ -180,15 +142,8 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         _isLoading = false;
         _error = error.toString();
       });
-    }
-  }
-
-  Future<Map<String, dynamic>?> _listLoadedThreadsIfSupported() async {
-    try {
-      return await AgentRuntimeService.listLoadedThreads();
-    } catch (error) {
-      debugPrint('Codex loaded thread list unavailable: $error');
-      return null;
+    } finally {
+      _isRefreshing = false;
     }
   }
 
@@ -213,8 +168,9 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         );
         return;
       }
-      final response = await AgentRuntimeService.resumeThread(
-        threadId: session.threadId,
+      final response = await AgentRuntimeService.loadSession(
+        sessionId: session.threadId,
+        conversationMode: ConversationMode.agent.storageValue,
       );
       final conversationId = _intValue(response['conversationId']);
       if (conversationId == null) {
@@ -261,7 +217,7 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         status = await AgentRuntimeService.connect();
       }
       final cwd = _workspacePathForStatus(status);
-      final response = await AgentRuntimeService.startThread(
+      final response = await AgentRuntimeService.newSession(
         cwd: cwd.isEmpty ? null : cwd,
       );
       final threadId = _threadIdFromResponse(response);
@@ -603,8 +559,8 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
       return;
     }
     try {
-      await AgentRuntimeService.setThreadName(
-        threadId: session.threadId,
+      await AgentRuntimeService.setSessionName(
+        sessionId: session.threadId,
         name: nextName,
       );
       if (!mounted) return;
@@ -637,9 +593,9 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
   }) async {
     try {
       if (archived) {
-        await AgentRuntimeService.archiveThread(threadId: session.threadId);
+        await AgentRuntimeService.archiveSession(sessionId: session.threadId);
       } else {
-        await AgentRuntimeService.unarchiveThread(threadId: session.threadId);
+        await AgentRuntimeService.unarchiveSession(sessionId: session.threadId);
       }
       if (!mounted) return;
       setState(() {
@@ -2019,7 +1975,7 @@ String? _threadEntryId(
   String? parentKey,
 ) {
   final direct = _stringValue(
-    map['threadId'] ?? map['thread_id'] ?? threadMap?['id'],
+    map['sessionId'] ?? map['threadId'] ?? map['thread_id'] ?? threadMap?['id'],
   );
   if (direct != null) {
     return direct;

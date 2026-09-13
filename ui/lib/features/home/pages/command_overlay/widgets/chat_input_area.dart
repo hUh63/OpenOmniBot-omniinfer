@@ -159,12 +159,14 @@ class ChatInputArea extends StatefulWidget {
   final String? contextUsageTooltipMessage;
   final VoidCallback? onLongPressContextUsageRing;
   final ChatModelPickerSettings? modelPickerSettings;
+  final Widget? runtimeConfigButton;
   final AgentRunSettings? agentRunSettings;
   final AgentRunSettingsChanged? onAgentRunSettingsChanged;
   final FutureOr<void> Function()? onAgentRunSettingsOpened;
   final AgentPermissionMode? agentPermissionMode;
   final List<AgentPermissionMode> agentPermissionModes;
-  final ValueChanged<AgentPermissionMode>? onAgentPermissionModeChanged;
+  final FutureOr<void> Function(AgentPermissionMode)?
+  onAgentPermissionModeChanged;
   final bool useIndependentSendButton;
 
   const ChatInputArea({
@@ -197,6 +199,7 @@ class ChatInputArea extends StatefulWidget {
     this.contextUsageTooltipMessage,
     this.onLongPressContextUsageRing,
     this.modelPickerSettings,
+    this.runtimeConfigButton,
     this.agentRunSettings,
     this.onAgentRunSettingsChanged,
     this.onAgentRunSettingsOpened,
@@ -232,6 +235,9 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
   OverlayGlassPopupHandle<AgentPermissionMode>? _agentPermissionMenuHandle;
 
   final ScrollController _textFieldScrollController = ScrollController();
+  final GlobalKey _textFieldKey = GlobalKey(
+    debugLabel: 'chat-composer-text-field',
+  );
 
   bool get isPopupVisible =>
       _composerStateMachine.value.isPopupOpen(ChatComposerPopup.legacyActions);
@@ -489,7 +495,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _inputHeightReportScheduled = false;
       if (!mounted) return;
-      final renderBox = context.findRenderObject() as RenderBox?;
+      final renderBox = findActiveRenderObject(context) as RenderBox?;
       if (renderBox == null || !renderBox.hasSize) return;
       final height = renderBox.size.height;
       if ((height - _lastReportedInputHeight).abs() < 0.5) return;

@@ -9,52 +9,10 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import androidx.core.net.toUri
-import cn.com.omnimind.assists.AssistsCore
-import cn.com.omnimind.assists.api.bean.TaskParams
-import cn.com.omnimind.assists.api.interfaces.OnMessagePushListener
 import cn.com.omnimind.baselib.util.MobileManufacturerUtil
 import cn.com.omnimind.uikit.UIKit
 
 class AssistsUtil {
-    object Core {
-        fun initCore(context: Context) {
-            AssistsCore.initCore(context)
-        }
-
-        fun isInitialized(): Boolean = AssistsCore.isStateMachineInitialized()
-
-        fun isAccessibilityServiceEnabled(): Boolean =
-            AssistsCore.isAccessibilityServiceEnabled()
-
-        fun cancelChatTask(taskId: String? = null) {
-            AssistsCore.cancelChatTask(taskId)
-        }
-
-        fun createChatTask(
-            taskId: String,
-            content: List<Map<String, Any>>,
-            onMessagePush: OnMessagePushListener,
-            provider: String? = null,
-            openClawConfig: TaskParams.OpenClawConfig? = null,
-            modelOverride: TaskParams.ChatModelOverride? = null,
-            reasoningEffort: String? = null,
-            promptCacheKey: String? = null
-        ) {
-            AssistsCore.startTask(
-                TaskParams.ChatTaskParams(
-                    taskId = taskId,
-                    content = content,
-                    onMessagePush = onMessagePush,
-                    provider = provider,
-                    openClawConfig = openClawConfig,
-                    modelOverride = modelOverride,
-                    reasoningEffort = reasoningEffort,
-                    promptCacheKey = promptCacheKey
-                )
-            )
-        }
-    }
-
     object Setting {
         private const val TAG = "AssistsUtil"
         private const val OPSTR_RUN_ANY_IN_BACKGROUND = "android:run_any_in_background"
@@ -139,14 +97,6 @@ class AssistsUtil {
                     "package:${context.packageName}".toUri()
                 )
             )
-        }
-
-        fun openAccessibilitySettings(context: Context) {
-            val intent =
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-            context.startActivity(intent)
         }
 
         fun isInstalledAppsPermissionGranted(context: Context): Boolean {
@@ -244,24 +194,6 @@ class AssistsUtil {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
             )
-        }
-
-        suspend fun createCompanionTask(
-            context: Context,
-            onMessagePushListener: OnMessagePushListener
-        ) {
-            if (!Settings.canDrawOverlays(context)) {
-                throw cn.com.omnimind.baselib.util.exception.PermissionException("请先开启悬浮窗权限!")
-            }
-            AssistsCore.startTask(TaskParams.CompanionTaskParams {
-                onMessagePushListener.onTaskFinish()
-            })
-        }
-
-        fun isCompanionTaskRunning(): Boolean = AssistsCore.isCompanionTaskRunning()
-
-        fun finishTask(context: Context) {
-            AssistsCore.finishCompanionTask()
         }
     }
 

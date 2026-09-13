@@ -13,7 +13,7 @@ class BrowserToolHandler(
     private val helper: SharedHelper,
     private val workspaceManager: cn.com.omnimind.bot.agent.AgentWorkspaceManager
 ) : ToolHandler {
-    override val toolNames: Set<String> = setOf("browser_use")
+    override val toolNames: Set<String> = setOf("browser_use", "webfetch")
 
     override suspend fun execute(
         toolCall: cn.com.omnimind.baselib.llm.AssistantToolCall,
@@ -46,9 +46,15 @@ class BrowserToolHandler(
                 agentRunId = env.agentRunId,
                 workspace = env.workspaceDescriptor
             )
-            toolHandle.bindStopAction { engine.requestInterruptCurrentAction() }
+            toolHandle.bindStopAction {
+                engine.requestInterruptCurrentAction(agentRunId = env.agentRunId)
+            }
             helper.reportToolProgress(callback, toolName, request.toolTitle, mapOf("summary" to request.toolTitle), toolHandle = toolHandle)
-            val outcome = engine.execute(request)
+            val outcome = engine.execute(
+                request = request,
+                agentRunId = env.agentRunId,
+                workspace = env.workspaceDescriptor,
+            )
             val payload = linkedMapOf<String, Any?>("toolTitle" to request.toolTitle).apply { putAll(outcome.payload) }
             val encoded = helper.encodeLocalizedPayload(payload)
             ToolExecutionResult.ContextResult(

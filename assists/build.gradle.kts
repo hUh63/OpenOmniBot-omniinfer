@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "cn.com.omnimind.assists"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 29
@@ -40,7 +40,7 @@ kotlin {
 dependencies {
     implementation(project(":baselib"))
     implementation(project(":androidgui"))
-    api(project(":accessibility"))
+    implementation(project(":accessibility"))
     api(libs.gson)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.core.ktx)

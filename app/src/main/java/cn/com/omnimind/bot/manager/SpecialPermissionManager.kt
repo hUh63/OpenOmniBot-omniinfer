@@ -88,31 +88,6 @@ class SpecialPermissionManager(private val context: Context) {
         }
     }
 
-    fun isAccessibilityServiceEnabled(result: MethodChannel.Result) {
-        try {
-            val isEnabled = AssistsUtil.Core.isAccessibilityServiceEnabled()
-            result.success(isEnabled)
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "Error checking accessibility service", e)
-            result.error("CHECK_FAILED", "Failed to check accessibility service.", e.message)
-        }
-    }
-
-    fun openAccessibilitySettings(result: MethodChannel.Result) {
-        try {
-            AssistsUtil.Setting.openAccessibilitySettings(context);
-            OmniLog.v(TAG, "Opening accessibility settings.")
-            result.success(null)
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "请求打开辅助功能设置时发生异常，可能没有 Activity 能处理此 Intent。", e)
-            result.error(
-                "INTENT_FAILED",
-                "无法打开辅助功能设置页面，可能没有 Activity 能处理此 Intent。",
-                e.message,
-            )
-        }
-    }
-
     fun openOverlaySettings(result: MethodChannel.Result) {
         try {
             AssistsUtil.Setting.openOverlaySettings(context);

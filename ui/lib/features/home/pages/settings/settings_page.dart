@@ -8,7 +8,6 @@ import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/local_model/local_model_feature.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/mcp_server_service.dart';
-import 'package:ui/services/special_permission.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/services/workspace_memory_service.dart';
 import 'package:ui/theme/app_colors.dart';
@@ -298,10 +297,12 @@ class _SettingsPageState extends State<SettingsPage> {
           if (localModelFeature.enabled)
             _SettingItem(
               icon: LucideIcons.cpu,
-              title: context.l10n.localModelsTitle,
-              subtitle: context.l10n.localModelsServiceControlDesc,
+              title: isEnglish ? 'Local model service' : '本地模型服务',
+              subtitle: isEnglish
+                  ? 'On-device inference, model downloads and service'
+                  : '端侧推理、模型下载与推理服务',
               onTap: () {
-                GoRouterManager.push('/home/local_models?tab=service');
+                GoRouterManager.push('/home/local_models');
               },
             ),
           _SettingItem(
@@ -329,20 +330,22 @@ class _SettingsPageState extends State<SettingsPage> {
             },
           ),
           _SettingItem(
+            icon: LucideIcons.messageCircle,
+            title: isEnglish ? 'iMessage channel' : 'iMessage 渠道',
+            subtitle: isEnglish
+                ? 'Telegram / WeChat channel service'
+                : 'Telegram / 微信渠道服务',
+            onTap: () {
+              GoRouterManager.push('/home/imessage_setting');
+            },
+          ),
+          _SettingItem(
             icon: LucideIcons.squareTerminal,
             iconColor: AppColors.buttonPrimary,
             title: context.l10n.settingsAlpineTitle,
             subtitle: context.l10n.settingsAlpineSubtitle,
             onTap: () {
               GoRouterManager.push('/home/termux_setting');
-            },
-          ),
-          _SettingItem(
-            icon: LucideIcons.messageSquare,
-            title: 'IMessage',
-            subtitle: context.trLegacy('微信与 Telegram 消息渠道'),
-            onTap: () {
-              GoRouterManager.push('/home/imessage_setting');
             },
           ),
           _SettingItem(
@@ -401,20 +404,13 @@ class _SettingsPageState extends State<SettingsPage> {
             },
           ),
           _SettingItem(
-            icon: LucideIcons.shield,
-            title: context.trLegacy('陪伴权限'),
-            subtitle: context.trLegacy('查看并配置陪伴功能权限'),
-            onTap: () async {
-              try {
-                final granted = await ensureInstalledAppsPermission();
-                if (granted == true) {
-                  GoRouterManager.push('/home/companion_setting');
-                }
-              } catch (e) {
-                debugPrint('Failed to request installed apps permission: $e');
-                if (!mounted) return;
-                showToast(context.trLegacy('获取已安装应用权限失败'));
-              }
+            icon: LucideIcons.shieldCheck,
+            title: isEnglish ? 'Companion permissions' : '陪伴权限授权',
+            subtitle: isEnglish
+                ? 'Manage authorized apps for the companion'
+                : '管理陪伴可操作的应用授权',
+            onTap: () {
+              GoRouterManager.push('/home/companion_setting');
             },
           ),
           _SettingItem(

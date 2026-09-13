@@ -2,6 +2,7 @@ package cn.com.omnimind.bot.omniinfer
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import androidx.documentfile.provider.DocumentFile
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.baselib.util.OmniLog
@@ -49,8 +50,28 @@ object OmniInferLiteRtModelsManager {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    private data class InstalledLiteRtRecord(
-        val id: String,
+    /**
+     * Resolve which LiteRT-LM backend string to hand to the runtime.
+     *
+     * MediaTek Dimensity (Neuron / APU) path: only taken when the LiteRT MediaTek dispatch
+     * library actually ships with this build AND the model file is tagged for this SoC
+     * (e.g. `Gemma3-1B-IT_q4_ekv1280_mt6991.litertlm`). Otherwise the default backend is used,
+     * so non-MediaTek devices and untagged models keep the existing behaviour.
+     */
+    private fun resolveLiteRtBackend(modelPath: String): String {
+        val context = appContext ?: return BACKEND_NAME
+        val dispatch = File(context.applicationInfo.nativeLibraryDir, "libLiteRtDispatch_MediaTek.so")
+        if (!dispatch.isFile) return BACKEND_NAME
+        val soc = runCatching { Build.SOC_MODEL }.getOrNull()?.lowercase(Locale.US).orEmpty()
+        if (soc.isEmpty()) return BACKEND_NAME
+        val manufacturer = runCatching { Build.SOC_MANUFACTURER }.getOrNull().orEmpty()
+        val isMediaTek = manufacturer.contains("mediatek", ignoreCase = true) || soc.startsWith("mt")
+        if (!isMediaTek) return BACKEND_NAME
+        val taggedForThisSoc = modelPath.lowercase(Locale.US).contains(soc)
+        return if (taggedForThisSoc) OmniInferLocalRuntime.BACKEND_LITERT_NPU else BACKEND_NAME
+    }
+
+    private data class InstalledLiteRtRecord(        val id: String,
         val name: String,
         val path: String,
         val fileSize: Long,
@@ -233,13 +254,13 @@ object OmniInferLiteRtModelsManager {
         OmniLog.i(
             TAG,
             "[startApiService] modelId=${resolved.id}, path=${resolved.path}, " +
-                "backend=$BACKEND_NAME, nCtx=$DEFAULT_N_CTX, extraConfig=$extraConfig"
+                "backend=${resolveLiteRtBackend(resolved.path)}, nCtx=$DEFAULT_N_CTX, extraConfig=$extraConfig"
         )
         mmkv.encode(KEY_ACTIVE_MODEL_ID, resolved.id)
         val loaded = OmniInferLocalRuntime.loadModel(
             modelId = resolved.id,
             modelPath = resolved.path,
-            backend = BACKEND_NAME,
+            backend = resolveLiteRtBackend(resolved.path),
             extraConfig = extraConfig,
             nCtx = DEFAULT_N_CTX,
         )
@@ -256,7 +277,7 @@ object OmniInferLiteRtModelsManager {
             return false
         }
         val resolved = findInstalledRecord(normalizedModelId) ?: return false
-        if (OmniInferLocalRuntime.isModelLoaded(BACKEND_NAME, resolved.id)) {
+        if (OmniInferLocalRuntime.isModelLoaded(resolveLiteRtBackend(resolved.path), resolved.id)) {
             return true
         }
         val extraConfig = buildLiteRtExtraConfig(resolved.id)
@@ -264,7 +285,7 @@ object OmniInferLiteRtModelsManager {
         return OmniInferLocalRuntime.loadModel(
             modelId = resolved.id,
             modelPath = resolved.path,
-            backend = BACKEND_NAME,
+            backend = resolveLiteRtBackend(resolved.path),
             extraConfig = extraConfig,
             nCtx = DEFAULT_N_CTX,
         )
@@ -398,7 +419,7 @@ object OmniInferLiteRtModelsManager {
             }
             return listInstalledModels()
         }
-        if (OmniInferLocalRuntime.isModelLoaded(BACKEND_NAME, target.id)) {
+        if (OmniInferLocalRuntime.isModelLoaded(resolveLiteRtBackend(target.path), target.id)) {
             OmniInferLocalRuntime.stop()
         }
         File(target.path).delete()

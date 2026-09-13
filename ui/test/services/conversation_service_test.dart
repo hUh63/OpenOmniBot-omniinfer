@@ -72,6 +72,7 @@ void main() {
             'parentConversationId': args['parentConversationId'],
             'parentConversationMode': args['parentConversationMode'],
             'scheduledTaskId': args['scheduledTaskId'],
+            'agentId': args['agentId'],
             'status': 0,
             'lastMessage': null,
             'messageCount': 0,
@@ -164,8 +165,12 @@ void main() {
   });
 
   test(
-    'sidebar archives every conversation mode older than seven days',
+    'an explicitly enabled sidebar policy archives every conversation mode older than seven days',
     () async {
+      await StorageService.setBool(
+        StorageService.kRecentConversationsOnlyEnabledKey,
+        true,
+      );
       final now = DateTime.utc(2026, 8, 13, 12);
       final cutoff = ConversationService.recentConversationCutoff(now: now);
       nativeConversations = <Map<String, dynamic>>[
@@ -214,6 +219,10 @@ void main() {
   );
 
   test('sidebar snapshot applies the enabled seven-day window', () async {
+    await StorageService.setBool(
+      StorageService.kRecentConversationsOnlyEnabledKey,
+      true,
+    );
     final now = DateTime.utc(2026, 8, 13, 12);
     final cutoff = ConversationService.recentConversationCutoff(now: now);
     final snapshot = <ConversationModel>[
@@ -253,31 +262,30 @@ void main() {
     );
   });
 
-  test('disabled sidebar policy stops automatic archiving', () async {
-    await StorageService.setBool(
-      StorageService.kRecentConversationsOnlyEnabledKey,
-      false,
-    );
-    nativeConversations = <Map<String, dynamic>>[
-      {
-        'id': 5,
-        'title': 'old but active',
-        'mode': ConversationMode.chatOnly.storageValue,
-        'isArchived': false,
-        'status': 0,
-        'messageCount': 0,
-        'createdAt': 1,
-        'updatedAt': 1,
-      },
-    ];
+  test(
+    'default sidebar policy keeps older active conversations visible',
+    () async {
+      nativeConversations = <Map<String, dynamic>>[
+        {
+          'id': 5,
+          'title': 'old but active',
+          'mode': ConversationMode.chatOnly.storageValue,
+          'isArchived': false,
+          'status': 0,
+          'messageCount': 0,
+          'createdAt': 1,
+          'updatedAt': 1,
+        },
+      ];
 
-    final conversations = await ConversationService.getSidebarConversations();
+      final conversations = await ConversationService.getSidebarConversations();
 
-    expect(conversations.map((conversation) => conversation.id), <int>[5]);
-    expect(lastGetConversationsArguments, isNot(contains('archiveBefore')));
-    expect(lastGetConversationsArguments['includeArchived'], isTrue);
-    expect(nativeConversations.single['isArchived'], isFalse);
-  });
+      expect(conversations.map((conversation) => conversation.id), <int>[5]);
+      expect(lastGetConversationsArguments, isNot(contains('archiveBefore')));
+      expect(lastGetConversationsArguments['includeArchived'], isTrue);
+      expect(nativeConversations.single['isArchived'], isFalse);
+    },
+  );
 
   test(
     'keeps the bound ACP agent in conversation and thread targets',
@@ -502,14 +510,14 @@ void main() {
         await ConversationHistoryService.getLastVisibleThreadTarget(),
         const ConversationThreadTarget.existing(
           conversationId: 1,
-          mode: ConversationMode.normal,
+          mode: ConversationMode.agent,
         ),
       );
 
       final remaining = await ConversationService.getAllConversations();
       expect(remaining, hasLength(1));
       expect(remaining.single.id, 1);
-      expect(remaining.single.mode, ConversationMode.normal);
+      expect(remaining.single.mode, ConversationMode.agent);
     },
   );
 
@@ -525,6 +533,23 @@ void main() {
     );
     expect(created['mode'], ConversationMode.chatOnly.storageValue);
   });
+
+  test(
+    'binds an Agent conversation to its Harness when it is created',
+    () async {
+      final conversationId = await ConversationService.createConversation(
+        title: 'DSH 对话',
+        mode: ConversationMode.agent,
+        agentId: 'deepseek-harness-acp',
+      );
+
+      final created = nativeConversations.singleWhere(
+        (item) => item['id'] == conversationId,
+      );
+      expect(created['mode'], ConversationMode.agent.storageValue);
+      expect(created['agentId'], 'deepseek-harness-acp');
+    },
+  );
 
   test(
     'creates scheduled subagent run conversations with parent metadata',
@@ -575,7 +600,7 @@ void main() {
       );
 
       expect(archived, isTrue);
-      expect(agentRuntimeCalls.single.method, 'thread/archive');
+      expect(agentRuntimeCalls.single.method, 'session/archive');
       expect(nativeConversations.single['isArchived'], isTrue);
     },
   );
@@ -605,7 +630,7 @@ void main() {
       );
 
       expect(deleted, isTrue);
-      expect(agentRuntimeCalls.single.method, 'thread/archive');
+      expect(agentRuntimeCalls.single.method, 'session/archive');
       expect(nativeConversations.single['isArchived'], isTrue);
 
       final visibleConversations =

@@ -20,6 +20,9 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
     }
     _requestComposerFocus();
     _handleSlashCommandInput();
+    if (_activeMode == ChatPageMode.agent) {
+      unawaited(_loadAgentCollaborationModes(force: true));
+    }
   }
 
   @override
@@ -155,7 +158,7 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
   bool _isPointerInside(GlobalKey key, Offset position) {
     final context = key.currentContext;
     if (context == null) return false;
-    final renderBox = context.findRenderObject() as RenderBox?;
+    final renderBox = findActiveRenderObject(context) as RenderBox?;
     if (renderBox == null || !renderBox.hasSize) return false;
     final offset = renderBox.localToGlobal(Offset.zero);
     final rect = offset & renderBox.size;
@@ -173,10 +176,9 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
         _isPointerInside(_openClawPanelKey, position) ||
         _isPointerInside(_slashCommandStripKey, position) ||
         insideToolActivityStrip;
-    final insideHomeDrawerSearch = _isPointerInside(
-      _drawerSearchFieldKey,
-      position,
-    );
+    final insideHomeDrawerSearch =
+        _isPointerInside(_embeddedDrawerSearchFieldKey, position) ||
+        _isPointerInside(_drawerSearchFieldKey, position);
     if (!insideInputArea &&
         !insideInputAuxiliarySurface &&
         !insideHomeDrawerSearch &&
@@ -279,7 +281,7 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
         trimmed.substring('/effort'.length).trimLeft(),
       );
       if (effort == null) {
-        _showSnackBar('可用思考强度：no、low、high、xhigh、max');
+        _showSnackBar('可用思考强度：none、low、medium、high、xhigh、max');
         return true;
       }
       await _applyConversationReasoningEffort(effort);

@@ -82,6 +82,20 @@ class ModelProviderConfig {
 }
 
 class ModelProviderProfileSummary {
+  // Preset endpoints exist before the user adds credentials. Custom/local
+  // endpoints may intentionally be anonymous; do not impose a key on them.
+  bool get needsPresetCredentials =>
+      const {
+        'deepseek',
+        'mimo',
+        'moonshot',
+        'minimax',
+        'bailian',
+      }.contains(sourceType) &&
+      !hasApiKey &&
+      apiKey.isEmpty &&
+      !hasCustomHeaders &&
+      customHeaders.isEmpty;
   final String id;
   final String name;
   final String baseUrl;
@@ -406,27 +420,35 @@ class ModelProviderConfigService {
     try {
       final result = await AssistsMessageService.assistCore
           .invokeMethod<Map<dynamic, dynamic>>('listModelProviderProfiles');
-      return ModelProviderProfilesPayload.fromMap(result);
+      final payload = ModelProviderProfilesPayload.fromMap(result);
+      // A clean install can legitimately have no editable profile yet.  Keep
+      // the configuration page usable so the user can register the first
+      // Provider instead of rendering an empty page and losing the save path.
+      if (payload.profiles.isNotEmpty) return payload;
+      return _emptyEditableProfilePayload();
     } on PlatformException {
-      final fallback = await getConfig();
-      final profile = ModelProviderProfileSummary(
-        id: fallback.id.isNotEmpty ? fallback.id : 'profile-1',
-        name: fallback.name.isNotEmpty ? fallback.name : 'Provider 1',
-        baseUrl: fallback.baseUrl,
-        apiKey: fallback.apiKey,
-        customHeaders: fallback.customHeaders,
-        sourceType: fallback.providerType,
-        readOnly: fallback.readOnly,
-        ready: fallback.ready,
-        statusText: fallback.statusText,
-        configured: fallback.configured,
-        wireApi: fallback.wireApi,
-      );
-      return ModelProviderProfilesPayload(
-        profiles: [profile],
-        editingProfileId: profile.id,
-      );
+      return _emptyEditableProfilePayload();
     }
+  }
+
+  static ModelProviderProfilesPayload _emptyEditableProfilePayload() {
+    const profile = ModelProviderProfileSummary(
+      id: 'profile-1',
+      name: 'Provider 1',
+      baseUrl: '',
+      apiKey: '',
+      customHeaders: <String, String>{},
+      sourceType: 'custom',
+      readOnly: false,
+      ready: false,
+      statusText: '',
+      configured: false,
+      wireApi: 'chat_completions',
+    );
+    return const ModelProviderProfilesPayload(
+      profiles: <ModelProviderProfileSummary>[profile],
+      editingProfileId: 'profile-1',
+    );
   }
 
   static Future<ModelProviderProfileSummary> saveProfile({
@@ -465,7 +487,11 @@ class ModelProviderConfigService {
           'protocolType': protocolType,
           'wireApi': resolvedWireApi,
         });
-    return ModelProviderProfileSummary.fromMap(result);
+    final saved = ModelProviderProfileSummary.fromMap(result);
+    // Provider credentials/endpoint changes invalidate the previously
+    // verified catalog. The next explicit refresh repopulates the same
+    // persisted Provider document with the new profile revision.
+    return saved;
   }
 
   static Future<ModelProviderProfilesPayload> deleteProfile(
@@ -649,172 +675,14 @@ class ModelProviderConfigService {
         .where((item) => item.id.isNotEmpty)
         .toList();
 
-    // A cold official catalog may not expose its synthetic profile until the
-    // forced native refresh finishes. Resolve it again so that first response
-    // is cached for subsequent page loads just like an already-ready catalog.
-    var cacheProfileSnapshot = profileSnapshot;
-    if (cacheProfileSnapshot == null &&
-        targetProfileId == _kOfficialProfileId) {
-      final refreshedProfile = await _findProfileById(_kOfficialProfileId);
-      if (refreshedProfile?.sourceType == _kOfficialSourceType) {
-        cacheProfileSnapshot = refreshedProfile;
-      }
-    }
-
-    var cacheBase = normalizeApiBase(apiBase) ?? '';
-    if (cacheBase.isEmpty && cacheProfileSnapshot != null) {
-      cacheBase = normalizeApiBase(cacheProfileSnapshot.baseUrl) ?? '';
-    }
-    if (cacheBase.isEmpty &&
-        cacheProfileSnapshot?.sourceType != _kOfficialSourceType) {
-      final config = await getConfig();
-      cacheBase = normalizeApiBase(config.baseUrl) ?? '';
-    }
-    var resolvedProviderName = providerName.trim();
-    if (resolvedProviderName.isEmpty && cacheProfileSnapshot != null) {
-      resolvedProviderName = cacheProfileSnapshot.name;
-    }
-    final enrichedModels = await enrichModelsForProfile(
+    return enrichModelsForProfile(
       profileId: targetProfileId ?? '',
-      providerName: resolvedProviderName,
-      apiBase: cacheBase,
+      providerName: providerName.isEmpty
+          ? (profileSnapshot?.name ?? '')
+          : providerName,
+      apiBase: normalizeApiBase(apiBase) ?? profileSnapshot?.baseUrl ?? '',
       models: models,
     );
-    final normalizedCapability = capability?.trim().toLowerCase() ?? '';
-    final isNonTextCapabilityScopedOfficialRequest =
-        cacheProfileSnapshot?.sourceType == _kOfficialSourceType &&
-        normalizedCapability.isNotEmpty &&
-        normalizedCapability != 'text';
-    if (targetProfileId != null &&
-        cacheProfileSnapshot != null &&
-        !isNonTextCapabilityScopedOfficialRequest) {
-      try {
-        final latestProfile = await _findProfileById(targetProfileId);
-        final requestedBase = normalizeApiBase(apiBase) ?? '';
-        final snapshotBase =
-            normalizeApiBase(cacheProfileSnapshot.baseUrl) ?? '';
-        final requestMatchesSnapshot =
-            requestedBase.isEmpty ||
-            (snapshotBase.isNotEmpty && requestedBase == snapshotBase);
-        if (latestProfile != null &&
-            requestMatchesSnapshot &&
-            _sameProfileCacheIdentity(cacheProfileSnapshot, latestProfile)) {
-          await _saveCachedFetchedModels(
-            profileId: targetProfileId,
-            apiBase: cacheBase,
-            models: enrichedModels,
-            profileRevision: cacheProfileSnapshot.revision,
-          );
-        }
-      } catch (_) {
-        // ignore cache write failures
-      }
-    }
-
-    return enrichedModels;
-  }
-
-  static Future<List<ProviderModelOption>> getCachedFetchedModels({
-    required String profileId,
-    String apiBase = '',
-    int? profileRevision,
-  }) async {
-    final normalizedProfileId = _canonicalProfileId(profileId);
-    await _migrateLegacyStorageIfNeeded(normalizedProfileId);
-    final raw = StorageService.getString(
-      _kCachedFetchedModelsKey,
-      defaultValue: '',
-    );
-    if (raw == null || raw.trim().isEmpty) {
-      return const [];
-    }
-
-    final requestedBase = normalizeApiBase(apiBase) ?? '';
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) {
-        return const [];
-      }
-      final bucket = decoded[normalizedProfileId];
-      if (bucket is! Map<String, dynamic>) {
-        return const [];
-      }
-      final cacheBase = (bucket['apiBase'] ?? '').toString();
-      if (requestedBase.isNotEmpty && cacheBase != requestedBase) {
-        return const [];
-      }
-      final cachedRevision = _readCacheRevision(bucket['profileRevision']);
-      if (profileRevision != null) {
-        if (profileRevision > 0 && cachedRevision != profileRevision) {
-          return const [];
-        }
-        if (profileRevision == 0 &&
-            cachedRevision != null &&
-            cachedRevision != 0) {
-          return const [];
-        }
-      }
-      final modelsRaw = bucket['models'];
-      if (modelsRaw is! List) {
-        return const [];
-      }
-      return modelsRaw
-          .map((item) => ProviderModelOption.fromMap(item as Map?))
-          .where((item) => item.id.isNotEmpty)
-          .toList();
-    } catch (_) {
-      return const [];
-    }
-  }
-
-  static Future<void> saveCachedFetchedModels({
-    required String profileId,
-    required String apiBase,
-    required List<ProviderModelOption> models,
-    int? profileRevision,
-  }) async {
-    await _saveCachedFetchedModels(
-      profileId: profileId,
-      apiBase: apiBase,
-      models: models,
-      profileRevision: profileRevision,
-    );
-  }
-
-  static Future<void> _saveCachedFetchedModels({
-    required String profileId,
-    required String apiBase,
-    required List<ProviderModelOption> models,
-    int? profileRevision,
-  }) async {
-    final normalizedProfileId = _canonicalProfileId(profileId);
-    await _migrateLegacyStorageIfNeeded(normalizedProfileId);
-    final current = _readJsonMap(_kCachedFetchedModelsKey);
-    final existing = current[normalizedProfileId];
-    final existingRevision = existing is Map
-        ? _readCacheRevision(existing['profileRevision'])
-        : null;
-    // The synchronous read/compare/set invocation runs on one Dart isolate,
-    // and SharedPreferences updates its local cache as setString is invoked.
-    // Thus a late old response observes (and cannot replace) a newer revision
-    // without retaining a Future mutex across unrelated Flutter test zones.
-    if (existingRevision != null &&
-        (profileRevision == null || existingRevision > profileRevision)) {
-      return;
-    }
-    final normalizedBase = normalizeApiBase(apiBase) ?? '';
-    current[normalizedProfileId] = {
-      'apiBase': normalizedBase,
-      if (profileRevision != null) 'profileRevision': profileRevision,
-      'models': models.map((item) => item.toMap()).toList(),
-    };
-    final persisted = await StorageService.setString(
-      _kCachedFetchedModelsKey,
-      jsonEncode(current),
-    );
-    if (!persisted) {
-      throw StateError('provider model cache persistence failed');
-    }
   }
 
   static Future<List<String>> getManualModelIds({
@@ -877,11 +745,7 @@ class ModelProviderConfigService {
     final manualModelIds = isOfficial
         ? const <String>[]
         : await getManualModelIds(profileId: normalizedProfileId);
-    final remoteModels = await getCachedFetchedModels(
-      profileId: normalizedProfileId,
-      apiBase: resolvedProfile?.baseUrl ?? '',
-      profileRevision: resolvedProfile?.revision,
-    );
+    const remoteModels = <ProviderModelOption>[];
     final merged = mergeModelOptions(
       remoteModels: remoteModels,
       manualModelIds: manualModelIds,
@@ -928,62 +792,70 @@ class ModelProviderConfigService {
     return groups;
   }
 
-  static Future<List<ProviderModelGroup>> loadChatModelGroups() async {
-    final payload = await listProfiles();
-    final groups = <ProviderModelGroup>[];
-    for (final profile in payload.profiles) {
-      List<ProviderModelOption> models;
-      // The official runtime catalog is capability-scoped and is not managed
-      // by the BYOK visibility list. Refresh its full text catalog here so the
-      // chat selector does not degrade to only the scene-bound fallback model.
-      if (profile.sourceType == 'omnibot_official' && profile.configured) {
-        try {
-          models = await fetchModels(
+  static Future<List<ProviderModelOption>> _loadChatModelOptionsForProfile(
+    ModelProviderProfileSummary profile, {
+    required bool refresh,
+  }) async {
+    if (!profile.configured) {
+      return const <ProviderModelOption>[];
+    }
+
+    final manualIds = profile.sourceType == _kOfficialSourceType
+        ? const <String>[]
+        : await getManualModelIds(profileId: profile.id);
+    final hiddenIds = await getHiddenChatModelIds(profileId: profile.id);
+    final remote = refresh
+        ? await fetchModels(
             profileId: profile.id,
             providerName: profile.name,
             capability: 'text',
-          );
-        } catch (_) {
-          models = await getChatModelOptionsForProfile(
-            profile.id,
-            profile: profile,
-          );
-        }
-      } else {
-        models = await getChatModelOptionsForProfile(
-          profile.id,
-          profile: profile,
-        );
-      }
-      groups.add(ProviderModelGroup(profile: profile, models: models));
-    }
-    return groups;
+            forceRefresh: true,
+          )
+        : const <ProviderModelOption>[];
+    return filterChatModelOptions(
+      models: mergeModelOptions(
+        remoteModels: remote,
+        manualModelIds: manualIds,
+      ),
+      hiddenModelIds: hiddenIds,
+    );
   }
 
-  /// Forces the small platform-owned text catalog independently of whichever
-  /// BYOK/custom profile is currently active in the conversation.
+  /// Reads user-authored models without network access unless requested.
+  static Future<List<ProviderModelGroup>> loadChatModelGroups({
+    bool refresh = false,
+  }) async {
+    final payload = await listProfiles();
+    return Future.wait(
+      payload.profiles.map(
+        (profile) async => ProviderModelGroup(
+          profile: profile,
+          models: await _loadChatModelOptionsForProfile(
+            profile,
+            refresh: refresh,
+          ),
+        ),
+      ),
+    );
+  }
+
+  static Future<List<ProviderModelOption>> fetchChatModelsForProfile(
+    ModelProviderProfileSummary profile,
+  ) => _loadChatModelOptionsForProfile(profile, refresh: true);
+
+  static Future<List<ProviderModelGroup>> refreshChatModelGroups() =>
+      loadChatModelGroups(refresh: true);
+
   static Future<ProviderModelGroup?> refreshOfficialChatModelGroup() async {
-    var officialProfile = await _findProfileById(_kOfficialProfileId);
     final fetched = await fetchModels(
       profileId: _kOfficialProfileId,
-      providerName: officialProfile?.name ?? _kOfficialProfileName,
+      providerName: _kOfficialProfileName,
       capability: 'text',
       forceRefresh: true,
     );
-    officialProfile ??= await _findProfileById(_kOfficialProfileId);
-    if (officialProfile == null ||
-        officialProfile.sourceType != _kOfficialSourceType ||
-        !officialProfile.configured) {
-      return null;
-    }
-    final cached = await getChatModelOptionsForProfile(
-      officialProfile.id,
-      profile: officialProfile,
-    );
-    return ProviderModelGroup(
-      profile: officialProfile,
-      models: cached.isNotEmpty ? cached : fetched,
-    );
+    final profile = await _findProfileById(_kOfficialProfileId);
+    if (profile == null || !profile.configured) return null;
+    return ProviderModelGroup(profile: profile, models: fetched);
   }
 
   static List<ProviderModelOption> mergeModelOptions({
@@ -1065,23 +937,6 @@ class ModelProviderConfigService {
     return null;
   }
 
-  static bool _sameProfileCacheIdentity(
-    ModelProviderProfileSummary left,
-    ModelProviderProfileSummary right,
-  ) {
-    return left.id == right.id &&
-        left.revision == right.revision &&
-        normalizeApiBase(left.baseUrl) == normalizeApiBase(right.baseUrl) &&
-        left.sourceType == right.sourceType &&
-        left.configured == right.configured;
-  }
-
-  static int? _readCacheRevision(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '');
-  }
-
   static Map<String, dynamic> _readJsonMap(String key) {
     final raw = StorageService.getString(key, defaultValue: '');
     if (raw == null || raw.trim().isEmpty) {
@@ -1120,28 +975,11 @@ class ModelProviderConfigService {
       }
     }
 
-    final currentCached = _readJsonMap(_kCachedFetchedModelsKey);
-    if (!currentCached.containsKey(targetProfileId)) {
-      final legacyRaw = StorageService.getString(
-        _kLegacyCachedFetchedModelsKey,
-        defaultValue: '',
-      );
-      if (legacyRaw != null && legacyRaw.trim().isNotEmpty) {
-        try {
-          final decoded = jsonDecode(legacyRaw);
-          if (decoded is Map<String, dynamic>) {
-            currentCached[targetProfileId] = decoded;
-            await StorageService.setString(
-              _kCachedFetchedModelsKey,
-              jsonEncode(currentCached),
-            );
-            await StorageService.remove(_kLegacyCachedFetchedModelsKey);
-          }
-        } catch (_) {
-          // ignore
-        }
-      }
-    }
+    // The current catalog is shared with native ACP launch configuration.
+    // It is not a UI/network cache: explicit discovery still fetches live.
+    // Deleting it here makes the next Harness launch advertise only the bound
+    // model and reject another model that the user just discovered.
+    await StorageService.remove(_kLegacyCachedFetchedModelsKey);
   }
 
   static List<String> _normalizeModelIds(List<String> ids) {

@@ -63,6 +63,7 @@ Only inference-facing endpoints are exposed to remote clients by default:
 | `POST` | `/v1/messages` |
 | `POST` | `/tokenize` |
 | `POST` | `/detokenize` |
+| `GET`, `POST` | `/sdcpp/v1/*` |
 
 Management endpoints under `/omni/*`, including model loading, backend switching, backend stop, and gateway shutdown, remain local-only unless the gateway is started with `--allow-remote-management` and an API key. Keep OmniStudio and other local controllers pointed at `http://127.0.0.1:<port>`.
 
@@ -122,10 +123,15 @@ Quick Tunnel is intended for demos and short-lived testing. For best compatibili
 | `POST` | `/omni/detokenize` | Local-only alias for `/detokenize` |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions |
 | `POST` | `/v1/messages` | Anthropic-compatible Messages API adapter |
+| `GET` | `/sdcpp/v1/capabilities` | stable-diffusion.cpp capabilities and defaults |
+| `POST` | `/sdcpp/v1/img_gen` | Submit an asynchronous image job |
+| `POST` | `/sdcpp/v1/vid_gen` | Submit an asynchronous video/audio job |
+| `GET` | `/sdcpp/v1/jobs/{id}` | Poll a diffusion job |
+| `POST` | `/sdcpp/v1/jobs/{id}/cancel` | Cancel a diffusion job |
 
-The two generation endpoints require an OpenAI-compatible loaded backend. A
-loaded `vla.cpp-*` backend uses a loopback-only ZeroMQ/protobuf action protocol
-instead; both endpoints return `422` with
+The two chat generation endpoints require an OpenAI-compatible loaded backend.
+A loaded `vla.cpp-*` or `stable-diffusion.cpp-*` backend uses a different
+protocol; both chat endpoints return `422` with
 `error.code=backend_protocol_not_supported` and report its local client
 endpoint rather than proxying an incompatible request.
 
@@ -139,7 +145,10 @@ Unknown paths return `404`:
 }
 ```
 
-Request bodies are limited to 100 MiB. Invalid JSON is treated as an empty object by the current gateway implementation.
+General request bodies are limited to 100 MiB. Native diffusion requests use a
+stricter 16 MiB limit and return `413` when it is exceeded. Invalid JSON is
+treated as an empty object by the current gateway implementation unless the
+selected upstream protocol rejects it.
 
 ## Health
 
@@ -220,6 +229,7 @@ The active runtime and the persisted startup selection are reported separately:
 - `restore_completed` is true only when a loaded runtime matches the persisted backend, model, `mmproj`, and context size.
 - `generation` and `route_state` identify the currently routable runtime generation.
 - `resource_ledger` reports capacity, reserved, committed, and available bytes by host, CUDA-device, or unified-memory domain.
+- `runtime_placement` reports the effective llama.cpp CUDA policy, CPU/GPU layer placement, startup-log buffer totals, and reconciled budget. It is `null` for runtimes that do not use placement reconciliation.
 
 Example:
 
@@ -245,7 +255,27 @@ Example response:
   "runtime_mode": "external_server",
   "backend_port": 12894,
   "backend_pid": 45210,
-  "launch_args": ["-ngl", "999"],
+  "launch_args": [],
+  "runtime_placement": {
+    "source": "llama.cpp_startup_log",
+    "policy": "auto",
+    "requested_gpu_layers": null,
+    "mode": "partial",
+    "offloaded_layers": 28,
+    "total_layers": 41,
+    "reported_buffer_bytes": {"host": 1500000000, "cuda:0": 4939212390},
+    "reconciled_budget": {
+      "domains_bytes": {"host": 2147483648, "cuda:0": 5368709120},
+      "components": [
+        {"name": "reported_model_buffers", "domain": "host", "bytes": 1500000000},
+        {"name": "runtime_overhead", "domain": "host", "bytes": 402653184},
+        {"name": "reconciliation_slack", "domain": "host", "bytes": 244830464},
+        {"name": "reported_model_buffers", "domain": "cuda:0", "bytes": 4939212390},
+        {"name": "runtime_overhead", "domain": "cuda:0", "bytes": 134217728},
+        {"name": "reconciliation_slack", "domain": "cuda:0", "bytes": 295279002}
+      ]
+    }
+  },
   "restore_selection": {
     "backend": "llama.cpp-cuda",
     "model": "models/Qwen3.5-2B-Q4_K_M.gguf",
@@ -258,7 +288,7 @@ Example response:
   "backend_log": ".local/runtime/linux/llama.cpp-linux-cuda/logs/runtime.log",
   "effective_parameters": {
     "ctx_size": 4096,
-    "ngl": 999,
+    "ngl": null,
     "threads": null,
     "threads_batch": null,
     "batch_size": null,
@@ -477,7 +507,7 @@ Request body:
   "mmproj": "<optional-relative-or-absolute-mmproj-path>",
   "backend": "<optional-backend-id>",
   "ctx_size": 4096,
-  "launch_args": ["-ngl", "999"],
+  "launch_args": [],
   "strict_capabilities": false,
   "request_defaults": {
     "temperature": 0.2,
@@ -493,6 +523,7 @@ Notes:
 - `backend` is optional. If omitted, OmniInfer uses the selected backend or auto-selection logic.
 - `ctx_size` is optional and may also be sent as `ctx-size`.
 - `launch_args` is optional and intended for backend-native launch arguments.
+- Official Linux and Windows llama.cpp CUDA backends default to automatic placement by omitting `-ngl`. Use `-ngl 999` only to require strict full GPU offload.
 - `request_defaults` is merged into later inference requests after this model is loaded.
 - Effective request defaults are exposed in runtime state and retained when the selected model is restored.
 - `strict_capabilities` is optional. When true, unsupported load options fail instead of being ignored with warnings.
@@ -510,9 +541,35 @@ Example response:
   "selected_model": "models/Qwen3.5-2B-Q4_K_M.gguf",
   "selected_mmproj": null,
   "selected_ctx_size": 4096,
+  "runtime_placement": {
+    "source": "llama.cpp_startup_log",
+    "policy": "auto",
+    "requested_gpu_layers": null,
+    "mode": "partial",
+    "offloaded_layers": 28,
+    "total_layers": 41,
+    "reported_buffer_bytes": {"host": 1500000000, "cuda:0": 4939212390},
+    "reconciled_budget": {
+      "domains_bytes": {"host": 2147483648, "cuda:0": 5368709120},
+      "components": [
+        {"name": "reported_model_buffers", "domain": "host", "bytes": 1500000000},
+        {"name": "runtime_overhead", "domain": "host", "bytes": 402653184},
+        {"name": "reconciliation_slack", "domain": "host", "bytes": 244830464},
+        {"name": "reported_model_buffers", "domain": "cuda:0", "bytes": 4939212390},
+        {"name": "runtime_overhead", "domain": "cuda:0", "bytes": 134217728},
+        {"name": "reconciliation_slack", "domain": "cuda:0", "bytes": 295279002}
+      ]
+    }
+  },
   "warnings": []
 }
 ```
+
+For automatic or explicit partial llama.cpp CUDA placement, OmniInfer holds a
+provisional host/CUDA reservation during startup and atomically replaces it
+with the placement reported by llama.cpp after readiness. Missing or unsafe
+placement evidence returns `502`; the runtime process, listener, route, and
+ledger reservation are rolled back together.
 
 Selecting the same resolved model, backend, `mmproj`, context size, and effective launch arguments again is idempotent. OmniInfer returns `200` with `already_loaded: true`, `requires_reload: false`, and the existing backend PID instead of starting a second runtime. This also applies when a startup-restored path is selected again through its public model id.
 
@@ -548,6 +605,7 @@ Status codes:
 - `200` on success
 - `400` for invalid input or missing files
 - `409` when the selected model is already loaded with different runtime settings
+- `502` when backend startup or post-start resource reconciliation fails
 
 ### Streaming model load
 
@@ -645,6 +703,93 @@ Status codes:
 - `409` if no external backend is running or the backend rejects cache clearing
 
 Multimodal llama.cpp loads may reject KV cache clearing; reload the model instead.
+
+## stable-diffusion.cpp Native API
+
+When a `stable-diffusion.cpp-*` backend is loaded, OmniInfer keeps `sd-server`
+bound to loopback and proxies its native asynchronous API through the gateway.
+Remote LAN and Cloudflare clients use the normal OmniInfer inference API key;
+they do not need remote-management access. The gateway does not forward client
+authorization headers to the loopback runtime.
+
+The stable endpoints are:
+
+- `GET /sdcpp/v1/capabilities`
+- `POST /sdcpp/v1/img_gen`
+- `POST /sdcpp/v1/vid_gen`
+- `GET /sdcpp/v1/jobs/{id}`
+- `POST /sdcpp/v1/jobs/{id}/cancel`
+
+Query capabilities after each model load. Defaults, output formats, and
+supported modes are checkpoint-dependent. Submissions return `202` with an
+`id` and `poll_url`; poll until `status` becomes `completed`, `failed`, or
+`cancelled`. A completed video job returns the encoded container in
+`result.b64_json` together with its MIME type, FPS, and frame count.
+MiniMax H3 normalizes every requested frame count to the smallest supported
+value at or above it: at least 5 frames and `video_frames % 17 == 5`. For
+example, a request for 25 frames produces 39 frames. Treat
+`result.frame_count` as the authoritative output count.
+
+MiniMax H3 example load request:
+
+```json
+{
+  "backend": "stable-diffusion.cpp-vulkan",
+  "model": "C:\\models\\MiniMax-H3-FL2VA-Q4\\minimax_h3_fl2va_pruned-Q4_K.gguf",
+  "launch_args": [
+    "--llm", "C:\\models\\MiniMax-H3-FL2VA-Q4\\qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+    "--vae", "C:\\models\\MiniMax-H3-FL2VA-Q4\\vae\\minimax_h3_video_vae_fp16.safetensors",
+    "--audio-vae", "C:\\models\\MiniMax-H3-FL2VA-Q4\\vae\\minimax_h3_audio_vae_fp32.safetensors",
+    "--cfg-scale", "1.0",
+    "--diffusion-fa",
+    "--backend", "te=cpu",
+    "--rng", "cpu"
+  ]
+}
+```
+
+OmniInfer budgets stable-diffusion.cpp artifacts by module before launch. The
+denoiser is assigned to `diffusion`, `--llm` to `te`, and both `--vae` and
+`--audio-vae` to `vae`. Parameter bytes follow `--params-backend` (or the
+module's runtime backend when no parameter override exists), while workspace
+and safety overhead follow `--backend`. `--offload-to-cpu` is treated exactly
+as upstream treats it: an effective default `*=cpu` parameter assignment.
+When a module's parameter and runtime domains differ, OmniInfer also reserves a
+full runtime-side staging copy because stable-diffusion.cpp copies those
+parameters to the compute backend while that module runs.
+
+Vulkan reservations use a `vulkan:<index>` memory domain and the selected
+driver's `VK_EXT_memory_budget` free-memory report. Unknown device names,
+missing component sizes, unavailable memory-budget evidence, dynamic model
+directories, weight type overrides, and `--auto-fit` placement fail closed
+before the runtime starts. Use explicit `cpu` or `vulkan<index>` assignments
+when overriding placement.
+
+The model-load endpoint remains local-only by default. Once loaded, an
+authenticated inference client can submit a short validation job:
+
+```bash
+curl -sS http://127.0.0.1:9000/sdcpp/v1/capabilities \
+  -H 'Authorization: Bearer <api-key>'
+
+curl -sS http://127.0.0.1:9000/sdcpp/v1/vid_gen \
+  -H 'Authorization: Bearer <api-key>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt":"A silver tabby kitten surfing on a sunny wave",
+    "width":640,
+    "height":384,
+    "video_frames":25,
+    "fps":24,
+    "sample_params":{"sample_steps":4},
+    "output_format":"webm"
+  }'
+```
+
+Native diffusion request bodies are capped at 16 MiB. Upstream status codes,
+content type, and safe response headers pass through. Loading a non-diffusion
+backend makes `/sdcpp/v1/*` return structured `422`; calling chat or Messages
+with a diffusion backend loaded likewise returns structured `422`.
 
 ## OpenAI-Compatible API
 

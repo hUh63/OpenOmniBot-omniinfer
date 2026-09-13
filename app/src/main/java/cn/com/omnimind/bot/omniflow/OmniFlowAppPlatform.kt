@@ -6,10 +6,10 @@ import cn.com.omnimind.assists.controller.http.HttpController
 import cn.com.omnimind.assists.controller.http.SceneChatCompletionResponse
 import cn.com.omnimind.baselib.llm.ChatCompletionRequest
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalRuntime
+import cn.com.omnimind.bot.terminal.EmbeddedTerminalSetupManager
 import cn.com.omnimind.bot.plugin.runtime.RuntimeSkillBundleManager
 import com.ai.assistance.operit.terminal.TerminalManager
 import com.rk.terminal.runtime.TerminalDistribution
-import com.rk.terminal.runtime.UbuntuRepositoryManager
 import java.util.UUID
 
 internal class OmniFlowAppPlatform(
@@ -48,15 +48,29 @@ internal class OmniFlowAppPlatform(
         val distribution = TerminalDistribution.selected()
         val environmentVersion = "$expectedVersion+system-numpy-v3+${distribution.id}"
         if (prefs.getString(READY_VERSION_KEY, null) == environmentVersion) {
-            log("python_ready_cached version=$environmentVersion")
-            return
+            val cachedProbe = TerminalManager.getInstance(appContext).executeHiddenCommand(
+                command = "python3 -c 'import sys,numpy; raise SystemExit(0 if (\"%d.%d\" % sys.version_info[:2]) == \"$expectedVersion\" else 1)'",
+                executorKey = "omniflow-python-cache-probe",
+                timeoutMs = 10_000L,
+            )
+            if (cachedProbe.isOk && cachedProbe.exitCode == 0) {
+                log("python_ready_cached version=$environmentVersion")
+                return
+            }
+            log("python_cache_stale version=$environmentVersion")
+        }
+        val pythonBootstrap = EmbeddedTerminalSetupManager(appContext).installPackages(
+            selectedPackageIds = listOf("python"),
+        )
+        require(pythonBootstrap.success) {
+            pythonBootstrap.message.ifBlank { pythonBootstrap.output }
+                .ifBlank { "omniflow_python_install_failed" }
         }
         val startedAt = System.currentTimeMillis()
         log("python_probe_start version=$expectedVersion")
         val command = buildOmniFlowPythonPrepareCommand(
             expectedVersion = expectedVersion,
             distributionId = distribution.id,
-            ubuntuRepositorySetup = UbuntuRepositoryManager.buildSelectedRepositorySetupCommand(),
         )
         val result = TerminalManager.getInstance(appContext).executeHiddenCommand(
             command = command,
@@ -70,9 +84,11 @@ internal class OmniFlowAppPlatform(
             },
         )
         require(result.isOk && result.exitCode == 0) {
-            result.error.takeIf(String::isNotBlank)
-                ?: result.output.takeLast(800).trim()
-                    .ifBlank { "omniflow_python_runtime_not_preinstalled" }
+            buildOmniFlowPythonFailureMessage(
+                error = result.error,
+                output = result.output,
+                rawOutputPreview = result.rawOutputPreview,
+            )
         }
         prefs.edit().putString(READY_VERSION_KEY, environmentVersion).apply()
         log(
@@ -139,10 +155,24 @@ internal class OmniFlowAppPlatform(
 
 }
 
+internal fun buildOmniFlowPythonFailureMessage(
+    error: String,
+    output: String,
+    rawOutputPreview: String,
+): String {
+    val details = sequenceOf(error, output, rawOutputPreview)
+        .map(EmbeddedTerminalRuntime::sanitizeTerminalNoise)
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .distinct()
+        .joinToString("\n")
+        .takeLast(1200)
+    return details.ifBlank { "omniflow_python_runtime_not_preinstalled" }
+}
+
 internal fun buildOmniFlowPythonPrepareCommand(
     expectedVersion: String,
     distributionId: String = "alpine",
-    ubuntuRepositorySetup: String = ":",
 ): String {
     require(Regex("""\d+\.\d+""").matches(expectedVersion)) {
         "invalid_python_version"
@@ -152,23 +182,34 @@ internal fun buildOmniFlowPythonPrepareCommand(
     }
     val repairCommand = if (distributionId == "ubuntu") {
         """
-            $ubuntuRepositorySetup
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-pip python3-numpy
+            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-numpy; then
+              echo 'OMNIFLOW_PYTHON_STAGE=repair_index_refresh package=python-numpy'
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-numpy
+            fi
         """.trimIndent()
     } else {
-        "apk --wait 300 add --no-cache python3 py3-pip py3-numpy"
+        """
+            if ! apk --no-check-certificate add --no-cache py3-numpy; then
+              echo 'OMNIFLOW_PYTHON_STAGE=repair_index_refresh package=python-numpy'
+              apk --no-check-certificate update
+              apk --no-check-certificate add --no-cache py3-numpy
+            fi
+        """.trimIndent()
     }
     return """
         set -e
         expected='$expectedVersion'
         echo 'OMNIFLOW_PYTHON_STAGE=probe_start'
-        base_packages_ready() {
-          command -v python3 >/dev/null 2>&1 &&
-          python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' | grep -qx "${'$'}expected" &&
-          python3 -c 'import numpy' >/dev/null 2>&1
+        command -v python3 >/dev/null 2>&1 || {
+          echo 'OMNIFLOW_PYTHON_STAGE=error reason=python_missing' >&2
+          exit 12
         }
-        if ! base_packages_ready; then
+        python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' | grep -qx "${'$'}expected" || {
+          echo 'OMNIFLOW_PYTHON_STAGE=error reason=python_version_mismatch' >&2
+          exit 13
+        }
+        if ! python3 -c 'import numpy' >/dev/null 2>&1; then
           echo 'OMNIFLOW_PYTHON_STAGE=repair_start package=python-numpy'
           $repairCommand
           printf '%s\n' '$distributionId-python$expectedVersion-numpy-v1' > /etc/omnibot-python-environment
@@ -176,7 +217,7 @@ internal fun buildOmniFlowPythonPrepareCommand(
         else
           echo 'OMNIFLOW_PYTHON_STAGE=probe_ready source=environment'
         fi
-        base_packages_ready
+        python3 -c 'import numpy' >/dev/null 2>&1
         echo 'OMNIFLOW_PYTHON_STAGE=ready'
     """.trimIndent()
 }

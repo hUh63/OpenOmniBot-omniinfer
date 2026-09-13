@@ -107,6 +107,21 @@ class OnboardingProviderController extends ChangeNotifier {
               profile: profile,
               enrichMetadata: false,
             );
+        if (models.isEmpty) {
+          // A persisted Provider can be valid while its fetched model cache is
+          // still empty (for example on the first launch after installation).
+          // Do the same one-shot remote discovery as the Provider settings
+          // page so onboarding never presents a false empty model inventory.
+          try {
+            models = await ModelProviderConfigService.fetchModels(
+              profileId: profile.id,
+              providerName: profile.name,
+              capability: 'text',
+            );
+          } catch (_) {
+            // Keep the empty state; the user can still add a model manually.
+          }
+        }
       }
       if (_disposed) return;
       _dataLoaded = true;
@@ -187,7 +202,10 @@ class OnboardingProviderController extends ChangeNotifier {
       return false;
     }
     if (!ModelProviderConfigService.isValidApiBase(baseUrl)) {
-      _error = t('请输入有效的 HTTPS API 地址。', 'Enter a valid HTTPS API base URL.');
+      _error = t(
+        '请输入有效的 HTTP 或 HTTPS API 地址。',
+        'Enter a valid HTTP or HTTPS API base URL.',
+      );
       _emit();
       return false;
     }

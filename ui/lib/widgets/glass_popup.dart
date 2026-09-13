@@ -114,7 +114,8 @@ class GlassPopupOverlayContentState extends State<GlassPopupOverlayContent>
         preferBelow: widget.preferBelow,
         verticalGap: widget.verticalGap,
         screenPadding: widget.screenPadding,
-        mediaPadding: mediaQuery.padding,
+        // Root overlays keep full-screen coordinates when the IME opens.
+        mediaPadding: mediaQuery.padding + mediaQuery.viewInsets,
         textDirection: Directionality.of(context),
         explicitUnfoldAlignment: widget.unfoldAlignment,
         horizontalPlacement: widget.horizontalPlacement,
@@ -284,7 +285,8 @@ class GlassPopupRoute<T> extends PopupRoute<T> {
         preferBelow: preferBelow,
         verticalGap: verticalGap,
         screenPadding: screenPadding,
-        mediaPadding: mediaQuery.padding,
+        // Root overlays keep full-screen coordinates when the IME opens.
+        mediaPadding: mediaQuery.padding + mediaQuery.viewInsets,
         textDirection: Directionality.of(context),
         explicitUnfoldAlignment: explicitUnfoldAlignment,
         horizontalPlacement: horizontalPlacement,
@@ -581,11 +583,50 @@ class _UnfoldClipper extends CustomClipper<Rect> {
       alignment != old.alignment;
 }
 
+/// 读取仍处于活动树中的 context 对应的 render object。
+///
+/// 页面切换时，旧页面的 State 可能还 mounted，但它的 Element 已经进入
+/// inactive 状态。此时直接调用 `findRenderObject()` 会在 debug/profile 设备
+/// 上触发 Flutter 断言，尤其容易发生在 post-frame 的弹窗锚点测量中。
+bool isActiveBuildContext(BuildContext? context) {
+  if (context == null || !context.mounted) {
+    return false;
+  }
+
+  var active = true;
+  assert(() {
+    if (context is Element) {
+      active = context.debugIsActive;
+    }
+    return true;
+  }());
+  return active;
+}
+
+RenderObject? findActiveRenderObject(BuildContext? context) {
+  if (!isActiveBuildContext(context)) {
+    return null;
+  }
+  final activeContext = context!;
+
+  try {
+    return activeContext.findRenderObject();
+  } on FlutterError {
+    // The element can be deactivated between the checks and the lookup while
+    // a route transition is being committed. Treat it as not measurable.
+    return null;
+  }
+}
+
 /// 从 [BuildContext] 对应的 [RenderBox] 中提取 anchor 矩形（overlay 坐标系）。
 /// 调用前请确保 widget 已经完成 layout（`hasSize == true`）。
 Rect? glassPopupAnchorFromContext(BuildContext anchorContext) {
-  final overlay = Overlay.of(anchorContext).context.findRenderObject() as RenderBox?;
-  final anchorBox = anchorContext.findRenderObject() as RenderBox?;
+  if (!isActiveBuildContext(anchorContext)) {
+    return null;
+  }
+  final overlayState = Overlay.maybeOf(anchorContext);
+  final overlay = findActiveRenderObject(overlayState?.context) as RenderBox?;
+  final anchorBox = findActiveRenderObject(anchorContext) as RenderBox?;
   if (overlay == null || anchorBox == null || !anchorBox.hasSize) {
     return null;
   }
@@ -602,7 +643,11 @@ Rect? glassPopupAnchorFromGlobalPosition(
   BuildContext context,
   Offset globalPosition,
 ) {
-  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+  if (!isActiveBuildContext(context)) {
+    return null;
+  }
+  final overlayState = Overlay.maybeOf(context);
+  final overlay = findActiveRenderObject(overlayState?.context) as RenderBox?;
   if (overlay == null) return null;
   final local = overlay.globalToLocal(globalPosition);
   return Rect.fromLTWH(local.dx, local.dy, 0, 0);
@@ -634,6 +679,8 @@ class OverlayGlassPopupHandle<T> {
   final GlobalKey<GlassPopupOverlayContentState> _wrapperKey =
       GlobalKey<GlassPopupOverlayContentState>();
   OverlayEntry? _entry;
+  ModalRoute<dynamic>? _route;
+  _OverlayGlassPopupPopEntry? _popEntry;
   bool _dismissing = false;
   bool _keepOpenOnNextKeyboardHide = false;
 
@@ -670,6 +717,13 @@ class OverlayGlassPopupHandle<T> {
   Future<void> dismiss([T? result]) async {
     if (_dismissing) return;
     _dismissing = true;
+    final popEntry = _popEntry;
+    _popEntry = null;
+    if (popEntry != null) {
+      _route?.unregisterPopEntry(popEntry);
+      popEntry.canPopNotifier.dispose();
+    }
+    _route = null;
     if (!_completer.isCompleted) {
       _completer.complete(result);
     }
@@ -682,6 +736,21 @@ class OverlayGlassPopupHandle<T> {
     if (entry != null && entry.mounted) {
       entry.remove();
     }
+  }
+}
+
+class _OverlayGlassPopupPopEntry extends PopEntry<Object?> {
+  _OverlayGlassPopupPopEntry(this.dismiss);
+
+  final VoidCallback dismiss;
+  @override
+  final ValueNotifier<bool> canPopNotifier = ValueNotifier(false);
+
+  @override
+  void onPopInvokedWithResult(bool didPop, Object? result) {
+    // ModalRoute is iterating its entries during this callback. Unregister
+    // after that iteration, just as a PopScope leaves through a widget rebuild.
+    if (!didPop) scheduleMicrotask(dismiss);
   }
 }
 
@@ -707,6 +776,7 @@ OverlayGlassPopupHandle<T> showOverlayGlassPopup<T>({
 }) {
   final handle = OverlayGlassPopupHandle<T>._();
   final overlayState = Overlay.of(context, rootOverlay: useRootOverlay);
+  final route = ModalRoute.of(context);
 
   final entry = OverlayEntry(
     builder: (overlayContext) {
@@ -749,7 +819,10 @@ OverlayGlassPopupHandle<T> showOverlayGlassPopup<T>({
           child: tree,
         );
       }
-      if (dismissOnBackButton) {
+      // Navigator-only hosts still use the route's PopEntry below. The
+      // Router dispatcher is optional, and preserves topmost-popup priority
+      // when this popup is hosted by MaterialApp.router.
+      if (dismissOnBackButton && Router.maybeOf(context) != null) {
         tree = BackButtonListener(
           onBackButtonPressed: () async {
             unawaited(handle.dismiss());
@@ -764,6 +837,15 @@ OverlayGlassPopupHandle<T> showOverlayGlassPopup<T>({
 
   handle._entry = entry;
   overlayState.insert(entry);
+  if (dismissOnBackButton && route != null) {
+    // Use the same route registration as PopScope. A root OverlayEntry has
+    // no ModalRoute ancestor, and local history alone does not update Android's
+    // predictive-back disposition. This neither pushes a route nor steals focus.
+    final popEntry = _OverlayGlassPopupPopEntry(() => unawaited(handle.dismiss()));
+    handle._route = route;
+    handle._popEntry = popEntry;
+    route.registerPopEntry(popEntry);
+  }
   return handle;
 }
 

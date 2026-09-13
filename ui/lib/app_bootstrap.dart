@@ -1,3 +1,7 @@
+import 'package:ui/widgets/predictive_back_route.dart';
+
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,8 +17,8 @@ import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme_controller.dart';
 import 'package:ui/theme/app_theme_mode.dart';
 import 'package:ui/theme/app_theme.dart';
-import 'package:ui/widgets/embedded_terminal_init_overlay.dart';
 import 'package:ui/widgets/startup_account_prompt.dart';
+import 'package:ui/widgets/omnibot_error_widget.dart';
 
 import 'core/router/go_router_manager.dart';
 import 'services/event_bus.dart';
@@ -42,19 +46,35 @@ Future<void> bootstrapMain(List<String> args) async {
     GoRouterManager.setInitialRoute(initialRoute);
   }
   WidgetsFlutterBinding.ensureInitialized();
-  WidgetsBinding.instance.deferFirstFrame();
-  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  installOmnibotErrorWidget();
+  try {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  } catch (error, stackTrace) {
+    debugPrint('[FlutterStartup] system UI mode setup failed: $error');
+    debugPrint('$stackTrace');
+  }
 
   final container = ProviderContainer();
-  await StorageService.init();
-  await AppBackgroundService.load();
-  await ScheduledTaskSchedulerService.initialize();
-  await OmnibotResourceService.ensureWorkspacePathsLoaded();
-  SystemChrome.setSystemUIOverlayStyle(
-    AppTheme.overlayStyleForBrightness(
-      _resolveStartupBrightness(StorageService.getThemeMode()),
-    ),
-  );
+  // Keep the first frame fail-open. A transient platform/plugin failure during
+  // startup must not leave the Flutter engine alive behind a permanently
+  // blank window. Services that depend on storage or a native channel can
+  // retry from their own pages after the shell is visible.
+  try {
+    await StorageService.init();
+  } catch (error, stackTrace) {
+    debugPrint('[FlutterStartup] StorageService.init failed: $error');
+    debugPrint('$stackTrace');
+  }
+  try {
+    SystemChrome.setSystemUIOverlayStyle(
+      AppTheme.overlayStyleForBrightness(
+        _resolveStartupBrightness(StorageService.getThemeMode()),
+      ),
+    );
+  } catch (error, stackTrace) {
+    debugPrint('[FlutterStartup] system UI style setup failed: $error');
+    debugPrint('$stackTrace');
+  }
 
   runApp(
     UncontrolledProviderScope(
@@ -62,7 +82,40 @@ Future<void> bootstrapMain(List<String> args) async {
       child: MyApp(args: args),
     ),
   );
-  WidgetsBinding.instance.allowFirstFrame();
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    unawaited(_initializeDeferredStartupServices());
+  });
+}
+
+Future<void> _initializeDeferredStartupServices() async {
+  await Future.wait(<Future<void>>[
+    _runDeferredStartupStep(
+      'AppBackgroundService.load',
+      AppBackgroundService.load,
+    ),
+    _runDeferredStartupStep(
+      'ScheduledTaskSchedulerService.initialize',
+      ScheduledTaskSchedulerService.initialize,
+    ),
+    _runDeferredStartupStep(
+      'OmnibotResourceService.ensureWorkspacePathsLoaded',
+      () async {
+        await OmnibotResourceService.ensureWorkspacePathsLoaded();
+      },
+    ),
+  ]);
+}
+
+Future<void> _runDeferredStartupStep(
+  String name,
+  Future<void> Function() operation,
+) async {
+  try {
+    await operation();
+  } catch (error, stackTrace) {
+    debugPrint('[FlutterStartup] $name failed: $error');
+    debugPrint('$stackTrace');
+  }
 }
 
 Brightness _resolveStartupBrightness(AppThemeMode mode) {
@@ -119,16 +172,11 @@ class _MyAppState extends ConsumerState<MyApp> {
     final themeMode = ref.watch(appThemeModeProvider).materialThemeMode;
     final resolvedLocale = ref.watch(appResolvedLocaleProvider);
     final predictiveBackEnabled = ref.watch(predictiveBackEnabledProvider);
-    // 预测性返回开关作用于主题转场(仅影响少数 MaterialPageRoute 页面;
-    // GoRouter 自定义转场路由由 PredictiveBackGestureWrapper 处理):
-    // 开启时用官方 PredictiveBackPageTransitionsBuilder(手势预览+FadeForwards
-    // 普通转场);关闭时用 FadeForwardsPageTransitionsBuilder —— 无手势预览,
-    // 普通转场与本特性接入前(Flutter 3.38 默认回退)完全一致(旧版行为)。
-    // 只覆盖 Android,其他平台(iOS/macOS 的 Cupertino 等)不受影响。
+    // Imperative Material routes share the GoRouter motion and geometry.
     final pageTransitionsTheme = PageTransitionsTheme(
       builders: {
         TargetPlatform.android: predictiveBackEnabled
-            ? const PredictiveBackPageTransitionsBuilder()
+            ? const MiuixPageTransitionsBuilder()
             : const FadeForwardsPageTransitionsBuilder(),
       },
     );
@@ -168,7 +216,6 @@ class _MyAppState extends ConsumerState<MyApp> {
                   routeListenable: _router.routeInformationProvider,
                   child: child ?? const SizedBox.shrink(),
                 ),
-                const EmbeddedTerminalInitToastListener(),
               ],
             ),
           ),

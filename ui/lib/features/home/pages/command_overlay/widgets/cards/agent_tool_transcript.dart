@@ -4,13 +4,18 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/chat/tool_activity_utils.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_diff_viewer.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/terminal_output_utils.dart';
+import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/services/chat_detail_sheet_preferences.dart';
 import 'package:ui/services/agent_diff_parser.dart';
 import 'package:ui/services/agent_tool_call_parser.dart';
+import 'package:ui/services/assists_core_service.dart';
+import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/theme/app_colors.dart';
+import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/omni_glass.dart';
 
 const Color _kTimeoutStatusColor = Color(0xFFFF8A3D);
@@ -38,7 +43,7 @@ class AgentToolTranscript {
 
 AgentToolTranscript buildAgentToolTranscript(
   Map<String, dynamic> cardData, {
-  int maxOutputLines = 28,
+  int? maxOutputLines,
   int maxPreviewLines = 2,
   int maxPreviewChars = 220,
 }) {
@@ -274,13 +279,10 @@ String _resolveAgentToolPromptAgentName(Map<String, dynamic> cardData) {
   if (explicit.isNotEmpty) {
     return explicit;
   }
-  return switch ((cardData['agentId'] ?? '').toString().trim()) {
-    'codex-acp' || 'codex-remote' => 'Codex',
-    'claude-code-acp' => 'Claude Code',
-    'opencode-acp' => 'OpenCode',
-    'deepseek-harness-acp' => 'DeepSeek Harness',
-    _ => '',
-  };
+  // The native ACP event carries the resolved display name when available.
+  // Keep an id fallback for custom/ newly-installed Harnesses instead of
+  // maintaining a vendor allow-list in the card renderer.
+  return (cardData['agentId'] ?? '').toString().trim();
 }
 
 String _resolveAgentToolPromptTitle(
@@ -323,12 +325,20 @@ String _buildTerminalOutputText(Map<String, dynamic> cardData) {
   if (status == 'running' && _isGenericTerminalProgressMessage(fallback)) {
     return '';
   }
+  if (fallback.isEmpty) {
+    // Persisted cards can predate current ACP projection. Reuse the same
+    // result parser without rewriting their history or lifecycle status.
+    final restored = normalizeAgentToolCall(cardData);
+    return restored.terminalOutput.isNotEmpty
+        ? restored.terminalOutput.trimRight()
+        : restored.summary;
+  }
   return fallback;
 }
 
 String _buildStructuredOutputText(
   Map<String, dynamic> cardData, {
-  required int maxOutputLines,
+  required int? maxOutputLines,
 }) {
   final status = (cardData['status'] ?? '').toString().trim();
   final summary = (cardData['summary'] ?? '').toString().trim();
@@ -336,7 +346,9 @@ String _buildStructuredOutputText(
   final previewMap = _decodeJsonMap(
     (cardData['resultPreviewJson'] ?? '').toString(),
   );
-  final rawMap = _decodeJsonMap((cardData['rawResultJson'] ?? '').toString());
+  final previewResult = (cardData['resultPreviewJson'] ?? '').toString();
+  final rawResult = (cardData['rawResultJson'] ?? '').toString();
+  final rawMap = _decodeJsonMap(rawResult);
   final lines = <String>[];
 
   if (status == 'running') {
@@ -347,18 +359,32 @@ String _buildStructuredOutputText(
     _appendUniqueLine(lines, summary);
   }
 
-  final structuredPreview = _buildStructuredLines(
-    previewMap,
+  // A compact preview may legitimately be a presentation-oriented subset, but
+  // the detail sheet and copy action must expose the complete persisted result.
+  final detailMap = maxOutputLines == null && rawMap.isNotEmpty
+      ? rawMap
+      : previewMap;
+  final structuredResult = _buildStructuredLines(
+    detailMap,
     maxLines: maxOutputLines,
   );
-  if (structuredPreview.isNotEmpty) {
-    lines.addAll(structuredPreview.where((line) => !lines.contains(line)));
+  if (structuredResult.isNotEmpty) {
+    lines.addAll(structuredResult.where((line) => !lines.contains(line)));
   } else {
     final structuredRaw = _buildStructuredLines(
       rawMap,
       maxLines: maxOutputLines,
     );
     lines.addAll(structuredRaw.where((line) => !lines.contains(line)));
+  }
+
+  // A valid tool result can be a JSON array or scalar rather than an object.
+  // The detail/copy path must still show the complete canonical payload.
+  if (lines.isEmpty) {
+    final detailResult = maxOutputLines == null && rawResult.trim().isNotEmpty
+        ? rawResult
+        : previewResult;
+    _appendUniqueLine(lines, _formatCompleteResultPayload(detailResult));
   }
 
   if (lines.isEmpty) {
@@ -371,6 +397,18 @@ String _buildStructuredOutputText(
 
   final normalized = lines.join('\n').trim();
   return _trimStructuredOutput(normalized, maxLines: maxOutputLines);
+}
+
+String _formatCompleteResultPayload(String value) {
+  final normalized = value.trimRight();
+  if (normalized.isEmpty) {
+    return '';
+  }
+  try {
+    return const JsonEncoder.withIndent('  ').convert(jsonDecode(normalized));
+  } catch (_) {
+    return normalized;
+  }
 }
 
 String _buildPreviewText(
@@ -438,15 +476,16 @@ List<String> _formatCliArguments(String key, dynamic value) {
 
 List<String> _buildStructuredLines(
   Map<String, dynamic> source, {
-  required int maxLines,
+  required int? maxLines,
 }) {
-  if (source.isEmpty || maxLines <= 0) {
+  if (source.isEmpty) {
     return const <String>[];
   }
 
   final lines = <String>[];
+  final compactValues = maxLines != null;
 
-  bool canAdd() => lines.length < maxLines;
+  bool canAdd() => maxLines == null || lines.length < maxLines;
 
   void addLine(String line) {
     final normalized = line.trimRight();
@@ -465,7 +504,7 @@ List<String> _buildStructuredLines(
       final normalizedMap = value.map(
         (key, nested) => MapEntry(key.toString(), nested),
       );
-      final summary = _summarizeMap(normalizedMap);
+      final summary = compactValues ? _summarizeMap(normalizedMap) : null;
       if (summary != null && summary.isNotEmpty) {
         addLine(label.isEmpty ? summary : '$label: $summary');
         return;
@@ -488,8 +527,10 @@ List<String> _buildStructuredLines(
       if (value.isEmpty) {
         return;
       }
-      if (_canInlineScalarList(value)) {
-        addLine('$label: ${value.map(_formatInlineValue).join(', ')}');
+      if (_canInlineScalarList(value) || !compactValues) {
+        addLine(
+          '$label: ${value.map((item) => _formatInlineValue(item, compact: compactValues)).join(', ')}',
+        );
         return;
       }
       final itemLimit = math.min(value.length, depth <= 1 ? 5 : 3);
@@ -499,14 +540,14 @@ List<String> _buildStructuredLines(
           final normalizedMap = item.map(
             (key, nested) => MapEntry(key.toString(), nested),
           );
-          final summary = _summarizeMap(normalizedMap);
+          final summary = compactValues ? _summarizeMap(normalizedMap) : null;
           if (summary != null && summary.isNotEmpty) {
             addLine('$label[$index]: $summary');
           } else {
             appendValue('$label[$index]', normalizedMap, depth + 1);
           }
         } else {
-          final formatted = _formatScalarLine(item);
+          final formatted = _formatScalarLine(item, compact: compactValues);
           if (formatted != null) {
             addLine('$label[$index]: $formatted');
           }
@@ -521,7 +562,7 @@ List<String> _buildStructuredLines(
       return;
     }
 
-    final formatted = _formatScalarLine(value);
+    final formatted = _formatScalarLine(value, compact: compactValues);
     if (formatted != null) {
       addLine(label.isEmpty ? formatted : '$label: $formatted');
     }
@@ -621,19 +662,19 @@ String? _summarizeMap(Map<String, dynamic> value) {
 
 String _trimStructuredOutput(
   String value, {
-  required int maxLines,
-  int maxChars = 6000,
+  required int? maxLines,
+  int? maxChars,
 }) {
   if (value.isEmpty) {
     return value;
   }
   var candidate = value;
-  if (candidate.length > maxChars) {
+  if (maxChars != null && candidate.length > maxChars) {
     candidate = candidate.substring(0, maxChars).trimRight();
     candidate = '$candidate\n...[truncated]';
   }
   final lines = candidate.split('\n');
-  if (lines.length > maxLines) {
+  if (maxLines != null && lines.length > maxLines) {
     candidate = [...lines.take(maxLines), '...[truncated]'].join('\n');
   }
   return candidate.trimRight();
@@ -647,14 +688,14 @@ bool _canInlineScalarList(List<dynamic> value) {
   return rendered.length <= 120;
 }
 
-String _formatInlineValue(dynamic value) {
+String _formatInlineValue(dynamic value, {bool compact = true}) {
   if (value == null) {
     return 'null';
   }
-  return _truncateInline(value.toString());
+  return compact ? _truncateInline(value.toString()) : value.toString();
 }
 
-String? _formatScalarLine(dynamic value) {
+String? _formatScalarLine(dynamic value, {bool compact = true}) {
   if (value == null) {
     return null;
   }
@@ -665,7 +706,7 @@ String? _formatScalarLine(dynamic value) {
   if (normalized.isEmpty) {
     return null;
   }
-  return _truncateInline(normalized);
+  return compact ? _truncateInline(normalized) : normalized;
 }
 
 String _truncateInline(String value, {int maxLength = 140}) {
@@ -975,7 +1016,6 @@ class _AgentToolDetailContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final transcript = buildAgentToolTranscript(
       cardData,
-      maxOutputLines: 80,
       maxPreviewLines: 4,
       maxPreviewChars: 420,
     );
@@ -986,6 +1026,12 @@ class _AgentToolDetailContent extends StatelessWidget {
     final diffSummary = _resolveDiffSummary(cardData);
     final isDiffView = diffSummary?.files.isNotEmpty == true;
     final detailSpan = isDiffView ? null : _buildDetailTextSpan(transcript);
+    final actions = _resolveAgentToolActions(cardData);
+    final copyText = _agentToolCopyText(
+      cardData,
+      transcript,
+      isDiffView: isDiffView,
+    );
 
     return Column(
       children: [
@@ -1011,6 +1057,38 @@ class _AgentToolDetailContent extends StatelessWidget {
               _DialogMetaTag(label: typeLabel),
               const SizedBox(width: 6),
               _DialogStatusTag(status: status, label: statusLabel),
+              const SizedBox(width: 2),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints.tightFor(
+                  width: 28,
+                  height: 28,
+                ),
+                splashRadius: 14,
+                tooltip: LegacyTextLocalizer.isEnglish
+                    ? 'Copy details'
+                    : '复制详情',
+                onPressed: copyText.isEmpty
+                    ? null
+                    : () async {
+                        final copied =
+                            await AssistsMessageService.copyToClipboard(
+                              copyText,
+                            );
+                        showToast(
+                          copied
+                              ? (LegacyTextLocalizer.isEnglish
+                                    ? 'Copied'
+                                    : '已复制')
+                              : (LegacyTextLocalizer.isEnglish
+                                    ? 'Copy failed'
+                                    : '复制失败'),
+                          type: copied ? ToastType.success : ToastType.error,
+                        );
+                      },
+                icon: const Icon(LucideIcons.copy, size: 15),
+              ),
             ],
           ),
         ),
@@ -1022,8 +1100,166 @@ class _AgentToolDetailContent extends StatelessWidget {
                   child: SelectableText.rich(detailSpan!),
                 ),
         ),
+        if (actions.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 18, 14),
+            child: _AgentToolActionBar(actions: actions),
+          ),
       ],
     );
+  }
+}
+
+String _agentToolCopyText(
+  Map<String, dynamic> cardData,
+  AgentToolTranscript transcript, {
+  required bool isDiffView,
+}) {
+  final body = isDiffView
+      ? (cardData['diffText'] ?? '').toString()
+      : transcript.outputText;
+  final prompt = transcript.promptLine.trimRight();
+  final output = body.trimRight();
+  if (prompt.isEmpty) return output;
+  if (output.isEmpty) return prompt;
+  return '$prompt\n$output';
+}
+
+List<Map<String, dynamic>> _resolveAgentToolActions(
+  Map<String, dynamic> cardData,
+) {
+  final actions = <Map<String, dynamic>>[];
+  final rawActions = cardData['actions'];
+  if (rawActions is List) {
+    actions.addAll(
+      rawActions.whereType<Map>().map(
+        (item) => item.map((key, value) => MapEntry(key.toString(), value)),
+      ),
+    );
+  }
+  final workspaceId = (cardData['workspaceId'] ?? '').toString().trim();
+  final hasWorkspaceAction = actions.any(
+    (action) => (action['type'] ?? '').toString().trim() == 'workspace',
+  );
+  if (workspaceId.isNotEmpty && !hasWorkspaceAction) {
+    actions.add(<String, dynamic>{
+      'type': 'workspace',
+      'label': LegacyTextLocalizer.isEnglish ? 'Open workspace' : '打开工作区',
+      'payload': <String, dynamic>{'workspaceId': workspaceId},
+    });
+  }
+  final toolType = (cardData['toolType'] ?? '').toString().trim();
+  if (cardData['showScheduleAction'] == true || toolType == 'schedule') {
+    actions.add(<String, dynamic>{
+      'type': 'route',
+      'label': LegacyTextLocalizer.isEnglish
+          ? 'View scheduled tasks'
+          : '查看定时任务',
+      'target': '/task/scheduled_tasks',
+    });
+  }
+  if (cardData['showAlarmAction'] == true || toolType == 'alarm') {
+    actions.add(<String, dynamic>{
+      'type': 'route',
+      'label': LegacyTextLocalizer.isEnglish ? 'View alarms' : '查看闹钟列表',
+      'target': '/task/scheduled_tasks?tab=alarm',
+    });
+  }
+  return actions
+      .where((action) => (action['label'] ?? '').toString().trim().isNotEmpty)
+      .toList(growable: false);
+}
+
+class _AgentToolActionBar extends StatelessWidget {
+  const _AgentToolActionBar({required this.actions});
+
+  final List<Map<String, dynamic>> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (var index = 0; index < actions.length; index++)
+            OutlinedButton(
+              key: ValueKey('agent-tool-action-$index'),
+              onPressed: () => unawaited(_runAgentToolAction(actions[index])),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFFDDE8F7),
+                side: const BorderSide(color: Color(0xFF34445E)),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                minimumSize: const Size(0, 34),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                actions[index]['label'].toString(),
+                style: const TextStyle(fontSize: 11.5),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _runAgentToolAction(Map<String, dynamic> action) async {
+  final type = (action['type'] ?? '').toString().trim().toLowerCase();
+  final target = (action['target'] ?? '').toString().trim();
+  final rawPayload = action['payload'];
+  final payload = rawPayload is Map
+      ? rawPayload.map((key, value) => MapEntry(key.toString(), value))
+      : const <String, dynamic>{};
+  final path = (payload['path'] ?? payload['workspacePath'] ?? '')
+      .toString()
+      .trim();
+  final shellPath =
+      (payload['shellPath'] ?? payload['workspaceShellPath'] ?? '')
+          .toString()
+          .trim();
+
+  if (type == 'route' && target.isNotEmpty) {
+    GoRouterManager.push(target);
+    return;
+  }
+  if (type == 'workspace') {
+    await OmnibotResourceService.openWorkspace(
+      workspaceId: payload['workspaceId']?.toString(),
+      absolutePath: path.isEmpty ? null : path,
+      shellPath: shellPath.isEmpty ? null : shellPath,
+      uri: target.isEmpty ? null : target,
+    );
+    return;
+  }
+  if (type == 'save' && path.isNotEmpty) {
+    await OmnibotResourceService.saveToLocal(
+      sourcePath: path,
+      fileName: (payload['fileName'] ?? payload['title'] ?? 'artifact')
+          .toString(),
+      mimeType: (payload['mimeType'] ?? 'application/octet-stream').toString(),
+    );
+    return;
+  }
+  if (path.isNotEmpty && (type == 'preview' || type == 'open')) {
+    await OmnibotResourceService.openFilePath(
+      path,
+      uri: target.isEmpty ? null : target,
+      title: payload['title']?.toString(),
+      previewKind: payload['previewKind']?.toString(),
+      mimeType: payload['mimeType']?.toString(),
+      shellPath: shellPath.isEmpty ? null : shellPath,
+    );
+    return;
+  }
+  if (target.isNotEmpty) {
+    if (!await OmnibotResourceService.handleLinkTap(target)) {
+      await OmnibotResourceService.openUri(target);
+    }
   }
 }
 

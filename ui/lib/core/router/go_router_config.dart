@@ -13,8 +13,8 @@ class AppRouterConfig {
     List<GoRoute> extraHomeRoutes = const [],
     List<GoRoute> extraWelcomeRoutes = const [],
   }) {
-    _extraHomeRoutes = List<GoRoute>.unmodifiable(extraHomeRoutes);
-    _extraWelcomeRoutes = List<GoRoute>.unmodifiable(extraWelcomeRoutes);
+    _extraHomeRoutes = extraHomeRoutes;
+    _extraWelcomeRoutes = extraWelcomeRoutes;
   }
 
   static List<GoRoute> getAllRoutes() {

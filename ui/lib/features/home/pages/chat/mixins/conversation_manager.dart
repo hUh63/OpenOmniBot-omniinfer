@@ -44,6 +44,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
   set currentConversation(ConversationModel? value);
   ConversationThreadTarget? get routeThreadTarget;
   ConversationMode get activeConversationModeValue;
+  String? get agentIdForNewConversation => null;
   bool get hasMoreMessages;
   set hasMoreMessages(bool value);
   bool get isLoadingMore;
@@ -298,6 +299,14 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     }
     final operationMode = mode ?? activeConversationModeValue;
     try {
+      final conversations = await ConversationService.getAllConversations(
+        includeArchived: true,
+      );
+      if (!_isConversationOperationCurrent(token)) {
+        return;
+      }
+      // Metadata I/O may overlap ACP updates or completion. Read the owning
+      // runtime after the await, never reinstall its pre-request snapshot.
       final inMemoryConversation = preferInMemory
           ? getInMemoryConversationForConversation(
               conversationId,
@@ -307,12 +316,6 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       final inMemoryMessages = preferInMemory
           ? getInMemoryMessagesForConversation(conversationId, operationMode)
           : null;
-      final conversations = await ConversationService.getAllConversations(
-        includeArchived: true,
-      );
-      if (!_isConversationOperationCurrent(token)) {
-        return;
-      }
       ConversationModel? conversation;
       try {
         conversation = conversations.firstWhere(
@@ -366,19 +369,33 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
         if (!_isConversationOperationCurrent(token)) {
           return;
         }
-        savedMessages = pagedResult.messages;
+        final latestRuntimeMessages = preferInMemory
+            ? getInMemoryMessagesForConversation(conversationId, operationMode)
+            : null;
+        savedMessages = latestRuntimeMessages != null
+            ? List<ChatMessageModel>.from(latestRuntimeMessages)
+            : pagedResult.messages;
         setState(() {
-          hasMoreMessages = pagedResult.hasMore;
-          messageOffset = 50;
-          messages.clear();
-          messages.addAll(savedMessages);
+          hasMoreMessages = latestRuntimeMessages == null && pagedResult.hasMore;
+          // The history provider is allowed to return a short page. Advance
+          // from what was actually received so a partial response cannot
+          // create a gap before the next page.
+          messageOffset = savedMessages.length;
+          // `messages` may be the shared runtime's live list. Deliver the
+          // snapshot to onConversationLoaded below; its coordinator owns
+          // reconciliation and must see the current items before any mutation.
         });
       }
       onConversationLoaded(
         operationMode,
         conversationId,
         resolvedConversation,
-        List<ChatMessageModel>.from(messages),
+        // `savedMessages` is the snapshot actually selected for this load.
+        // When a live runtime already owns the conversation, the page-level
+        // list may still be empty after a refresh/rebuild. Passing `messages`
+        // here used to turn that transient empty list into an authoritative
+        // runtime snapshot and could erase the visible session.
+        List<ChatMessageModel>.from(savedMessages),
       );
     } catch (e) {
       debugPrint('加载对话失败: $e');
@@ -670,8 +687,10 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     bool generateSummary = false,
     bool markComplete = false,
     int? lifecycleToken,
+    bool rethrowOnFailure = false,
+    bool allowEmpty = false,
   }) async {
-    if (messages.isEmpty) return;
+    if (messages.isEmpty && !allowEmpty) return;
     final token = lifecycleToken ?? captureConversationLifecycleToken();
 
     // 立即捕获状态，防止异步操作期间上下文切换导致的脏读
@@ -722,6 +741,10 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
           title: title,
           summary: summary,
           mode: snapshotMode,
+          agentId: snapshotMode == ConversationMode.agent
+              ? agentIdForNewConversation
+              : null,
+          rethrowOnError: rethrowOnFailure,
         );
 
         if (newConversationId != null) {
@@ -760,6 +783,10 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
             );
           }
         }
+      }
+
+      if (targetId == null) {
+        throw StateError('Conversation creation returned no id.');
       }
 
       if (targetId != null) {
@@ -833,6 +860,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       }
     } catch (e) {
       debugPrint('保存对话失败: $e');
+      if (rethrowOnFailure) rethrow;
     }
   }
 

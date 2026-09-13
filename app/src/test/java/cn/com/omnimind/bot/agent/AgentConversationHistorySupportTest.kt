@@ -1,7 +1,6 @@
 package cn.com.omnimind.bot.agent
 
 import cn.com.omnimind.baselib.database.AgentConversationEntry
-import cn.com.omnimind.baselib.database.AgentConversationEntryRecord
 import cn.com.omnimind.baselib.llm.AssistantToolCall
 import cn.com.omnimind.baselib.llm.AssistantToolCallFunction
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
@@ -20,11 +19,104 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 class AgentConversationHistorySupportTest {
+    @Test
+    fun `permission response patch preserves canonical metadata across repeated updates`() {
+        val metadata = mapOf("sessionId" to "session", "turnId" to "turn",
+            "entryId" to "approval", "kind" to "permission_required", "seq" to 3)
+        var stored = mapOf<String, Any?>("id" to "approval", "streamMeta" to metadata,
+            "content" to mapOf("cardData" to mapOf("type" to "agent_request", "status" to "pending")))
+        for (status in listOf("accepted", "accepted")) {
+            val patch = AgentConversationHistorySupport.buildCardMessagePayload(
+                messageId = "approval", cardData = mapOf("type" to "agent_request", "status" to status),
+                isError = false, streamMeta = null, createdAt = 1L)
+            stored = AgentConversationHistorySupport.mergeUiCardPayload(stored, patch)
+            org.junit.Assert.assertEquals(metadata, stored["streamMeta"])
+            org.junit.Assert.assertEquals(status, ((stored["content"] as Map<*, *>)["cardData"] as Map<*, *>)["status"])
+        }
+        val terminalMeta = metadata + mapOf("stopReason" to "end_turn")
+        val terminal = AgentConversationHistorySupport.mergeUiCardPayload(stored, stored + ("streamMeta" to terminalMeta))
+        org.junit.Assert.assertEquals(terminalMeta, terminal["streamMeta"])
+    }
+
+    @Test
+    fun `turn failure display card is never replayed as a model tool call`() {
+        val status = AgentConversationEntry(
+            id = 1, conversationId = 5, conversationMode = "agent",
+            entryId = "turn-agent-status",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = "error",
+            summary = "Invalid model",
+            payloadJson = """{"toolType":"status","toolName":"turn/failed","argsJson":"{}"}""",
+            createdAt = 1, updatedAt = 1,
+        )
+        assertTrue(AgentConversationHistorySupport.buildPromptRelevantMessages(listOf(status)).isEmpty())
+    }
+
     private val gson = Gson()
     private val canonicalJson = Json {
         ignoreUnknownKeys = true
         explicitNulls = false
         encodeDefaults = false
+    }
+
+    @Test
+    fun `paged history keeps legacy normal entries after agent migration`() {
+        val legacyEntry = AgentConversationEntry(
+            id = 1,
+            conversationId = 7,
+            conversationMode = "normal",
+            entryId = "legacy-user",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_USER_MESSAGE,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS,
+            summary = "旧对话内容",
+            payloadJson = "{}",
+            createdAt = 1,
+            updatedAt = 1
+        )
+        val canonicalEntry = legacyEntry.copy(
+            id = 2,
+            conversationMode = "agent",
+            entryId = "new-user",
+            summary = "新对话内容",
+            createdAt = 2,
+            updatedAt = 2
+        )
+
+        val (page, hasMore) = AgentConversationHistoryRepository.pageConversationEntries(
+            entries = listOf(canonicalEntry, legacyEntry),
+            limit = 20,
+            offset = 0
+        )
+
+        assertEquals(listOf("new-user", "legacy-user"), page.map { it.entryId })
+        assertFalse(hasMore)
+    }
+
+    @Test
+    fun `paged history reports more entries outside the bounded window`() {
+        val entries = (1..3).map { index ->
+            AgentConversationEntry(
+                id = index.toLong(),
+                conversationId = 7,
+                conversationMode = "agent",
+                entryId = "entry-$index",
+                entryType = AgentConversationHistoryRepository.ENTRY_TYPE_USER_MESSAGE,
+                status = AgentConversationHistoryRepository.STATUS_SUCCESS,
+                summary = "消息 $index",
+                payloadJson = "{}",
+                createdAt = index.toLong(),
+                updatedAt = index.toLong()
+            )
+        }
+
+        val (page, hasMore) = AgentConversationHistoryRepository.pageConversationEntries(
+            entries = entries,
+            limit = 1,
+            offset = 0
+        )
+
+        assertEquals(listOf("entry-3"), page.map { it.entryId })
+        assertTrue(hasMore)
     }
 
     @Test
@@ -77,6 +169,47 @@ class AgentConversationHistorySupportTest {
                 incomingMessages = emptyList()
             )
         assertTrue(laterSnapshot.isEmpty())
+    }
+
+    @Test
+    fun `partial external snapshot acknowledges only delivered user messages and keeps a later user prompt`() {
+        val firstExternalUser = mapOf<String, Any?>(
+            "id" to "web-user-first",
+            "type" to 1,
+            "user" to 1,
+            "content" to mapOf("id" to "web-user-first", "text" to "先检查第一项"),
+            "streamMeta" to AgentConversationHistorySupport.externalUserMessageStreamMeta()
+        )
+        val secondExternalUser = mapOf<String, Any?>(
+            "id" to "web-user-second",
+            "type" to 1,
+            "user" to 1,
+            "content" to mapOf("id" to "web-user-second", "text" to "然后检查第二项"),
+            "streamMeta" to AgentConversationHistorySupport.externalUserMessageStreamMeta()
+        )
+        val firstReply = mapOf<String, Any?>(
+            "id" to "web-reply-first",
+            "type" to 1,
+            "user" to 2,
+            "content" to mapOf("id" to "web-reply-first", "text" to "第一项已检查")
+        )
+
+        // A remote history snapshot can lag behind the current user input.
+        // It has received the first prompt, but not the second one yet.
+        val merged = AgentConversationHistorySupport.mergePendingExternalUserMessages(
+            existingMessages = listOf(firstExternalUser, secondExternalUser),
+            incomingMessages = listOf(firstExternalUser, firstReply)
+        )
+
+        assertEquals(
+            listOf("web-user-second", "web-user-first", "web-reply-first"),
+            merged.map { it["id"] }
+        )
+        assertEquals(
+            true,
+            ((merged.first()["streamMeta"] as Map<*, *>)["pendingSnapshotAck"] as Boolean?)
+        )
+        assertNull(merged[1]["streamMeta"])
     }
 
     @Test
@@ -157,7 +290,7 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
-    fun `buildPromptSeedFromEntries replays compact tool history in chronological order`() {
+    fun `buildPromptSeedFromEntries replays complete tool history in chronological order`() {
         val userEntry = AgentConversationEntry(
             id = 1,
             conversationId = 7,
@@ -261,20 +394,22 @@ class AgentConversationHistorySupportTest {
         assertTrue(firstToolSummary.contains("浏览器自动化"))
         assertTrue(firstToolSummary.contains("抓取成功"))
         assertTrue(firstToolSummary.contains("previewJson"))
-        assertFalse(firstToolSummary.contains("rawResultJson"))
+        assertTrue(firstToolSummary.contains("rawResultJson"))
+        assertTrue(firstToolSummary.contains("super long raw payload"))
 
         val secondToolSummary = seed.historyMessages[5].content!!.jsonPrimitive.content
         assertTrue(secondToolSummary.contains("执行命令"))
         assertTrue(secondToolSummary.contains("执行命令失败"))
         assertTrue(secondToolSummary.contains("terminalOutput"))
-        assertFalse(secondToolSummary.contains("rawResultJson"))
+        assertTrue(secondToolSummary.contains("rawResultJson"))
+        assertTrue(secondToolSummary.contains("super long raw payload terminal"))
 
         val allReplayText = seed.historyMessages.joinToString("\n") {
             it.content?.toString().orEmpty()
         }
         assertTrue(allReplayText.contains("assistant should start being replayed"))
-        assertFalse(allReplayText.contains("super long raw payload"))
-        assertFalse(allReplayText.contains("super long raw payload terminal"))
+        assertTrue(allReplayText.contains("super long raw payload"))
+        assertTrue(allReplayText.contains("super long raw payload terminal"))
     }
 
     @Test
@@ -397,6 +532,48 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
+    fun `a user followup keeps the preceding tool fact without creating a synthetic user turn`() {
+        val entries = listOf(
+            buildUserEntry(
+                id = 1,
+                entryId = "turn-1-user",
+                text = "查一下当前发布版本"
+            ),
+            buildToolEntry(
+                id = 2,
+                entryId = "turn-1-tool",
+                toolName = "file_read",
+                summary = "版本是 0.6.1"
+            ),
+            buildAssistantEntry(
+                id = 3,
+                entryId = "turn-1-assistant",
+                text = "当前发布版本是 0.6.1。"
+            ),
+            buildUserEntry(
+                id = 4,
+                entryId = "turn-2-user",
+                text = "那按这个版本继续。"
+            )
+        )
+
+        val seed = AgentConversationHistorySupport.buildPromptSeedFromEntries(entries)
+        val replayText = seed.historyMessages.joinToString("\n") {
+            it.content?.jsonPrimitive?.content.orEmpty()
+        }
+
+        assertEquals(
+            listOf("user", "assistant", "tool", "assistant", "user"),
+            seed.historyMessages.map { it.role }
+        )
+        assertEquals(2, seed.historyMessages.count { it.role == "user" })
+        assertTrue(replayText.contains("查一下当前发布版本"))
+        assertTrue(replayText.contains("版本是 0.6.1"))
+        assertTrue(replayText.contains("当前发布版本是 0.6.1"))
+        assertTrue(replayText.contains("那按这个版本继续"))
+    }
+
+    @Test
     fun `buildPromptRelevantMessages preserves assistant reasoning content when present in payload`() {
         val payload = AgentConversationHistorySupport.buildTextMessagePayload(
             messageId = "a-reasoning",
@@ -455,6 +632,45 @@ class AgentConversationHistorySupportTest {
         val storedPayload = AgentConversationHistorySupport.readMap(stored.payloadJson)
 
         assertEquals("上一轮思考内容", storedPayload["reasoning_content"])
+    }
+
+    @Test
+    fun `prepareEntryForStorage keeps assistant turn usage`() {
+        val payload = AgentConversationHistorySupport.buildTextMessagePayload(
+            messageId = "a-usage",
+            user = 2,
+            text = "完成首轮",
+            isError = false,
+            streamMeta = null,
+            turnUsage = mapOf(
+                "ctx" to 18_797,
+                "in" to 18_797,
+                "out" to 296,
+                "cache" to 13_157
+            ),
+            createdAt = 1L
+        )
+        val entry = AgentConversationEntry(
+            id = 12,
+            conversationId = 7,
+            conversationMode = "normal",
+            entryId = "a-usage",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_ASSISTANT_MESSAGE,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS,
+            summary = "完成首轮",
+            payloadJson = gson.toJson(payload),
+            createdAt = 1,
+            updatedAt = 1
+        )
+
+        val stored = AgentConversationHistorySupport.prepareEntryForStorage(entry)
+        val storedPayload = AgentConversationHistorySupport.readMap(stored.payloadJson)
+        val storedUsage = storedPayload["turnUsage"] as Map<*, *>
+
+        assertEquals(18_797L, (storedUsage["ctx"] as Number).toLong())
+        assertEquals(18_797L, (storedUsage["in"] as Number).toLong())
+        assertEquals(296L, (storedUsage["out"] as Number).toLong())
+        assertEquals(13_157L, (storedUsage["cache"] as Number).toLong())
     }
 
     @Test
@@ -539,7 +755,7 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
-    fun `buildDisplaySafeToolCardData compacts oversized historical tool payloads`() {
+    fun `buildDisplaySafeToolCardData preserves historical tool payloads`() {
         val longScript = "print('hello')\n".repeat(900)
         val longRaw = "raw-result".repeat(900)
         val longTerminal = (1..2000).joinToString("\n") { "line-$it" }
@@ -585,18 +801,20 @@ class AgentConversationHistorySupportTest {
         assertEquals("Claude Code", cardData["agentName"])
         assertEquals("agent.terminal_execute", cardData["toolName"])
         assertEquals(true, cardData["isHistorical"])
-        assertEquals("compact", cardData["historyRenderMode"])
+        assertEquals("preview", cardData["historyRenderMode"])
         assertEquals("", cardData["terminalOutputDelta"])
         assertEquals(true, cardData["payloadCompacted"])
-        assertTrue((cardData["argsJson"] as String).length < longScript.length)
-        assertTrue((cardData["rawResultJson"] as String).length < longRaw.length)
-        assertTrue((cardData["terminalOutput"] as String).startsWith("[Earlier content omitted]"))
-        assertTrue((cardData["terminalOutput"] as String).contains("line-2000"))
-        assertEquals(8, (cardData["artifacts"] as List<*>).size)
+        assertTrue((cardData["argsJson"] as String).length <= 2 * 1024)
+        assertTrue((cardData["rawResultJson"] as String).length <= 2 * 1024)
+        assertTrue((cardData["terminalOutput"] as String).length <= 8 * 1024)
+        assertTrue((payload["rawResultJson"] as String).contains(longRaw))
+        assertEquals(longTerminal, payload["terminalOutput"])
+        assertEquals(20, (payload["artifacts"] as List<*>).size)
+
     }
 
     @Test
-    fun `buildDisplaySafeUiCardMessage compacts historical deep thinking cards`() {
+    fun `buildDisplaySafeUiCardMessage keeps complete historical deep thinking cards`() {
         val longThinking = "思考过程 ".repeat(6000)
         val payload = mapOf<String, Any?>(
             "id" to "task-1-thinking",
@@ -648,11 +866,12 @@ class AgentConversationHistorySupportTest {
         assertEquals("deep_thinking", cardData["type"])
         assertEquals(false, cardData["isLoading"])
         assertEquals(4, cardData["stage"])
-        assertEquals(true, cardData["thinkingContentTruncated"])
-        assertTrue((cardData["thinkingContent"] as String).length <= 8 * 1024)
+        assertEquals(false, cardData["thinkingContentTruncated"])
+        assertEquals(longThinking, cardData["thinkingContent"])
+        assertEquals("full", cardData["historyRenderMode"])
         assertEquals("task-1", streamMeta["parentTaskId"])
-        assertFalse(streamMeta.containsKey("raw"))
-        assertFalse(cardData.containsKey("streamMeta"))
+        assertTrue((streamMeta["raw"] as Map<*, *>).containsKey("large"))
+        assertTrue((cardData["streamMeta"] as Map<*, *>).containsKey("nested"))
     }
 
     @Test
@@ -801,10 +1020,10 @@ class AgentConversationHistorySupportTest {
         )
 
         assertEquals(3, seed.historyMessages.size)
-        assertEquals("user", seed.historyMessages.first().role)
+        assertEquals("assistant", seed.historyMessages.first().role)
         assertTrue(
             seed.historyMessages.first().content!!.jsonPrimitive.content.startsWith(
-                "<context-summary> The following is a summary of the earlier conversation that was compacted to save context space."
+                "<context-summary> Earlier conversation context, retained as an assistant history checkpoint."
             )
         )
         assertTrue(seed.historyMessages.first().content!!.jsonPrimitive.content.contains("保留旧需求"))
@@ -894,25 +1113,73 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
-    fun `buildPromptSeedFromEntries rebuilds image blocks from local path when available`() {
+    fun `prompt seed replays seventeen persisted turns with every long fact intact`() {
+        val entries = buildList {
+            repeat(17) { turn ->
+                val userFact = "user-fact-$turn:" + ("u$turn-".repeat(2_048))
+                val assistantFact = "assistant-fact-$turn:" + ("a$turn-".repeat(2_048))
+                add(
+                    AgentConversationHistorySupport.prepareEntryForStorage(
+                        buildUserEntry(
+                            id = turn * 2L + 1,
+                            entryId = "user-$turn",
+                            text = userFact
+                        )
+                    )
+                )
+                add(
+                    AgentConversationHistorySupport.prepareEntryForStorage(
+                        buildAssistantEntry(
+                            id = turn * 2L + 2,
+                            entryId = "assistant-$turn",
+                            text = assistantFact
+                        )
+                    )
+                )
+            }
+        }
+
+        val seed = AgentConversationHistorySupport.buildPromptSeedFromEntries(entries)
+
+        assertEquals(34, seed.historyMessages.size)
+        assertEquals("user", seed.historyMessages.first().role)
+        assertTrue(seed.historyMessages.first().content!!.jsonPrimitive.content.startsWith("user-fact-0:"))
+        assertTrue(
+            seed.historyMessages[17].content!!.jsonPrimitive.content.startsWith("assistant-fact-8:")
+        )
+        assertEquals("assistant", seed.historyMessages.last().role)
+        assertTrue(seed.historyMessages.last().content!!.jsonPrimitive.content.startsWith("assistant-fact-16:"))
+        assertTrue(seed.historyMessages.last().content!!.jsonPrimitive.content.endsWith("a16-"))
+    }
+
+    @Test
+    fun `prompt seed preserves an oversized fact after more than sixteen persisted turns`() {
+        val oversizedFact = "oversized-user-fact:" + "x".repeat(80 * 1024) + ":tail-must-survive"
+        val entries = buildList {
+            repeat(20) { turn ->
+                add(buildUserEntry(turn * 2L + 1, "user-$turn", "user-fact-$turn"))
+                add(buildAssistantEntry(turn * 2L + 2, "assistant-$turn", "assistant-fact-$turn"))
+            }
+            add(
+                AgentConversationHistorySupport.prepareEntryForStorage(
+                    buildUserEntry(41, "user-oversized", oversizedFact)
+                )
+            )
+        }
+
+        val seed = AgentConversationHistorySupport.buildPromptSeedFromEntries(entries)
+
+        assertEquals(41, seed.historyMessages.size)
+        assertEquals("user", seed.historyMessages.last().role)
+        assertEquals(oversizedFact, seed.historyMessages.last().content!!.jsonPrimitive.content)
+        assertTrue(seed.historyMessages.last().content!!.jsonPrimitive.content.endsWith(":tail-must-survive"))
+    }
+
+    @Test
+    fun `buildPromptSeedFromEntries rebuilds original image blocks from local path when available`() {
         AgentImageAttachmentSupport.backend = object : AgentImageAttachmentSupport.Backend {
             override fun readFileAsDataUrl(file: File, mimeTypeHint: String?): String {
                 return "data:image/png;base64,LOCAL_FILE"
-            }
-
-            override fun compressDataUrl(
-                dataUrl: String,
-                scale: Float,
-                quality: Int
-            ): AgentImageAttachmentSupport.ResolvedImageData {
-                return AgentImageAttachmentSupport.ResolvedImageData(
-                    dataUrl = "data:image/jpeg;base64,MODEL_FROM_PATH",
-                    mimeType = "image/jpeg",
-                    originalWidth = 1200,
-                    originalHeight = 800,
-                    compressedWidth = 900,
-                    compressedHeight = 600
-                )
             }
         }
         try {
@@ -936,7 +1203,7 @@ class AgentConversationHistorySupportTest {
 
             assertEquals("image_url", imageBlock["type"]?.jsonPrimitive?.content)
             assertEquals(
-                "data:image/jpeg;base64,MODEL_FROM_PATH",
+                "data:image/png;base64,LOCAL_FILE",
                 imageBlock["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.content
             )
         } finally {
@@ -1038,7 +1305,7 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
-    fun `buildPromptRelevantMessages truncates oversized tool replay fields`() {
+    fun `buildPromptRelevantMessages preserves oversized tool replay fields`() {
         val longSummary = "s".repeat(400)
         val longTerminal = "t".repeat(1500)
         val entry = AgentConversationEntry(
@@ -1068,13 +1335,13 @@ class AgentConversationHistorySupportTest {
         val messages = AgentConversationHistorySupport.buildPromptRelevantMessages(listOf(entry))
         val toolSummary = messages[1].content!!.jsonPrimitive.content
 
-        assertTrue(toolSummary.contains("\"summary\":\"${"s".repeat(240)}...\""))
-        assertTrue(toolSummary.contains("\"terminalOutput\":\"${"t".repeat(1200)}...\""))
-        assertFalse(toolSummary.contains("rawResultJson"))
+        assertTrue(toolSummary.contains("\"summary\":\"${"s".repeat(400)}\""))
+        assertTrue(toolSummary.contains("\"terminalOutput\":\"${"t".repeat(1500)}\""))
+        assertTrue(toolSummary.contains("rawResultJson"))
     }
 
     @Test
-    fun `prepareEntryForStorage compacts oversized tool payload before persistence`() {
+    fun `prepareEntryForStorage preserves oversized tool payload before persistence`() {
         val longRaw = "raw".repeat(12_000)
         val longTerminal = (1..5000).joinToString("\n") { "line-$it" }
         val entry = AgentConversationEntry(
@@ -1106,83 +1373,73 @@ class AgentConversationHistorySupportTest {
         val stored = AgentConversationHistorySupport.prepareEntryForStorage(entry)
         val payload = AgentConversationHistorySupport.readMap(stored.payloadJson)
 
-        assertTrue(stored.payloadJson.length <= AgentConversationHistorySupport.MAX_STORAGE_ENTRY_PAYLOAD_CHARS)
-        assertEquals(true, payload["payloadCompacted"])
-        assertEquals("agent_tool", payload["uiStyle"])
+        assertEquals(entry.payloadJson, stored.payloadJson)
+        assertEquals(null, payload["payloadCompacted"])
         assertEquals("claude-code-acp", payload["agentId"])
         assertEquals("Claude Code", payload["agentName"])
-        assertEquals("agent.terminal_execute", payload["toolName"])
-        assertTrue(payload["rawResultJson"].toString().length < longRaw.length)
+        assertEquals("codex.terminal_execute", payload["toolName"])
+        assertTrue(payload["rawResultJson"].toString().contains(longRaw))
         assertTrue(payload["terminalOutput"].toString().contains("line-5000"))
     }
 
     @Test
-    fun `materializeRecord repairs truncated oversized tool rows into compact non replay entry`() {
-        val record = AgentConversationEntryRecord(
-            id = 12,
-            conversationId = 9,
-            conversationMode = "normal",
-            entryId = "task-9-tool-1",
-            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
-            status = AgentConversationHistoryRepository.STATUS_ERROR,
-            summary = "工具执行失败，历史负载过大",
-            payloadJson = "",
-            createdAt = 10,
-            updatedAt = 11,
-            payloadOriginalLength = 9_900_000,
-            payloadTruncated = true,
-            summaryOriginalLength = 12,
-            summaryTruncated = false
+    fun `later user followup replays a complete oversized persisted tool result`() {
+        // A real conversation can resume long after a tool has completed.  The
+        // current write path must therefore retain the canonical result, rather
+        // than merely a card preview or an old storage-size placeholder.
+        val longRaw = "fact-from-large-result|".repeat(4_096)
+        val longTerminal = (1..6_000).joinToString("\n") { "output-line-$it" }
+        val userEntry = buildUserEntry(
+            id = 1,
+            entryId = "user-1",
+            text = "运行检查，并保留完整结果"
+        )
+        val toolEntry = AgentConversationHistorySupport.prepareEntryForStorage(
+            AgentConversationEntry(
+                id = 2,
+                conversationId = 8,
+                conversationMode = "normal",
+                entryId = "task-8-tool-1",
+                entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+                status = AgentConversationHistoryRepository.STATUS_SUCCESS,
+                summary = "检查完成",
+                payloadJson = gson.toJson(
+                    mapOf(
+                        "toolName" to "terminal_execute",
+                        "displayName" to "执行命令",
+                        "toolType" to "terminal",
+                        "argsJson" to gson.toJson(mapOf("command" to "inspect")),
+                        "summary" to "检查完成",
+                        "rawResultJson" to gson.toJson(mapOf("facts" to longRaw)),
+                        "terminalOutput" to longTerminal,
+                        "success" to true
+                    )
+                ),
+                createdAt = 2,
+                updatedAt = 2
+            )
+        )
+        val followupEntry = buildUserEntry(
+            id = 3,
+            entryId = "user-2",
+            text = "基于刚才检查结果，最后一行是什么？"
         )
 
-        val materialized = AgentConversationHistorySupport.materializeRecord(record)
-        val payload = AgentConversationHistorySupport.readMap(materialized.entry.payloadJson)
-        val replayMessages = AgentConversationHistorySupport.buildPromptRelevantMessages(
-            listOf(materialized.entry)
+        val seed = AgentConversationHistorySupport.buildPromptSeedFromEntries(
+            listOf(userEntry, toolEntry, followupEntry)
         )
+        val replay = seed.historyMessages.joinToString("\n") {
+            it.content?.jsonPrimitive?.content.orEmpty()
+        }
 
-        assertTrue(materialized.needsRepair)
-        assertEquals(true, payload["historyOmitted"])
-        assertEquals("工具调用历史", payload["displayName"])
-        assertEquals(
-            "工具执行失败，历史负载过大",
-            payload["summary"]
-        )
-        assertTrue(replayMessages.isEmpty())
+        assertEquals(listOf("user", "assistant", "tool", "user"), seed.historyMessages.map { it.role })
+        assertTrue(replay.contains(longRaw))
+        assertTrue(replay.contains("output-line-6000"))
+        assertTrue(replay.contains("基于刚才检查结果，最后一行是什么？"))
     }
 
     @Test
-    fun `materializeRecord repairs truncated oversized ui card rows into omitted card payload`() {
-        val record = AgentConversationEntryRecord(
-            id = 13,
-            conversationId = 9,
-            conversationMode = "normal",
-            entryId = "task-9-thinking",
-            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_UI_CARD,
-            status = AgentConversationHistoryRepository.STATUS_SUCCESS,
-            summary = "深度思考过程已折叠",
-            payloadJson = "",
-            createdAt = 20,
-            updatedAt = 21,
-            payloadOriginalLength = 1_500_000,
-            payloadTruncated = true,
-            summaryOriginalLength = 9,
-            summaryTruncated = false
-        )
-
-        val materialized = AgentConversationHistorySupport.materializeRecord(record)
-        val payload = AgentConversationHistorySupport.readMap(materialized.entry.payloadJson)
-        val content = (payload["content"] as Map<*, *>)
-        val cardData = (content["cardData"] as Map<*, *>)
-
-        assertTrue(materialized.needsRepair)
-        assertEquals("history_omitted_card", cardData["type"])
-        assertEquals("深度思考过程已折叠", cardData["summary"])
-        assertEquals(1_500_000, (cardData["originalPayloadLength"] as Number).toInt())
-    }
-
-    @Test
-    fun `prepareEntryForStorage keeps deep thinking runtime state while compacting oversized card`() {
+    fun `prepareEntryForStorage keeps deep thinking runtime state without compacting oversized card`() {
         val longThinking = "分析中 ".repeat(10000)
         val payload = mapOf(
             "id" to "task-11-thinking",
@@ -1224,11 +1481,11 @@ class AgentConversationHistorySupportTest {
         val content = storedPayload["content"] as Map<*, *>
         val cardData = content["cardData"] as Map<*, *>
 
-        assertTrue(stored.payloadJson.length <= AgentConversationHistorySupport.MAX_STORAGE_ENTRY_PAYLOAD_CHARS)
+        assertEquals(entry.payloadJson, stored.payloadJson)
         assertEquals("deep_thinking", cardData["type"])
         assertEquals(2, (cardData["stage"] as Number).toInt())
         assertEquals(true, cardData["isLoading"])
-        assertEquals(true, cardData["thinkingContentTruncated"])
+        assertEquals(false, cardData["thinkingContentTruncated"])
         assertTrue((cardData["thinkingContent"] as String).contains("分析中"))
     }
 
@@ -1239,7 +1496,7 @@ class AgentConversationHistorySupportTest {
                 role = "system",
                 content = JsonPrimitive("main system")
             ),
-            AgentConversationHistorySupport.buildContextSummaryUserMessage(
+            AgentConversationHistorySupport.buildContextSummaryAssistantMessage(
                 "【用户目标与约束】\n旧总结"
             ),
             ChatCompletionMessage(
@@ -1284,7 +1541,7 @@ class AgentConversationHistorySupportTest {
                 role = "system",
                 content = JsonPrimitive("main system")
             ),
-            AgentConversationHistorySupport.buildContextSummaryUserMessage(
+            AgentConversationHistorySupport.buildContextSummaryAssistantMessage(
                 "【用户目标与约束】\n旧总结"
             ),
             ChatCompletionMessage(
@@ -1347,7 +1604,7 @@ class AgentConversationHistorySupportTest {
                 role = "system",
                 content = JsonPrimitive("main system")
             ),
-            AgentConversationHistorySupport.buildContextSummaryUserMessage(
+            AgentConversationHistorySupport.buildContextSummaryAssistantMessage(
                 "【用户目标与约束】\n旧总结"
             ),
             ChatCompletionMessage(
@@ -1388,14 +1645,14 @@ class AgentConversationHistorySupportTest {
         )
 
         assertEquals(
-            listOf("system", "user", "user", "assistant"),
+            listOf("system", "assistant", "user", "assistant"),
             rebuilt.map { it.role }
         )
         assertEquals("main system", rebuilt[0].content!!.jsonPrimitive.content)
         assertTrue(rebuilt[1].content!!.jsonPrimitive.content.contains("新总结"))
         assertTrue(
             rebuilt[1].content!!.jsonPrimitive.content.startsWith(
-                "<context-summary> The following is a summary of the earlier conversation that was compacted to save context space."
+                "<context-summary> Earlier conversation context, retained as an assistant history checkpoint."
             )
         )
         assertEquals("当前问题", rebuilt[2].content!!.jsonPrimitive.content)

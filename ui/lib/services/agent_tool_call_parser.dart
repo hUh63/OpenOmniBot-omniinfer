@@ -48,7 +48,9 @@ AgentToolCallInfo normalizeAgentToolCall(
   );
   final toolType = _inferToolType(
     itemType: type,
-    explicitToolType: _firstString([raw['toolType'], raw['tool_type']]),
+    explicitToolType: _visualToolType(
+      _firstString([raw['toolType'], raw['tool_type']]),
+    ),
     fallbackToolType: fallbackToolType,
     toolName: rawToolName,
     arguments: arguments,
@@ -67,6 +69,17 @@ AgentToolCallInfo normalizeAgentToolCall(
       _firstString([raw['displayName'], raw['display_name'], raw['name']]) ??
       title;
   final serverName = _firstString([raw['serverName'], raw['server']]);
+  // Live ACP and restored tool events share this parser. Read result details
+  // without promoting nested status/identity into the owning lifecycle.
+  final storedResult = toolType == 'terminal'
+      ? _asStringMap(raw['rawResultJson'])
+      : null;
+  final commandResult = toolType == 'terminal'
+      ? _asStringMap(raw['rawOutput'] ?? storedResult?['rawOutput'])
+      : null;
+  final exitCode = _asInt(raw['exitCode'] ?? raw['exit_code'] ??
+      commandResult?['exitCode'] ?? commandResult?['exit_code'] ??
+      storedResult?['exitCode'] ?? storedResult?['exit_code']);
   final terminalOutput = _firstOutputString([
     raw['terminalOutput'],
     raw['aggregatedOutput'],
@@ -75,15 +88,23 @@ AgentToolCallInfo normalizeAgentToolCall(
     raw['stdout'],
     _asStringMap(raw['result'])?['stdout'],
     _asStringMap(raw['result'])?['output'],
+    commandResult?['terminalOutput'],
+    commandResult?['formatted_output'],
+    storedResult?['terminalOutput'],
   ]);
   final summary =
       _firstString([
         raw['summary'],
         raw['message'],
         raw['description'],
-        if (type != 'commandExecution') raw['status'],
+        if (type != 'commandExecution' &&
+            !(toolType == 'terminal' && exitCode != null)) raw['status'],
       ]) ??
-      '';
+      (toolType == 'terminal' &&
+              const {'success', 'error'}.contains(status) &&
+              exitCode != null
+          ? 'Command exited with code $exitCode'
+          : '');
   final progress =
       _firstString([raw['progress'], raw['message'], raw['delta']]) ?? '';
 
@@ -95,7 +116,13 @@ AgentToolCallInfo normalizeAgentToolCall(
     toolTitle: title,
     status: status,
     arguments: arguments,
-    argsJson: arguments.isEmpty ? '' : _safeJson(arguments),
+    // Official ACP rawInput can be an unfinished JSON string while streaming.
+    // Display it losslessly; parsing is not a prerequisite for a progress update.
+    argsJson: raw['rawInput'] is String
+        ? raw['rawInput'] as String
+        : arguments.isEmpty
+        ? ''
+        : _safeJson(arguments),
     resultPreviewJson: _resultPreviewJson(raw),
     rawResultJson: _safeJson(raw),
     terminalOutput: terminalOutput ?? '',
@@ -147,39 +174,34 @@ String normalizeAgentToolStatus(
   Map<String, dynamic> raw, {
   String fallbackStatus = 'running',
 }) {
-  if (raw['error'] != null) {
-    return 'error';
-  }
-  final success = raw['success'];
-  if (success == false) {
-    return 'error';
-  }
-  final exitCode = _asInt(raw['exitCode'] ?? raw['exit_code']);
+  // ACP ToolCallStatus is the only lifecycle source of truth. rawOutput and
+  // rawResult are opaque tool data; reading status-like fields from them
+  // creates a second lifecycle and was the cause of the success/failure split
+  // in the command transcript.
   final explicit = _firstString([raw['status'], raw['state']]);
   final normalized = explicit?.trim().toLowerCase();
   if (normalized != null && normalized.isNotEmpty) {
-    if (normalized == 'running' ||
-        normalized == 'pending' ||
+    if (normalized == 'pending') {
+      return 'pending';
+    }
+    if (normalized == 'in_progress' ||
+        normalized == 'running' ||
         normalized == 'progress' ||
         normalized == 'inprogress' ||
-        normalized == 'in_progress' ||
         normalized == 'executing' ||
         normalized == 'started') {
       return 'running';
     }
-    if (normalized == 'success' ||
+    if (normalized == 'completed' ||
+        normalized == 'success' ||
         normalized == 'succeeded' ||
-        normalized == 'completed' ||
         normalized == 'complete' ||
         normalized == 'applied' ||
         normalized == 'done') {
-      if (exitCode != null && exitCode != 0) {
-        return 'error';
-      }
       return 'success';
     }
-    if (normalized == 'error' ||
-        normalized == 'failed' ||
+    if (normalized == 'failed' ||
+        normalized == 'error' ||
         normalized == 'failure' ||
         normalized == 'rejected') {
       return 'error';
@@ -195,10 +217,17 @@ String normalizeAgentToolStatus(
       return 'timeout';
     }
   }
+  // Non-ACP item snapshots do not always carry a status. Keep their
+  // compatibility projection based on fields at the item boundary only;
+  // never inspect rawOutput/rawResult for a lifecycle decision.
+  if (raw['error'] != null || raw['success'] == false) {
+    return 'error';
+  }
+  final exitCode = _asInt(raw['exitCode'] ?? raw['exit_code']);
   if (exitCode != null && exitCode != 0) {
     return 'error';
   }
-  if (success == true) {
+  if (raw['success'] == true) {
     return 'success';
   }
   return fallbackStatus;
@@ -525,6 +554,17 @@ String? _resolveToolName(Map<String, dynamic> raw, {required String itemType}) {
   ]);
 }
 
+/// Some adapters use `context` as a result-envelope name rather than a UI
+/// capability. Keep that protocol detail out of every event source and infer
+/// the actual shared card route from the tool's concrete facts instead.
+String? _visualToolType(String? value) {
+  final normalized = value?.trim();
+  if (normalized == null || normalized.isEmpty) {
+    return null;
+  }
+  return normalized.toLowerCase() == 'context' ? null : normalized;
+}
+
 String _inferToolType({
   required String itemType,
   required String? explicitToolType,
@@ -574,6 +614,12 @@ String _inferToolType({
   final fullName = (toolName ?? '').trim().toLowerCase();
   final shortName = _shortToolName(fullName).toLowerCase();
   final name = '$fullName $shortName';
+  // Subagent dispatch is a distinct collaboration capability. Resolve it
+  // before generic read/file/name heuristics so labels such as
+  // `subagent_dispatch` can never be rendered as a file or workspace tool.
+  if (_containsAny(name, const ['subagent', 'sub_agent', 'delegate_agent'])) {
+    return 'subagent';
+  }
   final commandToolType = _inferToolTypeFromCommand(arguments);
   if (commandToolType != null && _looksLikeCommandToolName(name)) {
     return commandToolType;
@@ -624,11 +670,17 @@ String _inferToolType({
   if (_containsAny(name, const ['image', 'screenshot', 'view_image'])) {
     return 'image';
   }
-  if (_containsAny(name, const ['task', 'subagent', 'agent'])) {
-    return 'subagent';
-  }
   if (_containsAny(name, const ['memory'])) {
     return 'memory';
+  }
+  if (_containsAny(name, const ['alarm', 'reminder'])) {
+    return 'alarm';
+  }
+  if (_containsAny(name, const ['schedule', 'scheduled', 'timer'])) {
+    return 'schedule';
+  }
+  if (_containsAny(name, const ['calendar', 'calendar_event'])) {
+    return 'calendar';
   }
   if (canonicalItemType == 'mcpToolCall') {
     return 'mcp';

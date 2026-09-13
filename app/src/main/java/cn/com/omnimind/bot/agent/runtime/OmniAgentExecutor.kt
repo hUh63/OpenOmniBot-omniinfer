@@ -5,8 +5,8 @@ import cn.com.omnimind.assists.controller.http.HttpController
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.agent.workspace.memory.LongTermMemoryIndex
-import cn.com.omnimind.bot.agent.workspace.memory.TurnMemoryLoadTracker
-import cn.com.omnimind.bot.mcp.RemoteMcpDiscoveryRegistry
+import cn.com.omnimind.bot.agent.tool.AgentCapabilityModule
+import cn.com.omnimind.bot.agent.tool.AgentToolHandlerModule
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.OmniPluginSession
 import com.rk.terminal.runtime.TerminalDistribution
@@ -28,7 +28,8 @@ import java.util.UUID
 class OmniAgentExecutor(
     private val context: Context,
     private val scope: CoroutineScope,
-    private val scheduleToolBridge: AgentScheduleToolBridge
+    private val scheduleToolBridge: AgentScheduleToolBridge,
+    private val sessionCapabilityModules: List<AgentCapabilityModule> = emptyList(),
 ) {
     internal data class TimeContextSnapshot(
         val locale: cn.com.omnimind.baselib.i18n.PromptLocale,
@@ -38,24 +39,18 @@ class OmniAgentExecutor(
     )
 
     companion object {
-        private const val EPHEMERAL_CACHE_TYPE = "ephemeral"
         internal const val TIME_CONTEXT_MIN_REFRESH_MILLIS = 60 * 60 * 1000L
         private val timeContextCacheLock = Any()
         @Volatile
         private var timeContextSnapshot: TimeContextSnapshot? = null
 
         internal fun buildCachedSystemPromptContent(prompt: String): JsonElement {
-            return buildJsonArray {
-                add(
-                    buildJsonObject {
-                        put("type", "text")
-                        put("text", prompt)
-                        put("cache_control", buildJsonObject {
-                            put("type", EPHEMERAL_CACHE_TYPE)
-                        })
-                    }
-                )
-            }
+            // ACP delegates provider wire-format ownership to the configured
+            // Provider. An OpenAI-compatible route must receive the standard
+            // string content shape; an unconditional Anthropic-style
+            // cache_control block turns the message into an array and breaks
+            // providers such as LiteLLM that expect strings.
+            return JsonPrimitive(prompt)
         }
 
         internal fun resolveTimeContextSnapshot(
@@ -133,6 +128,32 @@ class OmniAgentExecutor(
             return messages
         }
 
+        /**
+         * Pure chat shares the ACP transport, but it is not an Agent replay.
+         * Never carry tool calls/results (or an assistant placeholder that only
+         * represented a tool turn) into a no-tools request. Apart from making
+         * the provider interpret old execution state as current context, that
+         * can make the UI restore tool/thinking cards for a pure-chat turn.
+         */
+        internal fun filterChatOnlyHistoryMessages(
+            historyMessages: List<ChatCompletionMessage>
+        ): List<ChatCompletionMessage> {
+            return historyMessages.mapNotNull { message ->
+                when (message.role.trim().lowercase()) {
+                    "user" -> message.takeIf { it.content != null }
+                    "assistant" -> {
+                        message.takeIf { it.content != null }?.copy(
+                            toolCalls = null,
+                            toolCallId = null,
+                            name = null,
+                            reasoningContent = null
+                        )
+                    }
+                    else -> null
+                }
+            }
+        }
+
         private fun isUserTurnMessage(message: ChatCompletionMessage): Boolean {
             return message.role == "user" &&
                 !AgentConversationHistorySupport.isContextSummaryMessage(message)
@@ -160,7 +181,9 @@ class OmniAgentExecutor(
         terminalEnvironment: Map<String, String>,
         callback: AgentCallback,
         runControl: AgentRunControl = NoOpAgentRunControl,
-        continueMode: Boolean = false
+        permissionRequester: AgentPermissionRequester? = null,
+        continueMode: Boolean = false,
+        historyMessagesOverride: List<ChatCompletionMessage>? = null
     ): AgentResult {
         var toolRouter: AgentToolRouter? = null
         var pluginSession: OmniPluginSession? = null
@@ -183,13 +206,11 @@ class OmniAgentExecutor(
                     soul = memoryService.readSoul().trim(),
                     longTermMemory = "",
                     todayShortMemory = "",
-                    longTermIndexSummary = ""
                 )
             }.getOrNull()
             val ltmIndex = runCatching {
                 LongTermMemoryIndex(workspaceManager)
             }.getOrNull()
-            val memoryLoadTracker = TurnMemoryLoadTracker()
             val skillIndexService = SkillIndexService(context, workspaceManager)
             val skillLoader = SkillLoader(workspaceManager)
             val installedSkills = skillIndexService.listInstalledSkills()
@@ -202,50 +223,36 @@ class OmniAgentExecutor(
                     )
                 }
                 .sortedBy { it.id.lowercase() }
-            val failureLearningSkill = SelfImprovingSkillFailureHook.resolveInstalledSkill(
-                installedSkills = installedSkills,
-                skillLoader = skillLoader
-            )
             // Pi-style progressive disclosure: skill bodies are loaded through
             // skills_read and become replayable tool results instead of a volatile
             // leading message that invalidates the full conversation prefix.
             val resolvedSkills = emptyList<ResolvedSkillContext>()
-            val discoveredServers = RemoteMcpDiscoveryRegistry.discoverEnabledServers()
-            val activePluginSession = OmniPluginHost.get(context).openSession()
+            // chat_only is still an ACP turn, but it has no tool capability.
+            // Do not initialize the plugin/MCP session only to discard every
+            // definition a few lines later; this keeps pure chat independent
+            // from plugin startup while preserving the normal Agent catalog.
+            val activePluginSession = if (
+                AgentRuntimeFeatureFlags.ENABLE_PLUGIN_RUNTIME &&
+                !AgentConversationModePolicy.isChatOnlyMode(conversationMode)
+            ) {
+                OmniPluginHost.get(context).openSession()
+            } else {
+                null
+            }
             pluginSession = activePluginSession
             val toolRegistry = AgentToolRegistry(
                 context = context,
-                discoveredServers = discoveredServers,
                 conversationMode = conversationMode,
                 terminalDistribution = terminalDistribution,
-                pluginToolDefinitions = activePluginSession.toolDefinitions,
-                userMessage = userMessage,
-                toolRoutingMode = AgentToolRoutingMode.fromSkillFrontmatter(
-                    resolvedSkills.map(ResolvedSkillContext::frontmatter),
-                ),
+                pluginToolDefinitions = activePluginSession?.toolDefinitions.orEmpty(),
+                capabilityToolDefinitions = sessionCapabilityModules.flatMap {
+                    it.toolDefinitions
+                },
             )
-            val initialMessages = buildInitialMessages(
-                promptSeed = historyRepository.buildPromptSeed(
-                    conversationId = conversationId,
-                    conversationMode = conversationMode
-                ),
-                userMessage = userMessage,
-                attachments = attachments,
-                continueMode = continueMode,
-                workspaceDescriptor = workspaceDescriptor,
-                installedSkills = installedSkills,
-                skillsRootShellPath = workspaceManager.shellPathForAndroid(workspaceManager.skillsRoot())
-                    ?: workspaceManager.skillsRoot().absolutePath,
-                skillsRootAndroidPath = workspaceManager.skillsRoot().absolutePath,
-                resolvedSkills = resolvedSkills,
-                memoryContext = promptIdentityContext,
-                terminalDistribution = terminalDistribution
-            )
-
             val llmClient = HttpAgentLlmClient(
                 scope = scope,
                 json = json,
-                modelOverride = modelOverride
+                modelOverride = modelOverride,
             )
             val toolImageContinuationPolicy = runCatching {
                 AgentToolImageContinuationPolicyResolver.resolve(
@@ -260,20 +267,24 @@ class OmniAgentExecutor(
                     )
                 )
             }.getOrDefault(AgentToolImageContinuationPolicy.DEFAULT)
-            val contextCompactor = AgentConversationContextCompactor(
-                historyRepository = historyRepository,
-                modelScene = agentModelScene,
-                modelOverride = modelOverride,
-                reasoningEffort = reasoningEffort,
-                promptCacheKey = promptCacheKey,
-                json = json
-            )
             val eventAdapter = AgentEventAdapter(json)
             // Break the SubagentDispatcher ↔ AgentToolRouter cycle: hand the
             // dispatcher a lazy reference to the router that we'll populate
             // immediately after the router is constructed.
             val routerRef = AtomicReference<AgentToolExecutor?>()
             val catalogRef = AtomicReference<AgentToolCatalog?>(toolRegistry)
+            val contextCompactorFactory = {
+                AgentConversationContextCompactor(
+                    historyRepository = historyRepository,
+                    modelScene = agentModelScene,
+                    modelOverride = modelOverride,
+                    reasoningEffort = reasoningEffort,
+                    promptCacheKey = promptCacheKey,
+                    offloadToolOutput = { text ->
+                        workspaceManager.writeOffload(workspaceDescriptor.id, "txt", text).workspacePath
+                    },
+                )
+            }
             val subagentDispatcher = SubagentDispatcher(
                 llmClient = llmClient,
                 toolExecutorProvider = {
@@ -284,7 +295,8 @@ class OmniAgentExecutor(
                 },
                 eventAdapter = eventAdapter,
                 model = agentModelScene,
-                toolImageContinuationPolicy = toolImageContinuationPolicy
+                toolImageContinuationPolicy = toolImageContinuationPolicy,
+                contextCompactorFactory = contextCompactorFactory,
             )
             toolRouter = AgentToolRouter(
                 context = context,
@@ -292,8 +304,14 @@ class OmniAgentExecutor(
                 scheduleToolBridge = scheduleToolBridge,
                 workspaceManager = workspaceManager,
                 subagentDispatcher = subagentDispatcher,
+                toolCatalog = toolRegistry,
                 terminalDistribution = terminalDistribution,
-                pluginHandlers = activePluginSession.toolHandlers
+                capabilityModules = buildList {
+                    addAll(sessionCapabilityModules)
+                    if (activePluginSession != null) {
+                        add(AgentToolHandlerModule(activePluginSession.toolHandlers))
+                    }
+                }
             )
             pluginSession = null
             routerRef.set(toolRouter)
@@ -309,17 +327,34 @@ class OmniAgentExecutor(
             orchestrator.run(
                 AgentOrchestrator.Input(
                     callback = callback,
-                    initialMessages = initialMessages,
+                    initialMessages = buildInitialMessages(
+                        promptSeed = historyRepository.buildPromptSeed(
+                            conversationId = conversationId,
+                            conversationMode = conversationMode
+                        ),
+                        userMessage = userMessage,
+                        attachments = attachments,
+                        continueMode = continueMode,
+                        workspaceDescriptor = workspaceDescriptor,
+                        installedSkills = installedSkills,
+                        skillsRootShellPath = workspaceManager.shellPathForAndroid(workspaceManager.skillsRoot())
+                            ?: workspaceManager.skillsRoot().absolutePath,
+                        skillsRootAndroidPath = workspaceManager.skillsRoot().absolutePath,
+                        resolvedSkills = resolvedSkills,
+                        memoryContext = promptIdentityContext,
+                        terminalDistribution = terminalDistribution,
+                        conversationMode = conversationMode,
+                        historyMessagesOverride = historyMessagesOverride
+                    ),
                     conversationId = conversationId,
                     promptCacheKey = promptCacheKey,
-                    contextCompactor = contextCompactor,
+                    contextCompactor = contextCompactorFactory(),
                     executionEnv = DefaultAgentExecutionEnvironment(
                         agentRunId = agentRunId,
                         userMessage = userMessage,
                         runtimeContextRepository = runtimeContextRepository,
                         workspaceDescriptor = workspaceDescriptor,
                         resolvedSkills = resolvedSkills,
-                        failureLearningSkill = failureLearningSkill,
                         workspaceManager = workspaceManager,
                         workspaceMemoryService = memoryService,
                         conversationMode = conversationMode,
@@ -327,8 +362,8 @@ class OmniAgentExecutor(
                         modelProviderProfileId = modelOverride?.providerProfileId,
                         terminalEnvironment = terminalEnvironment,
                         runControl = runControl,
-                        longTermMemoryIndex = ltmIndex,
-                        turnMemoryLoadTracker = memoryLoadTracker
+                        permissionRequester = permissionRequester,
+                        longTermMemoryIndex = ltmIndex
                     )
                 )
             )
@@ -354,28 +389,51 @@ class OmniAgentExecutor(
         skillsRootAndroidPath: String,
         resolvedSkills: List<ResolvedSkillContext>,
         memoryContext: WorkspaceMemoryPromptContext?,
-        terminalDistribution: TerminalDistribution.Spec = TerminalDistribution.alpine
+        terminalDistribution: TerminalDistribution.Spec = TerminalDistribution.alpine,
+        conversationMode: String = AgentConversationModePolicy.AGENT_MODE,
+        historyMessagesOverride: List<ChatCompletionMessage>? = null
     ): List<ChatCompletionMessage> {
-        val systemPrompt = AgentSystemPrompt.build(
-            workspace = workspaceDescriptor,
-            installedSkills = installedSkills,
-            skillsRootShellPath = skillsRootShellPath,
-            skillsRootAndroidPath = skillsRootAndroidPath,
-            resolvedSkills = resolvedSkills,
-            memoryContext = memoryContext,
-            locale = AppLocaleManager.resolvePromptLocale(context),
-            terminalDistribution = terminalDistribution
-        )
         val locale = AppLocaleManager.resolvePromptLocale(context)
-        return mergeInitialPromptMessages(
-            leadingMessages = buildList {
+        val chatOnly = AgentConversationModePolicy.isChatOnlyMode(conversationMode)
+        val leadingMessages = if (chatOnly) {
+            val chatPrompt = AgentPromptSettingsStore.readChatPrompt(context).trim()
+            buildList {
+                if (chatPrompt.isNotEmpty()) {
+                    add(
+                        ChatCompletionMessage(
+                            role = "system",
+                            content = JsonPrimitive(chatPrompt)
+                        )
+                    )
+                }
+            }
+        } else {
+            val systemPrompt = AgentSystemPrompt.build(
+                workspace = workspaceDescriptor,
+                installedSkills = installedSkills,
+                skillsRootShellPath = skillsRootShellPath,
+                skillsRootAndroidPath = skillsRootAndroidPath,
+                resolvedSkills = resolvedSkills,
+                memoryContext = memoryContext,
+                locale = locale,
+                terminalDistribution = terminalDistribution
+            )
+            buildList {
                 add(ChatCompletionMessage(
                     role = "system",
                     content = buildCachedSystemPromptContent(systemPrompt)
                 ))
                 add(buildCachedTimeContextMessage(locale))
+            }
+        }
+        val historyMessages = historyMessagesOverride ?: promptSeed.historyMessages
+        return mergeInitialPromptMessages(
+            leadingMessages = leadingMessages,
+            historyMessages = if (chatOnly) {
+                filterChatOnlyHistoryMessages(historyMessages)
+            } else {
+                historyMessages
             },
-            historyMessages = promptSeed.historyMessages,
             currentUserMessage = buildCurrentUserMessage(userMessage, attachments),
             continueMode = continueMode
         )

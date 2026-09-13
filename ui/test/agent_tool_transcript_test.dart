@@ -4,6 +4,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_transcript.dart';
 
 void main() {
+  test('old terminal card displays stored ACP exit detail without migration', () {
+    final transcript = buildAgentToolTranscript({
+      'toolType': 'terminal',
+      'status': 'error',
+      'summary': '',
+      'rawResultJson': jsonEncode({
+        'type': 'commandExecution',
+        'rawOutput': {'formatted_output': '', 'exit_code': 182},
+      }),
+    });
+    expect(transcript.outputText, 'Command exited with code 182');
+  });
+
   test(
     'buildAgentToolTranscript renders non-terminal tool as pseudo command',
     () {
@@ -102,4 +115,44 @@ void main() {
       expect(transcript.previewText, isEmpty);
     },
   );
+
+  test('tool detail preserves every persisted structured result field', () {
+    final completeRecords = List<Map<String, dynamic>>.generate(
+      128,
+      (index) => <String, dynamic>{'id': index, 'fact': 'fact-$index'},
+    );
+    final transcript = buildAgentToolTranscript({
+      'toolName': 'memory_search',
+      'toolType': 'memory',
+      // A preview may be abbreviated for a compact card. Detail must select
+      // the canonical raw result instead.
+      'resultPreviewJson': jsonEncode(<String, dynamic>{
+        'records': completeRecords.take(1).toList(),
+      }),
+      'rawResultJson': jsonEncode(<String, dynamic>{
+        'records': completeRecords,
+      }),
+    });
+
+    expect(transcript.outputText, contains('id: 0, fact: fact-0'));
+    expect(transcript.outputText, contains('id: 127, fact: fact-127'));
+    expect(transcript.outputText, isNot(contains('[truncated]')));
+  });
+
+  test('tool detail preserves a complete array result', () {
+    final values = List<Map<String, dynamic>>.generate(
+      128,
+      (index) => <String, dynamic>{'id': index, 'fact': 'fact-$index'},
+    );
+    final transcript = buildAgentToolTranscript({
+      'toolName': 'external_list',
+      'toolType': 'mcp',
+      'resultPreviewJson': jsonEncode(values.take(1).toList()),
+      'rawResultJson': jsonEncode(values),
+    });
+
+    expect(transcript.outputText, contains('"fact": "fact-0"'));
+    expect(transcript.outputText, contains('"fact": "fact-127"'));
+    expect(transcript.outputText, isNot(contains('[truncated]')));
+  });
 }

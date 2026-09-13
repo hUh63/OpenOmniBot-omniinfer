@@ -2,12 +2,11 @@ package cn.com.omnimind.bot.agent
 
 import android.content.Context
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
-import cn.com.omnimind.baselib.i18n.LocalizedText
 import cn.com.omnimind.baselib.shizuku.PrivilegedActionPolicy
 import cn.com.omnimind.baselib.shizuku.ShizukuBackend
 import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
 import cn.com.omnimind.baselib.util.OmniLog
-import cn.com.omnimind.bot.mcp.RemoteMcpDiscoveredServer
+import cn.com.omnimind.bot.agent.tool.AgentCapabilityToolDefinition
 import cn.com.omnimind.bot.mcp.RemoteMcpToolDescriptor
 import cn.com.omnimind.bot.plugin.OmniPluginToolDefinition
 import com.rk.terminal.runtime.TerminalDistribution
@@ -25,31 +24,40 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class AgentToolRegistry(
     private val context: Context,
-    discoveredServers: List<RemoteMcpDiscoveredServer>,
-    conversationMode: String = AgentConversationModePolicy.NORMAL_MODE,
+    private val conversationMode: String = AgentConversationModePolicy.AGENT_MODE,
     terminalDistribution: TerminalDistribution.Spec = TerminalDistribution.alpine,
     pluginToolDefinitions: List<OmniPluginToolDefinition> = emptyList(),
-    userMessage: String? = null,
-    toolRoutingMode: AgentToolRoutingMode = AgentToolRoutingMode.DEFAULT,
-) : AgentToolCatalog {
+    capabilityToolDefinitions: List<AgentCapabilityToolDefinition> = emptyList(),
+    // Keep the visual-operation entry visible so the Agent can explain how
+    // to enable it. VlmToolHandler gates execution until OmniFlow is enabled.
+    includeVlmTool: Boolean = true,
+    ) : AgentToolCatalog {
     data class RuntimeToolDescriptor(
         val name: String,
         val displayName: String,
         val toolType: String,
         val serverName: String? = null,
-        val remoteTool: RemoteMcpToolDescriptor? = null
+        val remoteTool: RemoteMcpToolDescriptor? = null,
     )
 
     private val tag = "AgentToolRegistry"
     private val toolSchemas = linkedMapOf<String, JsonObject>()
     private val runtimeDescriptors = linkedMapOf<String, RuntimeToolDescriptor>()
+    private val allToolsByName = linkedMapOf<String, ChatCompletionTool>()
     override val toolsForModel: List<ChatCompletionTool>
+        get() = allToolsByName.values.toList()
 
     init {
         val locale = AppLocaleManager.resolvePromptLocale(context)
         val shizukuStatus = ShizukuCapabilityManager.get(context).getStatus()
         val runtimeDefinitions = mutableListOf<JsonObject>()
-        runtimeDefinitions.addAll(AgentToolDefinitions.staticTools(locale, terminalDistribution))
+        runtimeDefinitions.addAll(
+            AgentToolDefinitions.staticTools(
+                locale = locale,
+                terminalDistribution = terminalDistribution,
+                includeVlmTool = includeVlmTool,
+            )
+        )
         if (shizukuStatus.isGranted()) {
             val privilegedVisibleActions = shizukuStatus.availableActions.ifEmpty {
                 PrivilegedActionPolicy.visibleAgentActions(
@@ -94,7 +102,7 @@ class AgentToolRegistry(
         }
         runtimeDefinitions.addAll(AgentToolDefinitions.memoryTools(locale))
         runtimeDefinitions.addAll(AgentToolDefinitions.subagentTools(locale))
-        if (pluginToolDefinitions.isNotEmpty()) {
+        if (pluginToolDefinitions.isNotEmpty() || capabilityToolDefinitions.isNotEmpty()) {
             val occupiedNames = runtimeDefinitions.mapNotNullTo(linkedSetOf()) { definition ->
                 (definition["function"] as? JsonObject)
                     ?.get("name")
@@ -124,14 +132,30 @@ class AgentToolRegistry(
                     terminalDistribution
                 )
             }
+            capabilityToolDefinitions.forEach { capabilityTool ->
+                require(capabilityTool.name !in occupiedNames) {
+                    "Capability tool conflicts with an existing tool: ${capabilityTool.name}"
+                }
+                occupiedNames += capabilityTool.name
+                runtimeDefinitions += AgentToolDefinitions.decorateToolDefinition(
+                    buildJsonObject {
+                        put("type", JsonPrimitive("function"))
+                        put("function", buildJsonObject {
+                            put("name", JsonPrimitive(capabilityTool.name))
+                            put("displayName", JsonPrimitive(capabilityTool.displayName))
+                            put("toolType", JsonPrimitive(capabilityTool.toolType))
+                            capabilityTool.serverName?.let {
+                                put("serverName", JsonPrimitive(it))
+                            }
+                            put("description", JsonPrimitive(capabilityTool.description))
+                            put("parameters", capabilityTool.parameters)
+                        })
+                    },
+                    locale,
+                    terminalDistribution
+                )
+            }
         }
-        discoveredServers
-            .flatMap { it.tools }
-            .sortedBy { it.encodedToolName.lowercase() }
-            .forEach { tool ->
-            runtimeDefinitions.add(toDynamicMcpToolDefinition(tool, locale))
-        }
-
         val conversationDefinitions = AgentConversationModePolicy
             .filterToolDefinitionsForConversationMode(runtimeDefinitions, conversationMode)
             .sortedBy { definition ->
@@ -141,85 +165,52 @@ class AgentToolRegistry(
                     ?.lowercase()
                     .orEmpty()
             }
-        val visibleToolNames = userMessage?.let { message ->
-            AgentToolVisibilitySelector.select(
-                userMessage = message,
-                routingMode = toolRoutingMode,
-                candidates = conversationDefinitions.mapNotNull { definition ->
-                    val function = definition["function"] as? JsonObject
-                        ?: return@mapNotNull null
-                    val name = function["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    if (name.isBlank()) return@mapNotNull null
-                    val toolType = function["toolType"]?.jsonPrimitive?.contentOrNull?.trim()
-                        .orEmpty()
-                    AgentToolVisibilitySelector.ToolCandidate(
-                        name = name,
-                        displayName = function["displayName"]?.jsonPrimitive?.contentOrNull
-                            .orEmpty(),
-                        description = function["description"]?.jsonPrimitive?.contentOrNull
-                            .orEmpty(),
-                        owner = function["serverName"]?.jsonPrimitive?.contentOrNull,
-                        dynamic = toolType == "plugin" || toolType == "mcp",
-                    )
-                },
-            )
-        }
-        val filteredDefinitions = if (visibleToolNames == null) {
-            conversationDefinitions
-        } else {
-            conversationDefinitions.filter { definition ->
-                val toolName = (definition["function"] as? JsonObject)
-                    ?.get("name")
-                    ?.jsonPrimitive
-                    ?.contentOrNull
-                    ?.trim()
-                    .orEmpty()
-                toolName in visibleToolNames
-            }
-        }
-
-        toolsForModel = filteredDefinitions.mapNotNull { definition ->
-            val function = definition["function"] as? JsonObject ?: return@mapNotNull null
-            val name = function["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-            if (name.isBlank()) return@mapNotNull null
-            val description = function["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            val parameters = canonicalizeJson(
-                (function["parameters"] as? JsonObject) ?: JsonObject(emptyMap())
-            ) as JsonObject
-            val displayName = function["displayName"]?.jsonPrimitive?.contentOrNull?.trim()
-                .takeUnless { it.isNullOrBlank() } ?: name
-            val toolType = function["toolType"]?.jsonPrimitive?.contentOrNull?.trim()
-                .takeUnless { it.isNullOrBlank() } ?: "builtin"
-            val serverName = function["serverName"]?.jsonPrimitive?.contentOrNull?.trim()
-                ?.takeIf { it.isNotEmpty() }
-
-            toolSchemas[name] = parameters
-            runtimeDescriptors[name] = RuntimeToolDescriptor(
-                name = name,
-                displayName = displayName,
-                toolType = toolType,
-                serverName = serverName,
-                remoteTool = findRemoteTool(name, discoveredServers)
-            )
-            ChatCompletionTool(
-                function = ChatCompletionFunction(
-                    name = name,
-                    description = description,
-                    parameters = parameters
-                )
-            )
+        conversationDefinitions.forEach { definition ->
+            registerModelDefinition(definition)
         }
 
         // Debug dump: full registered tool list to verify which ones the LLM actually receives.
         OmniLog.i(
             tag,
-            "registered_tools count=${toolsForModel.size} " +
+                "registered_tools count=${toolsForModel.size} " +
                 "conversationMode=$conversationMode " +
-                "toolRoutingMode=$toolRoutingMode " +
                 "subagent_present=${"subagent_dispatch" in runtimeDescriptors.keys} " +
                 "memory_load_present=${"memory_load" in runtimeDescriptors.keys} " +
                 "names=[${runtimeDescriptors.keys.joinToString(",")}]"
         )
+    }
+
+    private fun registerModelDefinition(
+        definition: JsonObject,
+    ) {
+        val function = definition["function"] as? JsonObject ?: return
+        val name = function["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        if (name.isBlank() || name in allToolsByName) return
+        val description = function["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val parameters = canonicalizeJson(
+            (function["parameters"] as? JsonObject) ?: JsonObject(emptyMap())
+        ) as JsonObject
+        val displayName = function["displayName"]?.jsonPrimitive?.contentOrNull?.trim()
+            .takeUnless { it.isNullOrBlank() } ?: name
+        val toolType = function["toolType"]?.jsonPrimitive?.contentOrNull?.trim()
+            .takeUnless { it.isNullOrBlank() } ?: "builtin"
+        val serverName = function["serverName"]?.jsonPrimitive?.contentOrNull?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+        toolSchemas[name] = parameters
+        runtimeDescriptors[name] = RuntimeToolDescriptor(
+            name = name,
+            displayName = displayName,
+            toolType = toolType,
+            serverName = serverName,
+        )
+        ChatCompletionTool(
+            function = ChatCompletionFunction(
+                name = name,
+                description = description,
+                parameters = parameters
+            )
+        ).also { allToolsByName[name] = it }
     }
 
     override fun runtimeDescriptor(toolName: String): RuntimeToolDescriptor {
@@ -228,6 +219,49 @@ class AgentToolRegistry(
             displayName = toolName,
             toolType = "builtin"
         )
+    }
+
+    override fun searchTools(query: String, limit: Int?): List<AgentToolSearchEntry> {
+        val normalizedTerms = query
+            .trim()
+            .lowercase()
+            .split(Regex("\\s+|[,，、]"))
+            .map(String::trim)
+            .filter(String::isNotBlank)
+        val scored = runtimeDescriptors.values
+            .asSequence()
+            .mapNotNull { descriptor ->
+                val tool = allToolsByName[descriptor.name] ?: return@mapNotNull null
+                val haystack = buildString {
+                    append(descriptor.name)
+                    append(' ')
+                    append(descriptor.displayName)
+                    append(' ')
+                    append(tool.function.description)
+                    append(' ')
+                    append(descriptor.serverName.orEmpty())
+                }.lowercase()
+                val score = if (normalizedTerms.isEmpty()) {
+                    0
+                } else {
+                    normalizedTerms.count { term -> haystack.contains(term) }
+                }
+                if (normalizedTerms.isNotEmpty() && score == 0) return@mapNotNull null
+                AgentToolSearchEntry(
+                    name = descriptor.name,
+                    displayName = descriptor.displayName,
+                    description = tool.function.description,
+                    toolType = descriptor.toolType,
+                    serverName = descriptor.serverName,
+                ) to score
+            }
+            .sortedWith(compareByDescending<Pair<AgentToolSearchEntry, Int>> { it.second }
+                .thenBy { it.first.name.lowercase() })
+        return if (limit == null) {
+            scored.map { it.first }.toList()
+        } else {
+            scored.take(limit.coerceAtLeast(1)).map { it.first }.toList()
+        }
     }
 
     private fun canonicalizeJson(value: JsonElement): JsonElement {
@@ -322,55 +356,4 @@ class AgentToolRegistry(
         }
     }
 
-    private fun findRemoteTool(
-        toolName: String,
-        discoveredServers: List<RemoteMcpDiscoveredServer>
-    ): RemoteMcpToolDescriptor? {
-        return discoveredServers.asSequence()
-            .flatMap { it.tools.asSequence() }
-            .firstOrNull { it.encodedToolName == toolName }
-    }
-
-    private fun toDynamicMcpToolDefinition(
-        tool: RemoteMcpToolDescriptor,
-        locale: cn.com.omnimind.baselib.i18n.PromptLocale
-    ): JsonObject {
-        return AgentToolDefinitions.decorateToolDefinition(buildJsonObject {
-            put("type", JsonPrimitive("function"))
-            put("function", buildJsonObject {
-                put("name", JsonPrimitive(tool.encodedToolName))
-                put("displayName", JsonPrimitive(tool.toolName))
-                put("toolType", JsonPrimitive("mcp"))
-                put("serverName", JsonPrimitive(tool.serverName))
-                put(
-                    "description",
-                    JsonPrimitive(
-                        tool.description.ifBlank {
-                            LocalizedText(
-                                zhCN = "调用远端 MCP 工具。",
-                                enUS = "Call a remote MCP tool."
-                            ).resolve(locale)
-                        }
-                    )
-                )
-                put("parameters", mapToJsonElement(tool.inputSchema))
-            })
-        }, locale)
-    }
-
-    private fun mapToJsonElement(value: Any?): JsonElement {
-        return when (value) {
-            null -> JsonNull
-            is JsonElement -> value
-            is Map<*, *> -> JsonObject(
-                value.entries.associate { (key, item) ->
-                    key.toString() to mapToJsonElement(item)
-                }
-            )
-            is List<*> -> JsonArray(value.map { mapToJsonElement(it) })
-            is Boolean -> JsonPrimitive(value)
-            is Number -> JsonPrimitive(value)
-            else -> JsonPrimitive(value.toString())
-        }
-    }
 }

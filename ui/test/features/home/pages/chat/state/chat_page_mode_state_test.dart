@@ -6,6 +6,35 @@ import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
 
 void main() {
+  test('consumption preserves later picks and same-path replacement across repeated sends', () {
+    final state = ChatPageModeState();
+    final other = ChatPageModeState();
+    const replacement = ChatInputAttachment(id: 'new', name: 'a.txt', path: '/a.txt');
+    other.pendingAttachments.add(replacement);
+    for (var round = 0; round < 20; round++) {
+      final submitted = ChatInputAttachment(id: 'old-$round', name: 'a.txt', path: '/a.txt');
+      state.pendingAttachments.add(submitted);
+      final references = [submitted.toMap()];
+      state.pendingAttachments.add(replacement);
+      state.consumeMessageAttachments(references);
+      expect(state.pendingAttachments.map((a) => a.id), ['new']);
+      expect(references.single['path'], '/a.txt');
+      state.consumeMessageAttachments(references);
+      expect(state.pendingAttachments.map((a) => a.id), ['new']);
+      expect(other.pendingAttachments, [replacement]);
+      state.pendingAttachments.clear();
+    }
+  });
+
+  test('empty or historical references do not consume current composer attachments', () {
+    final state = ChatPageModeState();
+    const attachment = ChatInputAttachment(id: 'picked', name: 'a.png', path: '/a.png');
+    state.pendingAttachments.add(attachment);
+    state.consumeMessageAttachments([]);
+    state.consumeMessageAttachments([{'path': '/a.png'}, {'id': 'another', 'path': '/a.png'}]);
+    expect(state.pendingAttachments, [attachment]);
+  });
+
   test('starts with the established chat mode defaults', () {
     final state = ChatPageModeState();
 
@@ -40,7 +69,7 @@ void main() {
       ..isCheckingExecutableTask = true
       ..deepThinkingContent = 'thinking'
       ..isDeepThinking = true
-      ..currentDispatchTaskId = 'task'
+      ..currentDispatchTurnId = 'task'
       ..currentThinkingStage = 2
       ..currentConversationId = 42
       ..currentConversation = ConversationModel(
@@ -74,7 +103,7 @@ void main() {
     expect(state.isCheckingExecutableTask, isFalse);
     expect(state.deepThinkingContent, isEmpty);
     expect(state.isDeepThinking, isFalse);
-    expect(state.currentDispatchTaskId, isNull);
+    expect(state.currentDispatchTurnId, isNull);
     expect(state.currentThinkingStage, 1);
     expect(state.currentConversationId, isNull);
     expect(state.currentConversation, isNull);

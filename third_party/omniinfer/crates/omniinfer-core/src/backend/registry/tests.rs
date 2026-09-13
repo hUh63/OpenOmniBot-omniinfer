@@ -19,6 +19,13 @@ fn amd_gpu_output_detection_rejects_non_gpu_architecture_text() {
 }
 
 #[test]
+fn nvidia_driver_branch_parser_handles_release_versions() {
+    assert_eq!(parse_nvidia_driver_branch("595.84"), Some(595));
+    assert_eq!(parse_nvidia_driver_branch(" 580.105.08 "), Some(580));
+    assert_eq!(parse_nvidia_driver_branch("unknown"), None);
+}
+
+#[test]
 fn linux_registry_includes_primary_backends() {
     let registry = BackendRegistry::build(
         HostInfo {
@@ -30,7 +37,19 @@ fn linux_registry_includes_primary_backends() {
     );
     assert!(registry.get("llama.cpp-linux-cuda").is_some());
     assert!(registry.get("vllm-linux-cuda").is_some());
+    assert!(registry.get("freetoken-linux-cuda").is_some());
     assert!(registry.get("mnn-linux").is_some());
+    let diffusion = registry
+        .get("stable-diffusion.cpp-linux-vulkan")
+        .expect("Linux diffusion backend");
+    assert_eq!(diffusion.family, "stable-diffusion.cpp");
+    assert_eq!(diffusion.model_artifact, "diffusion-model");
+    assert!(!diffusion.supports_mmproj);
+    assert!(!diffusion.supports_ctx_size);
+    assert_eq!(
+        diffusion.external_server_protocol.as_deref(),
+        Some("stable-diffusion.cpp-server")
+    );
 }
 
 #[test]
@@ -76,8 +95,6 @@ fn official_llama_backend_has_safe_cache_defaults() {
             "--slot-prompt-similarity",
             "0",
             "--cache-idle-slots",
-            "-ngl",
-            "999",
             "--cache-ram",
             "8192"
         ]
@@ -85,6 +102,17 @@ fn official_llama_backend_has_safe_cache_defaults() {
 
     let ik = registry.get("ik_llama.cpp-linux-cuda").unwrap();
     assert_eq!(ik.default_args, vec!["--jinja", "-ngl", "999"]);
+
+    let windows = BackendRegistry::build(
+        HostInfo {
+            system: HostSystem::Windows,
+            machine: "x86_64",
+        },
+        "runtime",
+        &Value::Null,
+    );
+    let windows_cuda = windows.get("llama.cpp-cuda").unwrap();
+    assert!(!windows_cuda.default_args.iter().any(|arg| arg == "-ngl"));
 }
 
 #[test]
@@ -104,6 +132,42 @@ fn vllm_uses_reference_artifact_without_mmproj() {
         backend.external_server_protocol.as_deref(),
         Some("vllm-openai-server")
     );
+}
+
+#[test]
+fn freetoken_uses_reference_artifact_and_cuda13_contract() {
+    let registry = BackendRegistry::build(
+        HostInfo {
+            system: HostSystem::Linux,
+            machine: "x86_64",
+        },
+        "runtime",
+        &Value::Null,
+    );
+    let backend = registry.get("freetoken-linux-cuda").unwrap();
+    assert_eq!(backend.family, "freetoken");
+    assert_eq!(backend.model_artifact, "reference");
+    assert!(!backend.supports_mmproj);
+    assert_eq!(
+        backend.external_server_protocol.as_deref(),
+        Some("freetoken-openai-server")
+    );
+    for capability in [
+        "gpu",
+        "cuda",
+        "cuda13",
+        "linux",
+        "x64",
+        "openai-compatible",
+        "anthropic-compatible",
+        "moe",
+    ] {
+        assert!(
+            backend.capabilities.iter().any(|value| value == capability),
+            "missing capability {capability}"
+        );
+    }
+    assert_eq!(backend_priority("freetoken-linux-cuda"), 3);
 }
 
 #[test]
@@ -148,6 +212,42 @@ fn windows_registry_exposes_managed_wsl2_vllm_backend() {
         gpu_backend_ids(registry.host).contains(&rocm.id.as_str()),
         "managed WSL2 ROCm vLLM must participate in Windows GPU detection"
     );
+}
+
+#[test]
+fn windows_registry_exposes_vulkan_diffusion_backend() {
+    let registry = BackendRegistry::build(
+        HostInfo {
+            system: HostSystem::Windows,
+            machine: "x86_64",
+        },
+        "runtime",
+        &Value::Null,
+    );
+    let backend = registry
+        .get("stable-diffusion.cpp-vulkan")
+        .expect("Windows diffusion backend");
+    assert_eq!(backend.family, "stable-diffusion.cpp");
+    assert_eq!(backend.model_artifact, "diffusion-model");
+    assert!(!backend.supports_mmproj);
+    assert!(!backend.supports_ctx_size);
+    assert_eq!(
+        backend.external_server_protocol.as_deref(),
+        Some("stable-diffusion.cpp-server")
+    );
+    for capability in [
+        "image-generation",
+        "video-generation",
+        "native-audio",
+        "vulkan",
+        "async-jobs",
+    ] {
+        assert!(
+            backend.capabilities.iter().any(|value| value == capability),
+            "missing capability {capability}"
+        );
+    }
+    assert!(gpu_backend_ids(registry.host).contains(&backend.id.as_str()));
 }
 
 #[test]

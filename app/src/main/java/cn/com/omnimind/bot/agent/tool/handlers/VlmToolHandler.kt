@@ -14,12 +14,12 @@ import cn.com.omnimind.bot.agent.AgentToolRegistry
 import cn.com.omnimind.bot.agent.HttpAgentLlmClient
 import cn.com.omnimind.bot.agent.ToolExecutionResult
 import cn.com.omnimind.bot.omniflow.OmniVlmPlugin
+import cn.com.omnimind.bot.omniflow.OmniFlowPluginRuntime
 import cn.com.omnimind.bot.omniflow.asOmniFlowModelClient
 import cn.com.omnimind.bot.runlog.firstNonBlank
 import cn.com.omnimind.bot.runlog.mapArg
 import cn.com.omnimind.bot.update.AppUpdateManager
 import cn.com.omnimind.bot.util.AndroidAutomationPermissionGate
-import cn.com.omnimind.bot.util.TaskCompletionNavigator
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -58,7 +58,6 @@ class VlmToolHandler(context: Context) : ToolHandler {
         val runId = "gui-${UUID.randomUUID()}"
         toolHandle.bindStopAction {
             OmniVlmPlugin.stop(runId)
-            Unit
         }
         helper.reportToolProgress(
             callback = callback,
@@ -70,16 +69,24 @@ class VlmToolHandler(context: Context) : ToolHandler {
             ),
             toolHandle = toolHandle,
         )
-        val permission = AndroidAutomationPermissionGate.check(helper.context)
-        if (!permission.granted) {
-            persistFailure(runId, goal, "permission_required", "缺少无障碍权限")
-            helper.permissionRequiredResult(callback, permission.displayNames)
+        if (!OmniFlowPluginRuntime.isEnabled()) {
+            val message = "手机操作模块未启用。请打开插件市场 → OmniFlow → 启用插件（若尚未安装则先安装），确认无障碍服务已开启，并在模型场景中配置 Agent Provider/模型后重试。"
+            persistFailure(runId, goal, "omniflow_disabled", message)
             return failedRunResult(
                 runId = runId,
                 goal = goal,
-                doneReason = "permission_required",
-                message = "缺少无障碍权限",
+                doneReason = "omniflow_disabled",
+                message = message,
             )
+        }
+        val permission = AndroidAutomationPermissionGate.check(helper.context)
+        if (!permission.granted) {
+            persistFailure(runId, goal, "permission_required", "缺少无障碍权限")
+            // Keep the typed result all the way through the Agent executor.
+            // Calling the callback alone is not enough: the ACP adapter uses
+            // PermissionRequired to project a permission_section card instead
+            // of letting the model turn this into an assistant-only sentence.
+            return helper.permissionRequiredResult(callback, permission.displayNames)
         }
         prepareOfficialModelRoute()?.let { message ->
             persistFailure(runId, goal, "provider_unavailable", message)
@@ -97,7 +104,9 @@ class VlmToolHandler(context: Context) : ToolHandler {
                     goal = goal,
                     runId = runId,
                 ),
-                modelClient = HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
+                modelClient = HttpAgentLlmClient(
+                    scope = CoroutineScope(currentCoroutineContext()),
+                )
                     .asOmniFlowModelClient(),
                 hooks = OmniVlmPlugin.Hooks(
                     beforeOperation = {
@@ -115,13 +124,6 @@ class VlmToolHandler(context: Context) : ToolHandler {
                             toolHandle = toolHandle,
                         )
                     },
-                    afterExecution = {
-                        TaskCompletionNavigator.navigateBackToChat(
-                            context = helper.context,
-                            conversationId = null,
-                            mode = env.conversationMode,
-                        )
-                    },
                 ),
             )
             val result = execution.payload
@@ -136,8 +138,10 @@ class VlmToolHandler(context: Context) : ToolHandler {
             val content = firstNonBlank(result["finished_content"])
             if (doneReason == "waiting_input") {
                 val question = content.ifBlank { "请提供继续执行所需的信息。" }
-                callback.onClarifyRequired(question, null)
-                return ToolExecutionResult.Clarify(question, null)
+                return ToolExecutionResult.Error(
+                    OmniVlmPlugin.RUN_LOG_TOOL,
+                    "视觉任务需要额外输入，当前未提供交互通道：$question",
+                )
             }
             if (doneReason == "cancelled") {
                 val message = firstNonBlank(result["error_message"], result["error_code"])

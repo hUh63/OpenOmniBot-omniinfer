@@ -8,7 +8,6 @@ import cn.com.omnimind.baselib.llm.ChatCompletionTool
 import cn.com.omnimind.baselib.llm.ChatCompletionTurn
 import cn.com.omnimind.baselib.llm.contentText
 import cn.com.omnimind.baselib.util.ImageCompressor
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -32,6 +31,7 @@ class OmniFlowModelHost(
     private val modelClient: OmniFlowModelClient,
     private val imageCompressor: (String) -> String = ::compressVlmImage,
     private val onReasoningUpdate: suspend (String) -> Unit = {},
+    private val maxRejectedActionRetries: Int? = null,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -70,8 +70,11 @@ class OmniFlowModelHost(
                 break
             }
             rejectedAttempts += 1
-            check(rejectedAttempts <= MAX_REJECTED_ACTION_RETRIES) {
-                "model_repeated_explicitly_rejected_action:${rejectedAction.tool}"
+            if (
+                maxRejectedActionRetries != null &&
+                    rejectedAttempts > maxRejectedActionRetries
+            ) {
+                error("model_repeated_explicitly_rejected_action:${rejectedAction.tool}")
             }
             activeRequest = activeRequest.copy(
                 messages = activeRequest.messages + ChatCompletionMessage(
@@ -109,9 +112,9 @@ class OmniFlowModelHost(
             payload = payload,
             model = modelOverride ?: firstText(payload["model"], "scene.dispatch.model"),
         )
-        val turn = withTimeout(180_000L) {
-            modelClient.streamTurn(request)
-        }
+        // The provider/ACP stream owns its lifetime.  Do not synthesize a
+        // failure merely because a model is slow before its next chunk.
+        val turn = modelClient.streamTurn(request)
         val content = submitJsonArguments(turn)
         return mapOf("content" to content)
     }
@@ -247,7 +250,6 @@ class OmniFlowModelHost(
     }
 
     companion object {
-        private const val MAX_REJECTED_ACTION_RETRIES = 3
         private const val COORDINATE_MATCH_TOLERANCE_PX = 2.0
         private val STALLED_ACTION_ERRORS = setOf(
             "action_completed_without_state_change",
@@ -274,9 +276,9 @@ class OmniFlowModelHost(
                 payload = payload,
                 model = modelOverride ?: firstText(payload["model"], "scene.dispatch.model"),
             )
-            val content = withTimeout(180_000L) {
-                OmniFlowPythonRuntime.completeJson(request)
-            }
+            // JSON completion is still cancelled by the owning coroutine or
+            // process shutdown, but has no host-imposed wall-clock deadline.
+            val content = OmniFlowPythonRuntime.completeJson(request)
             check(content.isNotBlank()) { "model_completion_empty" }
             return mapOf("content" to content)
         }
@@ -293,7 +295,7 @@ class OmniFlowModelHost(
                         content = JsonPrimitive(firstText(payload["prompt"])),
                     ),
                 ),
-                maxCompletionTokens = intValue(payload["max_tokens"], defaultValue = 1800),
+                maxCompletionTokens = (payload["max_tokens"] as? Number)?.toInt(),
                 temperature = (payload["temperature"] as? Number)?.toDouble() ?: 0.1,
                 stream = true,
                 streamOptions = ChatCompletionStreamOptions(),

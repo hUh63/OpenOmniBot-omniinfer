@@ -163,14 +163,16 @@ val syncPluginAssets by tasks.registering(Sync::class) {
 
 android {
     namespace = "cn.com.omnimind.bot"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "cn.com.omnimind.bot"
         minSdk = 29
-        targetSdk = 35
-        versionCode = 6
-        versionName = "0.6.0"
+        targetSdk = 36
+        // Release 0.6.1. Keep the Android version code monotonic so the APK
+        // can be installed as an update over the previously tested build.
+        versionCode = 15
+        versionName = "0.6.2.3"
         buildConfigField("String", "IMAGE_BASE_URL", buildConfigString(omnibotImageBaseUrl))
         buildConfigField("String", "IMAGE_MODEL", buildConfigString(omnibotImageModel))
         buildConfigField("String", "IMAGE_API_KEY", buildConfigString(omnibotImageApiKey))
@@ -189,7 +191,7 @@ android {
             preferPackagedOmniFlowRuntime.toString(),
         )
         ndk {
-            abiFilters.addAll(listOf("arm64-v8a"))
+            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
         }
 
     }
@@ -213,13 +215,11 @@ android {
 
         create("standard") {
             dimension = "edition"
-            buildConfigField("boolean", "LOCAL_MODEL_FEATURE_ENABLED", "false")
             buildConfigField("String", "APP_EDITION", "\"standard\"")
         }
 
         create("omniinfer") {
             dimension = "edition"
-            buildConfigField("boolean", "LOCAL_MODEL_FEATURE_ENABLED", "true")
             buildConfigField("String", "APP_EDITION", "\"omniinfer\"")
         }
     }
@@ -271,7 +271,10 @@ android {
         }
         debug {
             signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".debug"
+            // There is one installable debug app for device validation.  A
+            // suffix here creates a second launcher entry beside the normal
+            // package, which makes users switch between two identical APKs.
+            applicationIdSuffix = ""
             isMinifyEnabled = false
             buildConfigField("boolean", "ENABLE_LLMTHU_BOOTSTRAP", "true")
             buildConfigField(
@@ -339,9 +342,6 @@ android {
                 webChatAssetsRootDir
             )
         }
-        getByName("omniinfer") {
-            assets.srcDirs("src/omniinfer/assets")
-        }
     }
 
     lint {
@@ -366,6 +366,13 @@ dependencies {
     implementation(project(":flutter"))
     implementation(project(":uikit"))
     implementation(project(":baselib"))
+    "omniinferImplementation"(project(":omniinfer-server"))
+    "omniinferImplementation"("io.ktor:ktor-server-core:3.1.3")
+    "omniinferImplementation"("io.ktor:ktor-server-cio:3.1.3")
+    "omniinferImplementation"("io.ktor:ktor-server-content-negotiation:3.1.3")
+    "omniinferImplementation"("io.ktor:ktor-serialization-kotlinx-json:3.1.3")
+    "omniinferImplementation"("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    "omniinferImplementation"("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation(project(":androidgui"))
     implementation(project(":omniflow-android"))
     implementation(project(":core:main"))
@@ -373,9 +380,6 @@ dependencies {
     implementation(project(":core:terminal-emulator"))
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar","*.jar"))))
     implementation(project(":assists"))
-    findProject(":omniinfer-server")?.let {
-        add("omniinferImplementation", it)
-    }
 //    implementation(project(":lib"))
 
     implementation(libs.androidx.core.ktx)
@@ -407,6 +411,8 @@ dependencies {
     implementation(libs.ktor.server.call.logging)
     implementation(libs.mcp.kotlin.sdk.server)
     testImplementation(libs.junit)
+    testImplementation("org.mockito:mockito-core:5.20.0")
+    testImplementation(libs.okhttp.mockwebserver)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest )
 }

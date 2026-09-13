@@ -3,6 +3,7 @@ package cn.com.omnimind.bot.webchat
 import android.content.Context
 import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
+import cn.com.omnimind.bot.agent.resolveAgentToolPayloadStatus
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
@@ -10,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -36,6 +39,8 @@ internal data class WebAgentEventUpdate(
     val errorMessage: String? = null
 )
 
+private const val WEB_AGENT_MODE_STORAGE_VALUE = "agent"
+
 private data class WebAgentTextEntryState(
     val entryId: String,
     val parentTaskId: String,
@@ -56,6 +61,7 @@ private data class WebAgentToolEntryState(
 private data class WebAgentRunState(
     val taskId: String,
     val conversationId: Long,
+    val conversationMode: String,
     val createdAt: Long,
     val finished: AtomicBoolean = AtomicBoolean(false),
     var threadId: String? = null,
@@ -78,6 +84,10 @@ internal class WebAgentRunBridge(
     private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val events = Channel<Map<String, Any?>>(Channel.UNLIMITED)
+    // Admission is a conversation-level invariant. A concurrent HTTP retry
+    // must not replace a still-running state after observing a finished one.
+    // This lock covers only map admission, never ACP execution.
+    private val runAdmissionMutex = Mutex()
     private val runsByTaskId = ConcurrentHashMap<String, WebAgentRunState>()
     private val runsByConversationId = ConcurrentHashMap<Long, WebAgentRunState>()
     private val runsByThreadId = ConcurrentHashMap<String, WebAgentRunState>()
@@ -101,55 +111,82 @@ internal class WebAgentRunBridge(
     suspend fun startRun(
         taskId: String,
         conversationId: Long,
+        conversationMode: String = WEB_AGENT_MODE_STORAGE_VALUE,
         userMessage: String,
         attachments: List<Map<String, Any?>>,
         cwd: String?,
         agentId: String? = null,
+        model: String? = null,
+        effort: String? = null,
         userMessageCreatedAt: Long? = null
     ): Map<String, Any?> {
         val state = WebAgentRunState(
             taskId = taskId,
             conversationId = conversationId,
+            conversationMode = resolveWebConversationMode(
+                storedMode = null,
+                requestedMode = conversationMode
+            ),
             createdAt = userMessageCreatedAt?.takeIf { it > 0L }
                 ?: System.currentTimeMillis(),
             agentId = agentId?.trim()?.takeIf { it.isNotEmpty() }
         )
-        val existing = runsByConversationId.putIfAbsent(conversationId, state)
-        check(existing == null || existing.finished.get()) {
-            "该 Agent 会话已有运行中的任务"
-        }
-        if (existing != null) {
+        runAdmissionMutex.withLock {
+            val existing = runsByConversationId[conversationId]
+            check(existing == null || existing.finished.get()) {
+                "该 Agent 会话已有运行中的任务"
+            }
+            if (existing != null) {
+                removeState(existing)
+            }
             runsByConversationId[conversationId] = state
+            runsByTaskId[taskId] = state
         }
-        runsByTaskId[taskId] = state
-
-        // Reuse the external-message path so Flutter and WebChat receive the
-        // same stable user entry before any Agent stream event can overtake it.
-        conversationService.appendUserMessage(
-            conversationId = conversationId,
-            conversationMode = AGENT_MODE_STORAGE_VALUE,
-            entryId = "$taskId-user",
-            text = userMessage,
-            attachments = attachments,
-            createdAt = state.createdAt
-        )
 
         return try {
+            // Reuse the external-message path so Flutter and WebChat receive
+            // the same stable user entry before any Agent stream event can
+            // overtake it. Keep this inside the same failure boundary as ACP
+            // admission, otherwise a database error leaves a phantom run.
+            conversationService.appendUserMessage(
+                conversationId = conversationId,
+                conversationMode = state.conversationMode,
+                entryId = "$taskId-user",
+                text = userMessage,
+                attachments = attachments,
+                createdAt = state.createdAt
+            )
+            // `agent/select` changes the global default used by the Agent
+            // picker.  It is not a session binding and must not be issued as
+            // part of starting a conversation: two WebChat conversations can
+            // start concurrently with different Agents.  `session/prompt`
+            // carries the requested agentId and resolves the durable
+            // conversation owner at the ACP boundary.
             val arguments = buildWebAgentTurnArguments(
                 conversationId = conversationId,
                 userMessage = userMessage,
                 attachments = attachments,
                 cwd = cwd,
-                agentId = agentId
+                agentId = agentId,
+                model = model,
+                effort = effort,
+                conversationMode = state.conversationMode
             )
             val response = normalizeMap(
-                manager.handleMethod("turn/start", arguments)
+                manager.handleMethod("session/prompt", arguments)
             )
             bindServerIds(
                 state = state,
                 threadId = response["threadId"]?.toString(),
                 turnId = response["turnId"]?.toString()
             )
+            if (response["completed"] == true) {
+                if (response["error"] == null) {
+                    finishSuccessfully(state)
+                } else {
+                    finishWithError(state, response["error"].toString())
+                }
+            }
             response
         } catch (error: Throwable) {
             finishWithError(
@@ -168,7 +205,7 @@ internal class WebAgentRunBridge(
         )
         state.threadId?.let { arguments["threadId"] = it }
         state.turnId?.let { arguments["turnId"] = it }
-        manager.handleMethod("turn/interrupt", arguments)
+        manager.handleMethod("session/cancel", arguments)
         return true
     }
 
@@ -320,7 +357,7 @@ internal class WebAgentRunBridge(
             }
         }
         publishMessages(state, finalizeInterruptedEntries = true)
-        publishTerminalEvent(state, "completed")
+        publishTaskEvent(state, "completed")
         removeState(state)
     }
 
@@ -352,7 +389,7 @@ internal class WebAgentRunBridge(
             }
         }
         publishMessages(state, finalizeInterruptedEntries = true)
-        publishTerminalEvent(state, "error", message)
+        publishTaskEvent(state, "error", message)
         removeState(state)
     }
 
@@ -363,7 +400,7 @@ internal class WebAgentRunBridge(
     ) {
         historyRepository.upsertAssistantMessage(
             conversationId = state.conversationId,
-            conversationMode = AGENT_MODE_STORAGE_VALUE,
+            conversationMode = state.conversationMode,
             entryId = entry.entryId,
             text = AgentTextSanitizer.sanitizeUtf16(entry.text),
             isError = isError,
@@ -385,7 +422,7 @@ internal class WebAgentRunBridge(
     ) {
         historyRepository.upsertUiCard(
             conversationId = state.conversationId,
-            conversationMode = AGENT_MODE_STORAGE_VALUE,
+            conversationMode = state.conversationMode,
             entryId = entry.entryId,
             cardData = linkedMapOf(
                 "type" to "deep_thinking",
@@ -451,7 +488,7 @@ internal class WebAgentRunBridge(
         }
         historyRepository.upsertToolEvent(
             conversationId = state.conversationId,
-            conversationMode = AGENT_MODE_STORAGE_VALUE,
+            conversationMode = state.conversationMode,
             entryId = entry.entryId,
             payload = linkedMapOf<String, Any?>(
                 "taskId" to entry.parentTaskId,
@@ -512,31 +549,33 @@ internal class WebAgentRunBridge(
     ) {
         val messages = historyRepository.listConversationMessages(
             conversationId = state.conversationId,
-            conversationMode = AGENT_MODE_STORAGE_VALUE,
+            conversationMode = state.conversationMode,
             finalizeInterruptedEntries = finalizeInterruptedEntries
         )
         RealtimeHub.publish(
             "messages_replaced",
             mapOf(
                 "conversationId" to state.conversationId,
-                "mode" to AGENT_MODE_STORAGE_VALUE,
+                "mode" to state.conversationMode,
                 "messages" to messages
             )
         )
     }
 
-    private fun publishTerminalEvent(
+    private fun publishTaskEvent(
         state: WebAgentRunState,
         kind: String,
         error: String? = null
     ) {
         RealtimeHub.publish(
-            "agent_stream_event",
+            "chat_task_event",
             linkedMapOf<String, Any?>(
+                "kind" to kind,
                 "taskId" to state.taskId,
                 "conversationId" to state.conversationId,
-                "conversationMode" to AGENT_MODE_STORAGE_VALUE,
-                "kind" to kind,
+                "conversationMode" to state.conversationMode,
+                "threadId" to state.threadId,
+                "turnId" to state.turnId,
                 "error" to error
             ).filterValues { it != null }
         )
@@ -557,9 +596,6 @@ internal class WebAgentRunBridge(
         return safeIncoming
     }
 
-    private companion object {
-        const val AGENT_MODE_STORAGE_VALUE = "codex"
-    }
 }
 
 internal fun buildWebAgentTurnArguments(
@@ -567,7 +603,10 @@ internal fun buildWebAgentTurnArguments(
     userMessage: String,
     attachments: List<Map<String, Any?>>,
     cwd: String?,
-    agentId: String? = null
+    agentId: String? = null,
+    model: String? = null,
+    effort: String? = null,
+    conversationMode: String = WEB_AGENT_MODE_STORAGE_VALUE
 ): Map<String, Any?> {
     return linkedMapOf<String, Any?>(
         "conversationId" to conversationId,
@@ -575,13 +614,20 @@ internal fun buildWebAgentTurnArguments(
         "attachments" to attachments,
         "approvalPolicy" to "never",
         "approvalsReviewer" to "user",
-        "sandboxPolicy" to mapOf("type" to "dangerFullAccess")
+        "sandboxPolicy" to mapOf("type" to "dangerFullAccess"),
+        "conversationMode" to conversationMode
     ).apply {
         agentId?.trim()?.takeIf { it.isNotEmpty() }?.let {
             this["agentId"] = it
         }
         cwd?.trim()?.takeIf { it.isNotEmpty() }?.let {
             this["cwd"] = it
+        }
+        model?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            this["model"] = it
+        }
+        effort?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            this["effort"] = it
         }
     }
 }
@@ -603,6 +649,52 @@ internal fun parseWebAgentEvent(event: Map<String, Any?>): WebAgentEventUpdate {
     )
     val directItemId = resolveAgentItemId(params, item)
     val parentTaskId = turnId ?: directItemId ?: threadId
+
+    if (normalizedMethod == "session_update") {
+        val update = normalizeMap(params["update"])
+        val updateKind = normalizeAgentEventToken(
+            update["sessionUpdate"]?.toString().orEmpty()
+        )
+        val updateId = resolveAgentItemId(update, update)
+        val updateParent = firstNonBlank(
+            turnId,
+            update["turnId"],
+            update["turn_id"],
+            updateId,
+            threadId
+        )
+        val messageEntryId = agentEntryId(updateId ?: updateParent, "message")
+        val reasoningEntryId = agentEntryId(updateId ?: updateParent, "thinking")
+        return when (updateKind) {
+            "agent_message_chunk" -> WebAgentEventUpdate(
+                assistantEntryId = messageEntryId,
+                assistantDelta = extractAgentText(update["content"]),
+                parentTaskId = updateParent
+            )
+            "agent_thought_chunk" -> WebAgentEventUpdate(
+                reasoningEntryId = reasoningEntryId,
+                reasoningDelta = extractAgentText(update["content"]),
+                parentTaskId = updateParent
+            )
+            "tool_call", "tool_call_update" -> WebAgentEventUpdate(
+                parentTaskId = updateParent,
+                tool = buildToolUpdate(
+                    raw = update,
+                    itemType = update["kind"]?.toString()
+                        ?: update["title"]?.toString()
+                        ?: "tool",
+                    itemId = updateId ?: updateParent,
+                    parentTaskId = updateParent,
+                    fallbackStatus = if (updateKind == "tool_call") {
+                        "running"
+                    } else {
+                        resolveAgentToolPayloadStatus(update, "running")
+                    }
+                )
+            )
+            else -> WebAgentEventUpdate(parentTaskId = updateParent)
+        }
+    }
 
     if (normalizedMethod == "turn_completed" || normalizedMethod == "thread_closed") {
         return WebAgentEventUpdate(
@@ -802,7 +894,7 @@ private fun buildToolUpdate(
         entryId = agentEntryId(itemId, suffix),
         parentTaskId = parentTaskId,
         itemType = canonicalType,
-        status = normalizeAgentToolStatus(raw, fallbackStatus),
+        status = resolveAgentToolPayloadStatus(raw, fallbackStatus),
         raw = raw
     )
 }
@@ -835,9 +927,13 @@ private fun resolveAgentItemId(
         container["item_id"],
         container["callId"],
         container["call_id"],
+        container["toolCallId"],
+        container["tool_call_id"],
         item["id"],
         item["callId"],
         item["call_id"],
+        item["toolCallId"],
+        item["tool_call_id"],
         container["processId"],
         container["processHandle"],
         container["id"]
@@ -913,28 +1009,13 @@ private fun agentProtocolToolStatus(type: String): String {
     }
 }
 
-private fun normalizeAgentToolStatus(
-    raw: Map<String, Any?>,
-    fallback: String
-): String {
-    if (raw["error"] != null || raw["success"] == false) return "error"
-    val exitCode = (raw["exitCode"] as? Number)?.toInt()
-        ?: (raw["exit_code"] as? Number)?.toInt()
-    if (exitCode != null && exitCode != 0) return "error"
-    return when (firstNonBlank(raw["status"], raw["state"])?.lowercase()) {
-        "running", "pending", "progress", "inprogress", "in_progress",
-        "executing", "started" -> "running"
-        "success", "succeeded", "completed", "complete", "applied", "done" -> "success"
-        "error", "failed", "failure", "rejected" -> "error"
-        "cancelled", "canceled", "incomplete", "interrupted", "aborted" -> "interrupted"
-        "timeout", "timedout" -> "timeout"
-        else -> if (raw["success"] == true) "success" else fallback
-    }
-}
-
 private fun agentToolStatusRank(status: String): Int {
     return when (status) {
-        "running" -> 0
+        // ACP permits a pending update while the tool is waiting for the
+        // client to answer session/request_permission. Treat pending and
+        // running as the same non-terminal phase so that transition is not
+        // discarded by the monotonic merge.
+        "pending", "running" -> 0
         "interrupted" -> 1
         "timeout" -> 2
         "error" -> 3
@@ -1028,7 +1109,7 @@ private fun findRemoteCodexProtocolMessage(
     val direct = normalizeMap(map["msg"])
     if (direct.isNotEmpty()) return direct
     val type = map["type"]?.toString()?.trim().orEmpty()
-    if (type.isNotEmpty() && type != "codex/event") return map
+    if (type.isNotEmpty()) return map
     for (key in listOf("event", "message", "data", "payload", "params")) {
         val nested = findRemoteCodexProtocolMessage(map[key], depth + 1)
         if (nested.isNotEmpty()) return nested

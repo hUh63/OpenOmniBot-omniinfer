@@ -1,13 +1,12 @@
-import 'dart:convert';
-
+import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
-import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
 import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
-import 'package:ui/services/ai_chat_service.dart';
+import 'package:ui/services/voice_playback_coordinator.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -15,634 +14,1942 @@ void main() {
   const channelName = 'cn.com.omnimind.bot/AssistCoreEvent';
   const codec = StandardMethodCodec();
   const methodChannel = MethodChannel(channelName);
+  const voiceChannel = MethodChannel('cn.com.omnimind.bot/VoicePlayback');
   final coordinator = ChatConversationRuntimeCoordinator.instance;
   final recordedMethodCalls = <MethodCall>[];
-  var agentStreamSeq = 0;
-  final agentThinkingRounds = <String, int>{};
-  final agentTextRounds = <String, int>{};
-  final agentPendingNextTextRound = <String, bool>{};
-  final agentActiveThinkingEntryIds = <String, String>{};
-  final agentActiveTextEntryIds = <String, String>{};
-  final agentActiveToolEntryIds = <String, String>{};
-  final agentToolSequences = <String, int>{};
-  final agentEntryOrderSeqs = <String, int>{};
-  var agentEntrySeq = 0;
 
-  String agentThinkingEntryId(String taskId, int roundIndex) {
-    return roundIndex <= 1
-        ? '$taskId-thinking'
-        : '$taskId-thinking-$roundIndex';
-  }
+  test('compaction observations cannot overwrite the saved user threshold', () {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 99109,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.conversation = ConversationModel(
+      id: 99109,
+      title: 'budget',
+      status: 0,
+      messageCount: 0,
+      promptTokenThreshold: 64000,
+      createdAt: 1,
+      updatedAt: 1,
+    );
+    coordinator.beginContextCompaction(
+      conversationId: 99109,
+      mode: kChatRuntimeModeAgent,
+      latestPromptTokens: 31000,
+      promptTokenThreshold: 32000,
+    );
+    expect(runtime.conversation!.latestPromptTokens, 31000);
+    expect(runtime.conversation!.promptTokenThreshold, 64000);
+    coordinator.finishContextCompaction(
+      conversationId: 99109,
+      mode: kChatRuntimeModeAgent,
+      latestPromptTokens: 8000,
+      promptTokenThreshold: 32000,
+    );
+    expect(runtime.conversation!.promptTokenThreshold, 64000);
+  });
 
-  String agentTextEntryId(String taskId, int roundIndex) {
-    return roundIndex <= 1 ? '$taskId-text' : '$taskId-text-$roundIndex';
-  }
-
-  int agentToolRoundIndex(String taskId) {
-    return <int>[
-      agentThinkingRounds[taskId] ?? 0,
-      agentTextRounds[taskId] ?? 0,
-      1,
-    ].reduce((left, right) => left > right ? left : right);
-  }
-
-  Map<String, dynamic> streamMetaForEntry(
-    String entryId,
-    int roundIndex,
-    String kind,
-    String taskId,
-  ) {
-    final stableSeq = agentEntryOrderSeqs.putIfAbsent(entryId, () {
-      agentEntrySeq += 1;
-      return agentEntrySeq;
-    });
+  Map<String, dynamic> acpEvent(
+    String method, {
+    required String turnId,
+    String? sessionId,
+    Map<String, dynamic> params = const <String, dynamic>{},
+    String agentId = 'xiaowan-acp',
+    String agentName = '小万',
+    int? conversationId,
+    bool hostAssignedTurn = false,
+  }) {
     return <String, dynamic>{
-      'seq': stableSeq,
-      'roundIndex': roundIndex,
-      'kind': kind,
-      'parentTaskId': taskId,
+      if (conversationId != null) 'conversationId': conversationId,
+      if (sessionId != null) 'sessionId': sessionId,
+      // A host reservation can admit the first event when the Agent omits
+      // turn/started. Once an explicit session is present, later events must
+      // still prove that they belong to the admitted session.
+      if (hostAssignedTurn || method == 'turn/started' || sessionId == null)
+        'allowImplicitTurnAdmission': true,
+      'agentId': agentId,
+      'agentName': agentName,
+      'threadId': turnId,
+      'turnId': turnId,
+      'message': <String, dynamic>{
+        'method': method,
+        'params': <String, dynamic>{
+          if (!hostAssignedTurn) 'turnId': turnId,
+          if (sessionId != null) 'sessionId': sessionId,
+          ...params,
+        },
+      },
     };
   }
 
-  List<MethodCall> mapLegacyAgentEvent(String method, dynamic arguments) {
-    final raw = Map<String, dynamic>.from(
-      (arguments as Map?) ?? const <String, dynamic>{},
+  void applyAcp(
+    int conversationId,
+    String method, {
+    required String turnId,
+    String? sessionId,
+    Map<String, dynamic> params = const <String, dynamic>{},
+    String mode = kChatRuntimeModeAgent,
+    String agentId = 'xiaowan-acp',
+    String agentName = '小万',
+    bool hostAssignedTurn = false,
+  }) {
+    if (method == 'turn/started' &&
+        coordinator
+                .runtimeFor(conversationId: conversationId, mode: mode)
+                ?.currentDispatchTurnId ==
+            null) {
+      coordinator.beginAcpTurn(
+        taskId: turnId,
+        conversationId: conversationId,
+        mode: mode,
+      );
+    }
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: mode,
+      event: acpEvent(
+        method,
+        turnId: turnId,
+        sessionId: sessionId,
+        params: params,
+        agentId: agentId,
+        agentName: agentName,
+        conversationId: conversationId,
+        hostAssignedTurn: hostAssignedTurn,
+      ),
     );
-    final taskId = (raw['taskId'] ?? '').toString();
-    final now = DateTime.now().millisecondsSinceEpoch;
+  }
 
-    MethodCall streamCall(Map<String, dynamic> payload) {
-      agentStreamSeq += 1;
-      return MethodCall('onAgentStreamEvent', <String, dynamic>{
-        'taskId': taskId,
-        'seq': agentStreamSeq,
-        'createdAt': now,
-        ...payload,
-      });
-    }
-
-    switch (method) {
-      case 'onAgentThinkingStart':
-        final roundIndex = (agentThinkingRounds[taskId] ?? 0) + 1;
-        agentThinkingRounds[taskId] = roundIndex;
-        final entryId = agentThinkingEntryId(taskId, roundIndex);
-        agentActiveThinkingEntryIds[taskId] = entryId;
-        if (agentActiveTextEntryIds.containsKey(taskId)) {
-          agentPendingNextTextRound[taskId] = true;
-        }
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'thinking_started',
-            'entryId': entryId,
-            'roundIndex': roundIndex,
-            'thinking': '',
-            'stage': 1,
-            'streamMeta': streamMetaForEntry(
-              entryId,
-              roundIndex,
-              'thinking_started',
-              taskId,
-            ),
-          }),
-        ];
-      case 'onAgentThinkingUpdate':
-        final roundIndex = agentThinkingRounds[taskId] ?? 1;
-        final entryId =
-            agentActiveThinkingEntryIds[taskId] ??
-            agentThinkingEntryId(taskId, roundIndex);
-        agentActiveThinkingEntryIds[taskId] = entryId;
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'thinking_snapshot',
-            'entryId': entryId,
-            'roundIndex': roundIndex,
-            'thinking': (raw['thinking'] ?? '').toString(),
-            'stage': 1,
-            'streamMeta': streamMetaForEntry(
-              entryId,
-              roundIndex,
-              'thinking_snapshot',
-              taskId,
-            ),
-          }),
-        ];
-      case 'onAgentChatMessage':
-        var roundIndex = agentTextRounds[taskId] ?? 0;
-        if (roundIndex == 0 || agentPendingNextTextRound[taskId] == true) {
-          roundIndex += 1;
-          agentTextRounds[taskId] = roundIndex;
-          agentPendingNextTextRound.remove(taskId);
-          agentActiveTextEntryIds[taskId] = agentTextEntryId(
-            taskId,
-            roundIndex,
-          );
-        }
-        final entryId =
-            agentActiveTextEntryIds[taskId] ??
-            agentTextEntryId(taskId, roundIndex == 0 ? 1 : roundIndex);
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'text_snapshot',
-            'entryId': entryId,
-            'roundIndex': agentTextRounds[taskId] ?? 1,
-            'text': (raw['message'] ?? '').toString(),
-            'isFinal': raw['isFinal'] == true,
-            'streamMeta': streamMetaForEntry(
-              entryId,
-              agentTextRounds[taskId] ?? 1,
-              'text_snapshot',
-              taskId,
-            ),
-            if (raw['prefillTokensPerSecond'] != null)
-              'prefillTokensPerSecond': raw['prefillTokensPerSecond'],
-            if (raw['decodeTokensPerSecond'] != null)
-              'decodeTokensPerSecond': raw['decodeTokensPerSecond'],
-          }),
-        ];
-      case 'onAgentToolCallStart':
-        final nextSequence = (agentToolSequences[taskId] ?? 0) + 1;
-        agentToolSequences[taskId] = nextSequence;
-        final entryId = (raw['cardId'] ?? '').toString().trim().isNotEmpty
-            ? (raw['cardId'] ?? '').toString().trim()
-            : '$taskId-tool-$nextSequence';
-        agentActiveToolEntryIds[taskId] = entryId;
-        agentPendingNextTextRound[taskId] = true;
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'tool_started',
-            'entryId': entryId,
-            'roundIndex': agentToolRoundIndex(taskId),
-            'streamMeta': streamMetaForEntry(
-              entryId,
-              agentToolRoundIndex(taskId),
-              'tool_started',
-              taskId,
-            ),
-            ...raw,
-            'cardId': entryId,
-          }),
-        ];
-      case 'onAgentToolCallProgress':
-        final entryId = (raw['cardId'] ?? '').toString().trim().isNotEmpty
-            ? (raw['cardId'] ?? '').toString().trim()
-            : agentActiveToolEntryIds[taskId];
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'tool_progress',
-            'entryId': entryId,
-            'roundIndex': agentToolRoundIndex(taskId),
-            if (entryId != null)
-              'streamMeta': streamMetaForEntry(
-                entryId,
-                agentToolRoundIndex(taskId),
-                'tool_progress',
-                taskId,
-              ),
-            ...raw,
-            if (entryId != null) 'cardId': entryId,
-          }),
-        ];
-      case 'onAgentToolCallComplete':
-        final entryId = (raw['cardId'] ?? '').toString().trim().isNotEmpty
-            ? (raw['cardId'] ?? '').toString().trim()
-            : agentActiveToolEntryIds.remove(taskId);
-        agentPendingNextTextRound[taskId] = true;
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'tool_completed',
-            'entryId': entryId,
-            'roundIndex': agentToolRoundIndex(taskId),
-            if (entryId != null)
-              'streamMeta': streamMetaForEntry(
-                entryId,
-                agentToolRoundIndex(taskId),
-                'tool_completed',
-                taskId,
-              ),
-            ...raw,
-            if (entryId != null) 'cardId': entryId,
-          }),
-        ];
-      case 'onAgentError':
-        final existingEntryId = agentActiveTextEntryIds[taskId];
-        final errorText = (raw['error'] ?? '').toString();
-        if (existingEntryId == null) {
-          final roundIndex = (agentTextRounds[taskId] ?? 0) + 1;
-          agentTextRounds[taskId] = roundIndex;
-          final entryId = agentTextEntryId(taskId, roundIndex);
-          agentActiveTextEntryIds[taskId] = entryId;
-          return <MethodCall>[
-            streamCall(<String, dynamic>{
-              'kind': 'text_snapshot',
-              'entryId': entryId,
-              'roundIndex': roundIndex,
-              'text': errorText,
-              'isFinal': true,
-              'streamMeta': streamMetaForEntry(
-                entryId,
-                roundIndex,
-                'text_snapshot',
-                taskId,
-              ),
-            }),
-            streamCall(<String, dynamic>{
-              'kind': 'error',
-              'entryId': entryId,
-              'roundIndex': roundIndex,
-              'error': errorText,
-              'persistAsError': true,
-              'streamMeta': streamMetaForEntry(
-                entryId,
-                roundIndex,
-                'error',
-                taskId,
-              ),
-            }),
-          ];
-        }
-        return <MethodCall>[
-          streamCall(<String, dynamic>{
-            'kind': 'error',
-            'entryId': existingEntryId,
-            'roundIndex': agentTextRounds[taskId] ?? 1,
-            'error': errorText,
-            'persistAsError': false,
-            'streamMeta': streamMetaForEntry(
-              existingEntryId,
-              agentTextRounds[taskId] ?? 1,
-              'error',
-              taskId,
-            ),
-          }),
-        ];
-      default:
-        return <MethodCall>[MethodCall(method, arguments)];
-    }
+  void completePrompt(
+    int conversationId, {
+    required String turnId,
+    String? sessionId,
+    String mode = kChatRuntimeModeAgent,
+    Map<String, dynamic> params = const {},
+  }) {
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: mode,
+    )!;
+    coordinator.applyAcpPromptResponse(
+      taskId: runtime.activeRunId ?? runtime.currentDispatchTurnId ?? turnId,
+      conversationId: conversationId,
+      mode: mode,
+      sessionId: sessionId ?? runtime.activeAcpSessionId,
+      turnId: turnId,
+      stopReason: params['stopReason'] as String? ?? 'end_turn',
+    );
   }
 
   Future<void> emitPlatformEvent(String method, [dynamic arguments]) async {
-    final calls =
-        method.startsWith('onAgent') &&
-            method != 'onAgentPromptTokenUsageChanged' &&
-            method != 'onAgentContextCompactionStateChanged' &&
-            method != 'onAgentStreamEvent'
-        ? mapLegacyAgentEvent(method, arguments)
-        : <MethodCall>[MethodCall(method, arguments)];
-    for (final call in calls) {
-      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .handlePlatformMessage(
-            channelName,
-            codec.encodeMethodCall(call),
-            (ByteData? _) {},
-          );
-      await Future<void>.delayed(Duration.zero);
-    }
-  }
-
-  List<String> visibleMessageIds(ChatConversationRuntimeState runtime) {
-    return runtime.messages
-        .map((message) => message.id)
-        .toList()
-        .reversed
-        .toList();
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          channelName,
+          codec.encodeMethodCall(MethodCall(method, arguments)),
+          (ByteData? _) {},
+        );
+    await Future<void>.delayed(Duration.zero);
   }
 
   setUp(() async {
     coordinator.resetForTest();
+    await VoicePlaybackCoordinator.instance.debugResetForTest();
     recordedMethodCalls.clear();
-    agentStreamSeq = 0;
-    agentThinkingRounds.clear();
-    agentTextRounds.clear();
-    agentPendingNextTextRound.clear();
-    agentActiveThinkingEntryIds.clear();
-    agentActiveTextEntryIds.clear();
-    agentActiveToolEntryIds.clear();
-    agentToolSequences.clear();
-    agentEntryOrderSeqs.clear();
-    agentEntrySeq = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(methodChannel, (call) async {
           recordedMethodCalls.add(call);
-          return 'SUCCESS';
+          switch (call.method) {
+            case 'getConversations':
+              return <Map<String, dynamic>>[];
+            case 'getSceneModelBindings':
+              return <Map<String, dynamic>>[];
+            case 'getSceneVoiceConfig':
+              return <String, dynamic>{'autoPlay': false};
+            default:
+              return 'SUCCESS';
+          }
         });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(voiceChannel, (call) async => true);
     coordinator.ensureInitialized();
   });
 
   tearDown(() async {
     coordinator.resetForTest();
+    await VoicePlaybackCoordinator.instance.debugResetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(methodChannel, null);
-  });
-
-  test('routes agent chat updates to the bound conversation only', () async {
-    const conversationA = 1001;
-    const conversationB = 1002;
-    const taskId = 'agent-task-a';
-
-    coordinator.ensureRuntime(
-      conversationId: conversationA,
-      mode: kChatRuntimeModeNormal,
-    );
-    coordinator.ensureRuntime(
-      conversationId: conversationB,
-      mode: kChatRuntimeModeNormal,
-    );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationA,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    final runtimeA = coordinator.runtimeFor(
-      conversationId: conversationA,
-      mode: kChatRuntimeModeNormal,
-    )!;
-    runtimeA.currentDispatchTaskId = taskId;
-
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': 'hello from agent',
-      'isFinal': true,
-      'prefillTokensPerSecond': 123.4,
-      'decodeTokensPerSecond': 56.7,
-    });
-
-    final runtimeB = coordinator.runtimeFor(
-      conversationId: conversationB,
-      mode: kChatRuntimeModeNormal,
-    )!;
-
-    expect(runtimeA.messages, hasLength(1));
-    expect(runtimeA.messages.first.id, '$taskId-text');
-    expect(runtimeA.messages.first.text, 'hello from agent');
-    expect(runtimeA.messages.first.content?['prefillTokensPerSecond'], 123.4);
-    expect(runtimeA.messages.first.content?['decodeTokensPerSecond'], 56.7);
-    expect(runtimeB.messages, isEmpty);
-  });
-
-  test('dedupes native agent user entry matching local user bubble', () {
-    const conversationId = 1003;
-    const createdAtMs = 1234567890000;
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-      initialMessages: <ChatMessageModel>[
-        ChatMessageModel(
-          id: '$createdAtMs-ai-user',
-          type: 1,
-          user: 1,
-          content: const <String, dynamic>{
-            'id': '$createdAtMs-ai-user',
-            'text': '确认',
-          },
-          createAt: DateTime.fromMillisecondsSinceEpoch(createdAtMs + 120),
-        ),
-        ChatMessageModel(
-          id: '$createdAtMs-user',
-          type: 1,
-          user: 1,
-          content: const <String, dynamic>{
-            'id': '$createdAtMs-user',
-            'text': '确认',
-          },
-          createAt: DateTime.fromMillisecondsSinceEpoch(createdAtMs),
-        ),
-      ],
-    );
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.single.id, '$createdAtMs-user');
-    expect(runtime.messages.single.text, '确认');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(voiceChannel, null);
   });
 
   test(
-    'adopts scheduled subagent stream events for an opened conversation runtime',
-    () async {
-      const conversationId = 1010;
-      const taskId = 'subagent_schedule_123_schedule-news';
+    'host-bound commands arrive before a prompt without creating a turn',
+    () {
+      Map<String, dynamic> commands(String session, bool admitted) => {
+        'method': 'session/update',
+        'threadId': session,
+        'allowImplicitTurnAdmission': admitted,
+        'params': {
+          'sessionId': session,
+          'update': {
+            'sessionUpdate': 'available_commands_update',
+            'availableCommands': [
+              {'name': 'compact', 'description': 'Compact context'},
+            ],
+          },
+        },
+      };
+      final rejected = coordinator.applyAgentEvent(
+        conversationId: 2002,
+        event: commands('unknown', false),
+      );
+      expect(rejected.handled, isFalse);
+      final accepted = coordinator.applyAgentEvent(
+        conversationId: 2002,
+        event: commands('bound', true),
+      );
+      expect(accepted.handled, isTrue);
+      final runtime = coordinator.runtimeFor(
+        conversationId: 2002,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(runtime.availableAcpCommands.single['name'], 'compact');
+      expect(runtime.activeAcpSessionId, 'bound');
+      expect(runtime.activeAcpTurnId, isNull);
+      expect(runtime.isAiResponding, isFalse);
+      runtime.retiredAcpSessionIds.add('old');
+      expect(
+        coordinator
+            .applyAgentEvent(conversationId: 2002, event: commands('old', true))
+            .handled,
+        isFalse,
+      );
+      expect(runtime.activeAcpSessionId, 'bound');
+    },
+  );
 
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
+  test('renders ACP assistant, reasoning, and tool updates in one turn', () {
+    const conversationId = 2002;
+    const turnId = 'turn-xiaowan';
+    applyAcp(conversationId, 'turn/started', turnId: turnId);
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: turnId,
+      params: <String, dynamic>{
+        'sessionId': turnId,
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_thought_chunk',
+          'messageId': 'thought-1',
+          'content': <String, dynamic>{'text': '先分析任务。'},
+        },
+      },
+    );
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: turnId,
+      params: <String, dynamic>{
+        'sessionId': turnId,
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'message-1',
+          'content': <String, dynamic>{'text': '已经开始处理。'},
+        },
+      },
+    );
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: turnId,
+      params: <String, dynamic>{
+        'sessionId': turnId,
+        'update': <String, dynamic>{
+          'sessionUpdate': 'tool_call',
+          'toolCallId': 'tool-1',
+          'kind': 'execute',
+          'title': '检查工作区',
+          'status': 'running',
+        },
+      },
+    );
+
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(runtime.messages.any((message) => message.user == 2), isTrue);
+    expect(
+      runtime.messages.any(
+        (message) => message.cardData?['type'] == 'deep_thinking',
+      ),
+      isTrue,
+    );
+    expect(
+      runtime.messages.any(
+        (message) => message.cardData?['type'] == 'agent_tool_summary',
+      ),
+      isTrue,
+    );
+    expect(runtime.isAiResponding, isTrue);
+  });
+
+  test('projects the official session prompt response without turn events', () {
+    const conversationId = 2048;
+    coordinator.beginAcpTurn(
+      taskId: 'local-prompt',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.bindAcpSession(
+      taskId: 'local-prompt',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      sessionId: 'session-official',
+    );
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: acpEvent(
+        'turn/started',
+        turnId: 'turn-official',
+        sessionId: 'session-official',
+      ),
+    );
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: acpEvent(
+        'session/update',
+        turnId: 'turn-official',
+        sessionId: 'session-official',
+        params: <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'message-official',
+            'content': <String, dynamic>{'text': 'ACP 输出'},
+          },
+        },
+      ),
+    );
+    final result = coordinator.applyAcpPromptResponse(
+      taskId: 'local-prompt',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      sessionId: 'session-official',
+      turnId: 'turn-official',
+      stopReason: 'end_turn',
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+
+    expect(result.method, 'session/prompt');
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+    expect(runtime.messages.any((message) => message.text == 'ACP 输出'), isTrue);
+  });
+
+  test(
+    'persists legacy normal ACP events into canonical agent history',
+    () async {
+      const conversationId = 2005;
+      const turnId = 'turn-xiaowan-normal-history';
+
+      applyAcp(
+        conversationId,
+        'turn/started',
+        turnId: turnId,
         mode: kChatRuntimeModeNormal,
-        conversation: ConversationModel(
-          id: conversationId,
-          mode: ConversationMode.subagent,
-          title: '新闻整理',
-          status: 0,
-          messageCount: 0,
-          createdAt: 1000,
-          updatedAt: 1000,
-        ),
+      );
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: turnId,
+        mode: kChatRuntimeModeNormal,
+        params: <String, dynamic>{
+          'sessionId': 'session-xiaowan-normal-history',
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'message-normal-history',
+            'content': <String, dynamic>{'text': '第一轮回复'},
+          },
+        },
       );
 
-      await emitPlatformEvent('onAgentStreamEvent', <String, dynamic>{
-        'taskId': taskId,
-        'conversationId': conversationId,
-        'conversationMode': ConversationMode.subagent.storageValue,
-        'seq': 1,
-        'kind': 'text_snapshot',
-        'entryId': '$taskId-text',
-        'roundIndex': 1,
-        'text': '定时任务正在整理新闻。',
-      });
+      await Future<void>.delayed(const Duration(milliseconds: 500));
 
-      expect(runtime.messages, hasLength(1));
-      expect(runtime.messages.single.id, '$taskId-text');
-      expect(runtime.messages.single.text, '定时任务正在整理新闻。');
-      expect(runtime.isAiResponding, isTrue);
-
-      await emitPlatformEvent('onAgentStreamEvent', <String, dynamic>{
-        'taskId': taskId,
-        'conversationId': conversationId,
-        'conversationMode': ConversationMode.subagent.storageValue,
-        'seq': 2,
-        'kind': 'completed',
-        'success': true,
-      });
-
-      expect(runtime.isAiResponding, isFalse);
+      final replaceCalls = recordedMethodCalls
+          .where((call) => call.method == 'replaceConversationMessages')
+          .toList();
+      expect(replaceCalls, isNotEmpty);
+      expect(replaceCalls.last.arguments['conversationId'], conversationId);
+      expect(
+        replaceCalls.last.arguments['mode'],
+        ConversationMode.agent.storageValue,
+      );
     },
   );
 
   test(
-    'finalizes latest streamed agent text after thinking and tool boundaries',
-    () async {
-      const conversationId = 1011;
-      const taskId = 'agent-task-interleaved-tool-final';
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
+    'begins a turn without a visible thinking placeholder before ACP output',
+    () {
+      const conversationId = 2003;
+      const taskId = 'local-task-before-acp';
+
+      coordinator.beginAcpTurn(
         taskId: taskId,
         conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
+        mode: kChatRuntimeModeAgent,
+      );
+      final generationAfterFirstBegin = coordinator
+          .runtimeFor(
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+          )!
+          .persistenceGeneration;
+      coordinator.beginAcpTurn(
+        taskId: taskId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
       );
 
-      Future<void> emitAgentStream(Map<String, dynamic> payload) {
-        return emitPlatformEvent('onAgentStreamEvent', <String, dynamic>{
-          'taskId': taskId,
-          'conversationId': conversationId,
-          'conversationMode': ConversationMode.normal.storageValue,
-          ...payload,
-        });
-      }
-
-      await emitAgentStream(<String, dynamic>{
-        'seq': 1,
-        'kind': 'thinking_started',
-        'entryId': '$taskId-thinking',
-        'roundIndex': 1,
-        'thinking': '',
-        'stage': 1,
-        'streamMeta': streamMetaForEntry(
-          '$taskId-thinking',
-          1,
-          'thinking_started',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 2,
-        'kind': 'thinking_snapshot',
-        'entryId': '$taskId-thinking',
-        'roundIndex': 1,
-        'thinking': '第一段思考',
-        'stage': 1,
-        'streamMeta': streamMetaForEntry(
-          '$taskId-thinking',
-          1,
-          'thinking_snapshot',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 3,
-        'kind': 'text_snapshot',
-        'entryId': '$taskId-text',
-        'roundIndex': 1,
-        'text': '第一段正文',
-        'isFinal': false,
-        'streamMeta': streamMetaForEntry(
-          '$taskId-text',
-          1,
-          'text_snapshot',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 4,
-        'kind': 'thinking_started',
-        'entryId': '$taskId-thinking-2',
-        'roundIndex': 2,
-        'thinking': '',
-        'stage': 1,
-        'streamMeta': streamMetaForEntry(
-          '$taskId-thinking-2',
-          2,
-          'thinking_started',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 5,
-        'kind': 'tool_started',
-        'entryId': '$taskId-tool-1',
-        'roundIndex': 2,
-        'cardId': '$taskId-tool-1',
-        'toolName': 'search',
-        'toolType': 'builtin',
-        'summary': '正在搜索',
-        'streamMeta': streamMetaForEntry(
-          '$taskId-tool-1',
-          2,
-          'tool_started',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 6,
-        'kind': 'tool_completed',
-        'entryId': '$taskId-tool-1',
-        'roundIndex': 2,
-        'cardId': '$taskId-tool-1',
-        'toolName': 'search',
-        'toolType': 'builtin',
-        'summary': '搜索完成',
-        'success': true,
-        'streamMeta': streamMetaForEntry(
-          '$taskId-tool-1',
-          2,
-          'tool_completed',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 7,
-        'kind': 'text_snapshot',
-        'entryId': '$taskId-text-2',
-        'roundIndex': 2,
-        'text': '第二段正文',
-        'isFinal': false,
-        'streamMeta': streamMetaForEntry(
-          '$taskId-text-2',
-          2,
-          'text_snapshot',
-          taskId,
-        ),
-      });
-      await emitAgentStream(<String, dynamic>{
-        'seq': 8,
-        'kind': 'completed',
-        'entryId': '$taskId-text-2',
-        'roundIndex': 2,
-        'success': true,
-      });
-
-      final firstText = runtime.messages.singleWhere(
-        (message) => message.id == '$taskId-text',
-      );
-      final finalText = runtime.messages.singleWhere(
-        (message) => message.id == '$taskId-text-2',
-      );
-      expect(firstText.streamMeta?['isFinal'], isFalse);
-      expect(finalText.streamMeta?['isFinal'], isTrue);
-
-      final group = buildAgentRunTimelineEntries(
-        runtime.messages,
-      ).singleWhere((entry) => entry.group?.taskId == taskId).group!;
-      // Both prose messages stay in the conversation, in the order the agent
-      // wrote them; only the thinking and tool cards fold.
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(runtime.persistenceGeneration, generationAfterFirstBegin);
+      expect(runtime.isAiResponding, isTrue);
+      expect(runtime.currentDispatchTurnId, taskId);
       expect(
-        group.visibleMessagesOldestFirst.map((message) => message.id),
-        <String>['$taskId-text', '$taskId-text-2'],
-      );
-      expect(
-        group.processMessagesOldestFirst.map((message) => message.id),
-        containsAll(<String>[
-          '$taskId-thinking',
-          '$taskId-thinking-2',
-          '$taskId-tool-1',
-        ]),
+        runtime.messages
+            .where((message) => message.cardData?['type'] == 'deep_thinking')
+            .length,
+        0,
       );
     },
   );
 
-  test('persists codex runtime messages back to native history', () async {
-    const conversationId = 2001;
+  test(
+    'admits an official session update without wire turn id via host reservation',
+    () {
+      const conversationId = 2004;
+      const localRunId = 'local-reserved-turn';
+      coordinator.beginAcpTurn(
+        taskId: localRunId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+
+      final result = coordinator.applyAgentEvent(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        event: <String, dynamic>{
+          'method': 'session/update',
+          'allowImplicitTurnAdmission': true,
+          'params': <String, dynamic>{
+            'sessionId': 'session-no-wire-turn',
+            'update': <String, dynamic>{
+              'sessionUpdate': 'agent_message_chunk',
+              'messageId': 'message-no-wire-turn',
+              'content': <String, dynamic>{
+                'type': 'text',
+                'text': '标准 ACP session/update',
+              },
+            },
+          },
+        },
+      );
+
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(result.handled, isTrue);
+      expect(runtime.messages.single.text, '标准 ACP session/update');
+      expect(runtime.activeAcpSessionId, 'session-no-wire-turn');
+      expect(runtime.activeAcpTurnId, isNull);
+      expect(runtime.activeRunId, localRunId);
+    },
+  );
+
+  test('keeps the local run identity separate from the official ACP turn', () {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 2008,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    runtime.currentDispatchTurnId = 'local-run-1';
+    runtime.activeAcpTurnId = 'acp-turn-1';
+
+    expect(runtime.activeRunId, 'local-run-1');
+    expect(runtime.currentDispatchTurnId, 'local-run-1');
+    expect(runtime.activeAcpTurnId, 'acp-turn-1');
+
+    runtime.currentDispatchTurnId = null;
+    expect(runtime.activeRunId, isNull);
+    expect(runtime.activeAcpTurnId, 'acp-turn-1');
+  });
+
+  test('projection buffers do not keep a completed runtime in flight', () {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 2009,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    // A stream can terminate between writing a chunk and clearing its cache.
+    // Those buffers must not become a second lifecycle fact source.
+    runtime.currentAiMessages['message-1'] = 'partial answer';
+    runtime.currentThinkingMessages['message-1'] = 'partial reasoning';
+
+    expect(runtime.hasInFlightTask, isFalse);
+    expect(runtime.activeAgentTurnIds, isEmpty);
+  });
+
+  test('routes ACP lifecycle by admitted turn identity', () {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 42,
+      mode: kChatRuntimeModeNormal,
+    );
+    runtime.activeAcpTurnId = 'turn-normal-1';
+    runtime.currentDispatchTurnId = 'turn-normal-1';
+
+    expect(
+      coordinator.modeForAcpEvent(conversationId: 42, turnId: 'turn-normal-1'),
+      kChatRuntimeModeNormal,
+    );
+    expect(
+      coordinator.modeForAcpEvent(conversationId: 42, turnId: 'turn-agent-1'),
+      isNull,
+    );
+  });
+
+  test('retains ACP dedupe and turn ownership across a long conversation', () {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 4201,
+      mode: kChatRuntimeModeAgent,
+    );
+    for (var index = 0; index < 700; index += 1) {
+      runtime.rememberProcessedAcpEventId('event-$index');
+      runtime.rememberCompletedAcpTurn('turn-$index');
+      runtime.resolveRunId(
+        sessionId: 'session-$index',
+        turnId: 'turn-$index',
+        fallback: 'run-$index',
+      );
+    }
+
+    expect(runtime.processedAcpEventIds, hasLength(700));
+    expect(runtime.completedAcpTurnIds, hasLength(700));
+    expect(runtime.acpTurnToRunIds, hasLength(700));
+    expect(runtime.processedAcpEventIds, contains('event-0'));
+    expect(runtime.processedAcpEventIds, contains('event-699'));
+    expect(
+      runtime.resolveKnownRunId(sessionId: 'session-0', turnId: 'turn-0'),
+      'run-0',
+    );
+    expect(
+      runtime.resolveKnownRunId(sessionId: 'session-699', turnId: 'turn-699'),
+      'run-699',
+    );
+  });
+
+  test('routes a known legacy process to its owning conversation', () {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 4202,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.standaloneProcessOwner('process-known', 'turn-1');
+
+    expect(
+      coordinator.conversationIdForStandaloneProcess('process-known'),
+      4202,
+    );
+    expect(
+      coordinator.conversationIdForStandaloneProcess('process-unknown'),
+      isNull,
+    );
+  });
+
+  test('does not restore a completed run as an active timeline group', () {
+    const conversationId = 2004;
     final runtime = coordinator.ensureRuntime(
       conversationId: conversationId,
       mode: kChatRuntimeModeAgent,
     );
-    runtime.messages.insert(0, ChatMessageModel.userMessage('第一句标题应该保留'));
+    runtime.isAiResponding = true;
+    runtime.isExecutingTask = true;
+    runtime.currentDispatchTurnId = 'completed-run';
+    runtime.activeRunId = 'completed-run';
+    runtime.lastAgentTurnId = 'completed-run';
+    runtime.activeAcpSessionId = 'old-session';
 
-    await coordinator.applyAgentEvent(
+    coordinator.replaceConversationSnapshot(
       conversationId: conversationId,
-      event: {
-        'message': {
-          'method': 'item/agentMessage/delta',
-          'params': {'turnId': 'turn-1', 'delta': 'Codex reply'},
+      mode: kChatRuntimeModeAgent,
+      messages: <ChatMessageModel>[ChatMessageModel.userMessage('已经完成的请求')],
+      isAiResponding: false,
+      isExecutingTask: false,
+      currentDispatchTurnId: null,
+      lastAgentTurnId: null,
+    );
+
+    expect(runtime.activeAgentTurnIds, isEmpty);
+    expect(runtime.activeRunId, isNull);
+    expect(runtime.currentDispatchTurnId, isNull);
+    expect(runtime.activeAcpSessionId, isNull);
+  });
+
+  test('an idle snapshot cannot demote an admitted ACP turn', () {
+    const conversationId = 2005;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.registerTask(
+      taskId: 'live-run',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: 'live-run',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.activeAcpSessionId = 'live-session';
+    runtime.activeAcpTurnId = 'official-live-turn';
+    runtime.messages.add(
+      ChatMessageModel.userMessage('正在执行的请求', id: 'live-user'),
+    );
+    expect(
+      coordinator.isTaskActive(
+        taskId: 'live-run',
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      ),
+      isTrue,
+    );
+
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      messages: <ChatMessageModel>[
+        ChatMessageModel.userMessage('旧的历史快照', id: 'history-user'),
+      ],
+      isAiResponding: false,
+      isExecutingTask: false,
+    );
+
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.currentDispatchTurnId, 'live-run');
+    expect(runtime.activeRunId, 'live-run');
+    expect(runtime.activeAcpSessionId, 'live-session');
+    expect(runtime.activeAcpTurnId, 'official-live-turn');
+    expect(
+      runtime.messages.map((message) => message.text),
+      containsAll(<String>['正在执行的请求', '旧的历史快照']),
+    );
+  });
+
+  test('a snapshot with running flags cannot clear the admitted ACP identity', () {
+    const conversationId = 20051;
+    final runtime = coordinator.ensureRuntime(conversationId: conversationId, mode: kChatRuntimeModeAgent);
+    coordinator.registerTask(taskId: 'host-run', conversationId: conversationId, mode: kChatRuntimeModeAgent);
+    coordinator.beginAcpTurn(taskId: 'host-run', conversationId: conversationId, mode: kChatRuntimeModeAgent);
+    runtime.activeAcpSessionId = 'official-session';
+    runtime.activeAcpTurnId = 'official-turn';
+    final latest = ChatMessageModel.assistantMessage('latest streamed output', id: 'item');
+    runtime.messages.add(latest);
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId, mode: kChatRuntimeModeAgent,
+      messages: [ChatMessageModel.assistantMessage('stale output', id: 'item')],
+      isAiResponding: true, currentDispatchTurnId: 'host-run',
+    );
+    expect(runtime.activeAcpSessionId, 'official-session');
+    expect(runtime.activeAcpTurnId, 'official-turn');
+    expect(runtime.messages.single, same(latest));
+    expect(runtime.hasInFlightTask, isTrue);
+  });
+
+  test('an authoritative idle snapshot can finish only its matching turn', () {
+    const conversationId = 2008;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.registerTask(
+      taskId: 'remote-run',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: 'remote-run',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.activeAcpSessionId = 'remote-thread';
+    runtime.activeAcpTurnId = 'remote-turn';
+
+    expect(
+      coordinator.finishTaskFromAuthoritativeSnapshot(
+        taskId: 'remote-run',
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        sessionId: 'other-thread',
+        turnId: 'remote-turn',
+      ),
+      isFalse,
+    );
+    expect(runtime.isAiResponding, isTrue);
+
+    expect(
+      coordinator.finishTaskFromAuthoritativeSnapshot(
+        taskId: 'remote-run',
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        sessionId: 'remote-thread',
+        turnId: 'remote-turn',
+      ),
+      isTrue,
+    );
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeRunId, isNull);
+    expect(runtime.activeAcpTurnId, isNull);
+  });
+
+  test(
+    'expires persisted ACP request cards when restoring an idle session',
+    () {
+      const conversationId = 2006;
+      final runtime = coordinator.ensureRuntime(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+
+      coordinator.replaceConversationSnapshot(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        messages: <ChatMessageModel>[
+          ChatMessageModel(
+            id: 'request-card-1',
+            type: 2,
+            user: 3,
+            content: <String, dynamic>{
+              'cardData': <String, dynamic>{
+                'type': 'agent_request',
+                'requestId': 'request-1',
+                'status': 'pending',
+                'requestKind': 'user_input',
+              },
+            },
+          ),
+        ],
+        isAiResponding: false,
+        isExecutingTask: false,
+      );
+
+      final card = runtime.messages.single.cardData!;
+      expect(card['status'], 'expired');
+      expect(card['interactionUnavailable'], isTrue);
+      expect(card['interactionUnavailableReason'], 'session_ended');
+    },
+  );
+
+  for (final preserveLive in [false, true]) {
+    test('terminal historical requests stay closed during active restore $preserveLive', () {
+      final runtime = coordinator.ensureRuntime(conversationId: 2018, mode: kChatRuntimeModeAgent);
+      coordinator.replaceConversationSnapshot(
+        conversationId: 2018, mode: kChatRuntimeModeAgent,
+        isAiResponding: true, preserveLiveStreamingState: preserveLive,
+        messages: [
+          for (final id in ['old', 'answered', 'current'])
+            ChatMessageModel(id: id, type: 2, user: 3,
+              content: {'extra': 'preserve', 'cardData': {
+                'type': 'agent_request', 'requestId': id,
+                'status': id == 'answered' ? 'accepted' : 'pending',
+              }},
+              streamMeta: {'parentTaskId': id == 'current' ? 'new-turn' : 'old-turn',
+                if (id != 'current') 'stopReason': 'cancelled'},
+            ),
+        ],
+      );
+      {
+        final index = runtime.messages.indexWhere((m) => m.id == 'old');
+        final old = runtime.messages[index];
+        runtime.messages[index] = old.copyWith(content: {
+          ...?old.content,
+          'cardData': {'type': 'agent_request', 'requestId': 'old', 'status': 'pending'},
+        });
+        coordinator.replaceConversationSnapshot(
+          conversationId: 2018, mode: kChatRuntimeModeAgent,
+          messages: preserveLive ? [] : runtime.messages.map((m) =>
+            m.id == 'old' ? m.copyWith(streamMeta: {'parentTaskId': 'old-turn'}) : m).toList(),
+          isAiResponding: true, preserveLiveStreamingState: preserveLive,
+        );
+      }
+      final byId = {for (final m in runtime.messages) m.id: m};
+      expect(byId['old']!.cardData!['status'], 'cancelled');
+      expect(byId['old']!.cardData!['interactionUnavailable'], true);
+      expect(byId['old']!.content!['extra'], 'preserve');
+      expect(byId['answered']!.cardData!['status'], 'accepted');
+      expect(byId['current']!.cardData!['status'], 'pending');
+      expect(byId['current']!.cardData!['interactionUnavailable'], isNull);
+    });
+  }
+
+  test('keeps a live ACP request card pending during an active snapshot', () {
+    const conversationId = 2007;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      messages: <ChatMessageModel>[
+        ChatMessageModel(
+          id: 'request-card-live',
+          type: 2,
+          user: 3,
+          content: <String, dynamic>{
+            'cardData': <String, dynamic>{
+              'type': 'agent_request',
+              'requestId': 'request-live',
+              'status': 'pending',
+              'requestKind': 'user_input',
+            },
+          },
+        ),
+      ],
+      isAiResponding: true,
+      isExecutingTask: true,
+    );
+
+    expect(runtime.messages.single.cardData?['status'], 'pending');
+    expect(runtime.messages.single.cardData?['interactionUnavailable'], isNull);
+  });
+
+  test('binds ACP events to one session as well as one turn', () {
+    const conversationId = 43;
+    applyAcp(
+      conversationId,
+      'turn/started',
+      turnId: 'turn-current',
+      sessionId: 'session-current',
+    );
+
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(runtime.activeAcpSessionId, 'session-current');
+    expect(
+      coordinator.modeForAcpEvent(
+        conversationId: conversationId,
+        sessionId: 'session-current',
+      ),
+      kChatRuntimeModeAgent,
+    );
+
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: 'turn-stale',
+      sessionId: 'session-old',
+      params: <String, dynamic>{
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'stale-message',
+          'content': <String, dynamic>{'text': 'stale'},
+        },
+      },
+    );
+
+    expect(runtime.messages, isEmpty);
+
+    runtime.activeAcpTurnId = null;
+    runtime.currentDispatchTurnId = 'local-new-turn';
+    runtime.isAiResponding = true;
+    applyAcp(
+      conversationId,
+      'session/update',
+      sessionId: 'session-next',
+      turnId: 'late-old-turn',
+      params: <String, dynamic>{'delta': 'new session'},
+    );
+    expect(runtime.activeAcpSessionId, 'session-current');
+
+    applyAcp(
+      conversationId,
+      'turn/started',
+      turnId: 'turn-next',
+      sessionId: 'session-next',
+    );
+    expect(runtime.activeAcpSessionId, 'session-next');
+  });
+
+  test('does not let a completed old session reclaim a new Xiaowan turn', () {
+    const conversationId = 44;
+    applyAcp(
+      conversationId,
+      'turn/started',
+      turnId: 'turn-xiaowan-old',
+      sessionId: 'session-xiaowan-old',
+    );
+    completePrompt(
+      conversationId,
+      turnId: 'turn-xiaowan-old',
+      sessionId: 'session-xiaowan-old',
+    );
+
+    coordinator.primeAcpThinking(
+      taskId: 'local-xiaowan-new',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: 'turn-xiaowan-old',
+      sessionId: 'session-xiaowan-old',
+      params: <String, dynamic>{
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'late-old-message',
+          'content': <String, dynamic>{'text': '旧会话延迟输出'},
+        },
+      },
+    );
+
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(runtime.activeAcpSessionId, 'session-xiaowan-old');
+    expect(
+      runtime.messages.where((message) => message.text == '旧会话延迟输出'),
+      isEmpty,
+    );
+
+    applyAcp(
+      conversationId,
+      'turn/started',
+      turnId: 'turn-xiaowan-new',
+      sessionId: 'session-xiaowan-new',
+    );
+    expect(runtime.activeAcpSessionId, 'session-xiaowan-new');
+    expect(runtime.activeAcpTurnId, 'turn-xiaowan-new');
+  });
+
+  test(
+    'ignores a stale private terminal event without claiming the current turn',
+    () {
+      const conversationId = 45;
+      applyAcp(
+        conversationId,
+        'turn/started',
+        turnId: 'turn-current',
+        sessionId: 'session-current',
+      );
+
+      final result = coordinator.applyAgentEvent(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        event: acpEvent(
+          'turn/completed',
+          turnId: 'turn-old',
+          sessionId: 'session-current',
+        ),
+      );
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+
+      expect(result.handled, isFalse);
+      expect(result.affectsActiveTurn, isFalse);
+      expect(runtime.activeAcpTurnId, 'turn-current');
+      expect(runtime.isAiResponding, isTrue);
+      // A stale event must not learn the current render id merely because the
+      // current turn is active. Otherwise a later stale update can be
+      // projected into the new turn's message/card scope.
+      expect(
+        runtime.acpTurnToRunIds.keys,
+        isNot(contains('session-current:turn-old')),
+      );
+    },
+  );
+
+  test('marks an event from a rejected session as not current-turn-owned', () {
+    const conversationId = 46;
+    applyAcp(
+      conversationId,
+      'turn/started',
+      turnId: 'turn-current',
+      sessionId: 'session-current',
+    );
+
+    final result = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: acpEvent(
+        'session/update',
+        turnId: 'turn-old',
+        sessionId: 'session-old',
+        params: <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'content': <String, dynamic>{'type': 'text', 'text': '旧输出'},
+          },
+        },
+      ),
+    );
+
+    expect(result.handled, isFalse);
+    expect(result.affectsActiveTurn, isFalse);
+  });
+
+  test('rejects a new unscoped ACP turn without host admission', () {
+    const conversationId = 47;
+    coordinator.beginAcpTurn(
+      taskId: 'local-reservation',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    final result = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: <String, dynamic>{
+        'method': 'turn/started',
+        'turnId': 'unscoped-new-turn',
+        'params': <String, dynamic>{'turnId': 'unscoped-new-turn'},
+      },
+    );
+
+    expect(result.handled, isFalse);
+    expect(result.affectsActiveTurn, isFalse);
+    expect(
+      coordinator
+          .runtimeFor(
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+          )!
+          .activeAcpTurnId,
+      isNull,
+    );
+  });
+
+  test('keeps ACP turns isolated by conversation and finalizes them', () {
+    const firstConversation = 2101;
+    const secondConversation = 2102;
+    coordinator.beginAcpTurn(
+      taskId: 'turn-first',
+      conversationId: firstConversation,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: 'turn-second',
+      conversationId: secondConversation,
+      mode: kChatRuntimeModeAgent,
+    );
+    applyAcp(
+      firstConversation,
+      'session/update',
+      turnId: 'turn-first',
+      params: <String, dynamic>{
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'message-first',
+          'content': <String, dynamic>{'text': '第一条回复'},
+        },
+      },
+    );
+    applyAcp(
+      secondConversation,
+      'session/update',
+      turnId: 'turn-second',
+      params: <String, dynamic>{
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'message-second',
+          'content': <String, dynamic>{'text': '第二条回复'},
+        },
+      },
+    );
+    completePrompt(
+      firstConversation,
+      turnId: 'turn-first',
+      params: <String, dynamic>{'status': 'completed'},
+    );
+
+    final first = coordinator.runtimeFor(
+      conversationId: firstConversation,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    final second = coordinator.runtimeFor(
+      conversationId: secondConversation,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(first.messages.single.text, '第一条回复');
+    expect(first.isAiResponding, isFalse);
+    expect(second.messages.single.text, '第二条回复');
+    expect(second.isAiResponding, isTrue);
+  });
+
+  test(
+    'routes a session-only background reply to its original conversation after chat switching',
+    () {
+      const firstConversation = 2104;
+      const secondConversation = 2105;
+      const firstSession = 'session-first-background';
+      const secondSession = 'session-current-visible';
+
+      final first = coordinator.ensureRuntime(
+        conversationId: firstConversation,
+        mode: kChatRuntimeModeAgent,
+        initialMessages: <ChatMessageModel>[
+          ChatMessageModel.userMessage('请先整理第一份资料', id: 'first-user'),
+        ],
+      );
+      final second = coordinator.ensureRuntime(
+        conversationId: secondConversation,
+        mode: kChatRuntimeModeAgent,
+        initialMessages: <ChatMessageModel>[
+          ChatMessageModel.userMessage('我现在查看第二份资料', id: 'second-user'),
+        ],
+      );
+      applyAcp(
+        firstConversation,
+        'turn/started',
+        turnId: 'turn-first-background',
+        sessionId: firstSession,
+      );
+      applyAcp(
+        secondConversation,
+        'turn/started',
+        turnId: 'turn-second-visible',
+        sessionId: secondSession,
+      );
+
+      // The user is now viewing the second conversation.  A background ACP
+      // update may omit the host conversation id, so the established ACP
+      // session identity—not the visible page—must select its owner.
+      final owningConversation = coordinator.conversationIdForAcpEvent(
+        sessionId: firstSession,
+      );
+      expect(owningConversation, firstConversation);
+      coordinator.applyAgentEvent(
+        conversationId: owningConversation!,
+        mode: kChatRuntimeModeAgent,
+        event: acpEvent(
+          'session/update',
+          turnId: 'turn-first-background',
+          sessionId: firstSession,
+          params: const <String, dynamic>{
+            'update': <String, dynamic>{
+              'sessionUpdate': 'agent_message_chunk',
+              'messageId': 'first-background-answer',
+              'content': <String, dynamic>{
+                'type': 'text',
+                'text': '第一份资料已整理完成',
+              },
+            },
+          },
+        ),
+      );
+
+      expect(
+        first.messages.map((message) => message.text),
+        containsAll(<String>['请先整理第一份资料', '第一份资料已整理完成']),
+      );
+      expect(second.messages.map((message) => message.text), <String>[
+        '我现在查看第二份资料',
+      ]);
+      expect(first.activeAcpSessionId, firstSession);
+      expect(second.activeAcpSessionId, secondSession);
+    },
+  );
+
+  test(
+    'a cancelled prompt leaves the next user prompt intact when an old terminal event arrives late',
+    () {
+      const conversationId = 2106;
+      const firstTask = 'local-first-task';
+      const firstTurn = 'turn-first-cancelled';
+      const firstSession = 'session-first-cancelled';
+      const secondTask = 'local-second-task';
+      const secondTurn = 'turn-second-active';
+      const secondSession = 'session-second-active';
+      final runtime = coordinator.ensureRuntime(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        initialMessages: <ChatMessageModel>[
+          ChatMessageModel.userMessage('先分析第一件事', id: 'first-user'),
+        ],
+      );
+
+      coordinator.beginAcpTurn(
+        taskId: firstTask,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      applyAcp(
+        conversationId,
+        'turn/started',
+        turnId: firstTurn,
+        sessionId: firstSession,
+      );
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: firstTurn,
+        sessionId: firstSession,
+        params: const <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'first-answer',
+            'content': <String, dynamic>{'type': 'text', 'text': '第一件事的部分结果'},
+          },
+        },
+      );
+      completePrompt(
+        conversationId,
+        turnId: firstTurn,
+        sessionId: firstSession,
+        params: const <String, dynamic>{
+          'status': 'completed',
+          'stopReason': 'cancelled',
+        },
+      );
+      expect(runtime.isAiResponding, isFalse);
+
+      // The second user message is a new real prompt, never a replay of the
+      // cancelled first request.
+      runtime.messages.insert(
+        0,
+        ChatMessageModel.userMessage('改为处理第二件事', id: 'second-user'),
+      );
+      coordinator.beginAcpTurn(
+        taskId: secondTask,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      applyAcp(
+        conversationId,
+        'turn/started',
+        turnId: secondTurn,
+        sessionId: secondSession,
+      );
+
+      // A duplicated/late terminal event for the first ACP prompt must not
+      // retire or attribute the second one.
+      applyAcp(
+        conversationId,
+        'turn/completed',
+        turnId: firstTurn,
+        sessionId: firstSession,
+        params: const <String, dynamic>{
+          'status': 'completed',
+          'stopReason': 'cancelled',
+        },
+      );
+      expect(runtime.isAiResponding, isTrue);
+      expect(runtime.activeAcpTurnId, secondTurn);
+      expect(runtime.activeAcpSessionId, secondSession);
+
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: secondTurn,
+        sessionId: secondSession,
+        params: const <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'second-answer',
+            'content': <String, dynamic>{'type': 'text', 'text': '第二件事已完成'},
+          },
+        },
+      );
+      completePrompt(
+        conversationId,
+        turnId: secondTurn,
+        sessionId: secondSession,
+      );
+
+      expect(
+        runtime.messages.reversed.map((message) => message.text),
+        containsAllInOrder(<String>[
+          '先分析第一件事',
+          '第一件事的部分结果',
+          '改为处理第二件事',
+          '第二件事已完成',
+        ]),
+      );
+      expect(runtime.isAiResponding, isFalse);
+      expect(runtime.activeAcpTurnId, isNull);
+    },
+  );
+
+  for (final nextSession in <String>['first-session', 'second-session']) {
+    for (final lateStopReason in <String>['cancelled', 'error', 'end_turn']) {
+      for (final lateHasTurnId in <bool>[true, false]) {
+        test(
+          'official prompt cancellation preserves history: next=$nextSession late=$lateStopReason turnId=$lateHasTurnId',
+          () async {
+            const conversationId = 2110;
+            final runtime = coordinator.ensureRuntime(
+              conversationId: conversationId,
+              mode: kChatRuntimeModeAgent,
+              initialMessages: <ChatMessageModel>[
+                ChatMessageModel.userMessage('请整理第一份资料', id: 'first-user'),
+              ],
+            );
+            coordinator.beginAcpTurn(
+              taskId: 'first-request',
+              conversationId: conversationId,
+              mode: kChatRuntimeModeAgent,
+            );
+            expect(
+              coordinator.bindAcpSession(
+                taskId: 'first-request',
+                conversationId: conversationId,
+                mode: kChatRuntimeModeAgent,
+                sessionId: 'first-session',
+              ),
+              isTrue,
+            );
+            applyAcp(
+              conversationId,
+              'session/update',
+              turnId: 'first-turn',
+              sessionId: 'first-session',
+              hostAssignedTurn: true,
+              params: const <String, dynamic>{
+                'update': <String, dynamic>{
+                  'sessionUpdate': 'agent_message_chunk',
+                  'messageId': 'first-answer',
+                  'content': <String, dynamic>{
+                    'type': 'text',
+                    'text': '第一份资料的部分结果',
+                  },
+                },
+              },
+            );
+            expect(runtime.activeAcpTurnId, 'first-turn');
+            coordinator.applyAcpPromptResponse(
+              taskId: 'first-request',
+              conversationId: conversationId,
+              sessionId: 'first-session',
+              turnId: 'first-turn',
+              stopReason: 'cancelled',
+            );
+            expect(runtime.isAiResponding, isFalse);
+
+            runtime.messages.insert(
+              0,
+              ChatMessageModel.userMessage('改为处理第二份资料', id: 'second-user'),
+            );
+            coordinator.beginAcpTurn(
+              taskId: 'second-request',
+              conversationId: conversationId,
+              mode: kChatRuntimeModeAgent,
+            );
+            expect(
+              coordinator.bindAcpSession(
+                taskId: 'second-request',
+                conversationId: conversationId,
+                mode: kChatRuntimeModeAgent,
+                sessionId: nextSession,
+              ),
+              isTrue,
+            );
+            // No synthetic turn/started or turn/completed events: a delayed result
+            // must be attributed to its original official prompt request, even
+            // before the next prompt has produced its first session/update.
+            final lateResult = coordinator.applyAcpPromptResponse(
+              taskId: 'first-request',
+              conversationId: conversationId,
+              sessionId: 'first-session',
+              turnId: lateHasTurnId ? 'first-turn' : null,
+              stopReason: lateStopReason,
+              error: lateStopReason == 'error'
+                  ? 'Old ACP transport disconnected'
+                  : null,
+            );
+            expect(lateResult.handled, isFalse);
+            expect(runtime.isAiResponding, isTrue);
+            expect(runtime.activeAcpSessionId, nextSession);
+            expect(
+              coordinator.isTaskActive(
+                taskId: 'second-request',
+                conversationId: conversationId,
+                mode: kChatRuntimeModeAgent,
+              ),
+              isTrue,
+            );
+
+            applyAcp(
+              conversationId,
+              'session/update',
+              turnId: 'second-turn',
+              sessionId: nextSession,
+              hostAssignedTurn: true,
+              params: const <String, dynamic>{
+                'update': <String, dynamic>{
+                  'sessionUpdate': 'agent_message_chunk',
+                  'messageId': 'second-answer',
+                  'content': <String, dynamic>{
+                    'type': 'text',
+                    'text': '第二份资料已完成',
+                  },
+                },
+              },
+            );
+            final lateAfterOutput = coordinator.applyAcpPromptResponse(
+              taskId: 'first-request',
+              conversationId: conversationId,
+              sessionId: 'first-session',
+              turnId: lateHasTurnId ? 'first-turn' : null,
+              stopReason: lateStopReason,
+              error: lateStopReason == 'error'
+                  ? 'Old ACP transport disconnected'
+                  : null,
+            );
+            expect(lateAfterOutput.handled, isFalse);
+            expect(runtime.isAiResponding, isTrue);
+            expect(runtime.activeAcpTurnId, 'second-turn');
+            coordinator.applyAcpPromptResponse(
+              taskId: 'second-request',
+              conversationId: conversationId,
+              sessionId: nextSession,
+              turnId: 'second-turn',
+              stopReason: 'end_turn',
+            );
+            expect(runtime.isAiResponding, isFalse);
+            final texts = runtime.messages.reversed.map(
+              (message) => message.text,
+            );
+            expect(
+              texts,
+              containsAllInOrder(<String>[
+                '请整理第一份资料',
+                '第一份资料的部分结果',
+                '改为处理第二份资料',
+                '第二份资料已完成',
+              ]),
+            );
+            expect(
+              runtime.messages.where((message) => message.id == 'first-user'),
+              hasLength(1),
+            );
+            expect(
+              runtime.messages.where((message) => message.id == 'second-user'),
+              hasLength(1),
+            );
+            await coordinator.flushPendingPersistence(
+              conversationId: conversationId,
+              mode: kChatRuntimeModeAgent,
+            );
+            final saved = Map<String, dynamic>.from(
+              recordedMethodCalls
+                      .lastWhere(
+                        (call) => call.method == 'replaceConversationMessages',
+                      )
+                      .arguments
+                  as Map,
+            );
+            expect(saved['conversationId'], conversationId);
+            final savedTexts = (saved['messages'] as List).map(
+              (message) => (message as Map)['content']?['text'],
+            );
+            expect(
+              savedTexts,
+              containsAll(texts.where((text) => text?.isNotEmpty == true)),
+            );
+          },
+        );
+      }
+    }
+  }
+
+  for (final legacyMethod in [
+    'state_change',
+    'state_update',
+    'thread/status/changed',
+    'turn/completed',
+    'turn/failed',
+    'thread/closed',
+    'error',
+    'legacy:completed',
+    'legacy:error',
+  ]) {
+    for (final stopReason in ['end_turn', 'cancelled', 'error']) {
+      test(
+        'legacy status cannot terminate the owning prompt: $legacyMethod $stopReason',
+        () {
+          const conversationId = 2110;
+          const taskId = 'status-request';
+          const sessionId = 'status-session';
+          coordinator.beginAcpTurn(
+            taskId: taskId,
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+          );
+          coordinator.bindAcpSession(
+            taskId: taskId,
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+            sessionId: sessionId,
+          );
+          final runtime = coordinator.runtimeFor(
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+          )!;
+          for (final status in ['running', 'idle', 'failed', 'cancelled']) {
+            coordinator.applyAgentEvent(
+              conversationId: conversationId,
+              mode: kChatRuntimeModeAgent,
+              event: {
+                if (legacyMethod.startsWith('legacy:')) ...{
+                  'kind': legacyMethod.split(':').last,
+                  'taskId': taskId,
+                  'error': 'legacy stream failure',
+                } else
+                  'method': legacyMethod.startsWith('state_')
+                      ? 'session/update'
+                      : legacyMethod,
+                'params': {
+                  'sessionId': sessionId,
+                  if (!legacyMethod.startsWith('state_')) ...{
+                    'status': status,
+                    'willRetry': status == 'running',
+                    'error': 'legacy status failure',
+                  } else
+                    'update': {
+                      'sessionUpdate': legacyMethod,
+                      'state': status,
+                      'stopReason': 'error',
+                      'error': 'legacy status failure',
+                    },
+                },
+              },
+            );
+            expect(runtime.isAiResponding, isTrue, reason: status);
+            expect(runtime.messages, isEmpty, reason: status);
+            expect(
+              coordinator.isTaskActive(
+                taskId: taskId,
+                conversationId: conversationId,
+                mode: kChatRuntimeModeAgent,
+              ),
+              isTrue,
+              reason: status,
+            );
+          }
+          final result = coordinator.applyAcpPromptResponse(
+            taskId: taskId,
+            conversationId: conversationId,
+            sessionId: sessionId,
+            stopReason: stopReason,
+            error: stopReason == 'error' ? 'real provider failure' : null,
+          );
+          expect(result.handled, isTrue);
+          expect(runtime.isAiResponding, isFalse);
+          final failures = runtime.messages.where(
+            (message) => message.cardData?['title'] == '本轮执行失败',
+          );
+          expect(failures, hasLength(stopReason == 'error' ? 1 : 0));
+          final messageCount = runtime.messages.length;
+          expect(
+            coordinator
+                .applyAcpPromptResponse(
+                  taskId: taskId,
+                  conversationId: conversationId,
+                  sessionId: sessionId,
+                  stopReason: 'error',
+                  error: 'late duplicate failure',
+                )
+                .handled,
+            isFalse,
+          );
+          expect(runtime.messages, hasLength(messageCount));
+        },
+      );
+    }
+  }
+
+  test(
+    'official cancellation after partial output survives reload and duplicate completion',
+    () {
+      const id = 2990;
+      final runtime = coordinator.ensureRuntime(
+        conversationId: id,
+        mode: kChatRuntimeModeAgent,
+      );
+      coordinator.beginAcpTurn(
+        taskId: 'cancel-request',
+        conversationId: id,
+        mode: kChatRuntimeModeAgent,
+      );
+      coordinator.bindAcpSession(
+        taskId: 'cancel-request',
+        conversationId: id,
+        mode: kChatRuntimeModeAgent,
+        sessionId: 'cancel-session',
+      );
+      applyAcp(
+        id,
+        'session/update',
+        turnId: 'cancel-turn',
+        sessionId: 'cancel-session',
+        hostAssignedTurn: true,
+        params: const {
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'partial',
+            'content': {'type': 'text', 'text': 'KEEP_PARTIAL'},
+          },
+        },
+      );
+      coordinator.applyAcpPromptResponse(
+        taskId: 'cancel-request',
+        conversationId: id,
+        sessionId: 'cancel-session',
+        turnId: 'cancel-turn',
+        stopReason: 'cancelled',
+      );
+      expect(runtime.isAiResponding, isFalse);
+      final restored = runtime.messages
+          .map((m) => ChatMessageModel.fromJson(m.toJson()))
+          .toList();
+      final group = buildAgentRunTimelineEntries(
+        restored,
+      ).where((e) => e.group != null).single.group!;
+      expect(group.status, AgentRunStatus.cancelled);
+      expect(
+        group.visibleMessagesOldestFirst.any((m) => m.text == 'KEEP_PARTIAL'),
+        isTrue,
+      );
+      expect(
+        coordinator
+            .applyAcpPromptResponse(
+              taskId: 'cancel-request',
+              conversationId: id,
+              sessionId: 'cancel-session',
+              turnId: 'cancel-turn',
+              stopReason: 'end_turn',
+            )
+            .handled,
+        isFalse,
+      );
+      expect(
+        runtime.messages
+            .where((m) => m.text == 'KEEP_PARTIAL')
+            .single
+            .streamMeta?['stopReason'],
+        'cancelled',
+      );
+    },
+  );
+
+  for (final stopReason in <String>['end_turn', 'cancelled', 'error']) {
+    test(
+      'official prompt without streamed output ends its own request: $stopReason',
+      () {
+        const conversationId = 2111;
+        final runtime = coordinator.ensureRuntime(
+          conversationId: conversationId,
+          mode: kChatRuntimeModeAgent,
+          initialMessages: <ChatMessageModel>[
+            ChatMessageModel.userMessage('执行这个请求', id: 'user-no-stream'),
+          ],
+        );
+        coordinator.beginAcpTurn(
+          taskId: 'request-no-stream',
+          conversationId: conversationId,
+          mode: kChatRuntimeModeAgent,
+        );
+        coordinator.bindAcpSession(
+          taskId: 'request-no-stream',
+          conversationId: conversationId,
+          mode: kChatRuntimeModeAgent,
+          sessionId: 'session-no-stream',
+        );
+        final result = coordinator.applyAcpPromptResponse(
+          taskId: 'request-no-stream',
+          conversationId: conversationId,
+          sessionId: 'session-no-stream',
+          stopReason: stopReason,
+        );
+        expect(result.handled, isTrue);
+        expect(runtime.isAiResponding, isFalse);
+        expect(
+          runtime.messages.where((message) => message.id == 'user-no-stream'),
+          hasLength(1),
+        );
+        expect(
+          coordinator.isTaskActive(
+            taskId: 'request-no-stream',
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+          ),
+          isFalse,
+        );
+      },
+    );
+  }
+
+  test(
+    'a stale prompt result cannot recreate a discarded conversation runtime',
+    () {
+      coordinator.beginAcpTurn(
+        taskId: 'discarded-request',
+        conversationId: 2112,
+        mode: kChatRuntimeModeAgent,
+      );
+      coordinator.resetForTest();
+      final result = coordinator.applyAcpPromptResponse(
+        taskId: 'discarded-request',
+        conversationId: 2112,
+        sessionId: 'discarded-session',
+        stopReason: 'cancelled',
+      );
+      expect(result.handled, isFalse);
+      expect(
+        coordinator.runtimeFor(
+          conversationId: 2112,
+          mode: kChatRuntimeModeAgent,
+        ),
+        isNull,
+      );
+    },
+  );
+
+  test('a background conversation still accepts its own prompt response', () {
+    for (final id in <int>[2113, 2114]) {
+      coordinator.beginAcpTurn(
+        taskId: 'request-$id',
+        conversationId: id,
+        mode: kChatRuntimeModeAgent,
+      );
+      coordinator.bindAcpSession(
+        taskId: 'request-$id',
+        conversationId: id,
+        mode: kChatRuntimeModeAgent,
+        sessionId: 'session-$id',
+      );
+    }
+    final result = coordinator.applyAcpPromptResponse(
+      taskId: 'request-2113',
+      conversationId: 2113,
+      sessionId: 'session-2113',
+      stopReason: 'end_turn',
+    );
+    expect(result.handled, isTrue);
+    expect(
+      coordinator
+          .runtimeFor(conversationId: 2113, mode: kChatRuntimeModeAgent)!
+          .isAiResponding,
+      isFalse,
+    );
+    expect(
+      coordinator.isTaskActive(
+        taskId: 'request-2114',
+        conversationId: 2114,
+        mode: kChatRuntimeModeAgent,
+      ),
+      isTrue,
+    );
+    expect(
+      coordinator
+          .runtimeFor(conversationId: 2114, mode: kChatRuntimeModeAgent)!
+          .isAiResponding,
+      isTrue,
+    );
+  });
+
+  test('keeps DSH ACP reasoning interleaved around tool activity', () {
+    const conversationId = 2103;
+    const turnId = 'dsh-turn';
+    applyAcp(
+      conversationId,
+      'item/reasoning/delta',
+      turnId: turnId,
+      agentId: 'deepseek-harness-acp',
+      agentName: 'DeepSeek Harness',
+      params: <String, dynamic>{'itemId': 'thought-1', 'delta': '第一阶段：分析工作区。'},
+    );
+    applyAcp(
+      conversationId,
+      'item/started',
+      turnId: turnId,
+      agentId: 'deepseek-harness-acp',
+      agentName: 'DeepSeek Harness',
+      params: <String, dynamic>{
+        'item': <String, dynamic>{
+          'id': 'tool-1',
+          'type': 'commandExecution',
+          'command': 'pwd',
+          'status': 'running',
+        },
+      },
+    );
+    applyAcp(
+      conversationId,
+      'item/reasoning/delta',
+      turnId: turnId,
+      agentId: 'deepseek-harness-acp',
+      agentName: 'DeepSeek Harness',
+      params: <String, dynamic>{'itemId': 'thought-2', 'delta': '第二阶段：根据结果判断。'},
+    );
+
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    final thinking = runtime.messages
+        .where((message) => message.cardData?['type'] == 'deep_thinking')
+        .toList();
+    expect(thinking, hasLength(2));
+    expect(
+      runtime.messages.reversed.map(
+        (message) => message.cardData?['type'] ?? 'assistant_text',
+      ),
+      <String>['deep_thinking', 'agent_tool_summary', 'deep_thinking'],
+    );
+    expect(
+      thinking.reversed.map((message) => message.cardData?['thinkingContent']),
+      <String>['第一阶段：分析工作区。', '第二阶段：根据结果判断。'],
+    );
+  });
+
+  test(
+    'continuous updates cannot postpone durable history indefinitely',
+    () async {
+      const conversationId = 99112;
+      final runtime = coordinator.ensureRuntime(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      runtime.messages.add(
+        ChatMessageModel.userMessage('long running synthetic task'),
+      );
+      for (var index = 0; index < 5; index++) {
+        coordinator.schedulePersistRuntimeConversation(
+          conversationId: conversationId,
+          mode: kChatRuntimeModeAgent,
+          persistMessages: index == 2,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      // Commit during continuous output; preserve flags merged into the batch.
+      expect(
+        recordedMethodCalls.where(
+          (call) => call.method == 'replaceConversationMessages',
+        ),
+        isNotEmpty,
+      );
+      await coordinator.flushPendingPersistence(
+        conversationId: conversationId, mode: kChatRuntimeModeAgent,
+      );
+    },
+  );
+
+  test('an old history snapshot cannot downgrade an officially completed item', () {
+    const conversationId = 99202;
+    const turn = 'completed-history-turn';
+    coordinator.beginAcpTurn(taskId: turn, conversationId: conversationId, mode: kChatRuntimeModeAgent);
+    applyAcp(conversationId, 'session/update', turnId: turn, params: {
+      'update': {'sessionUpdate': 'agent_message_chunk', 'messageId': 'reply',
+        'content': {'text': 'partial '}}
+    });
+    final runtime = coordinator.runtimeFor(conversationId: conversationId, mode: kChatRuntimeModeAgent)!;
+    final old = runtime.messages.firstWhere((m) => m.user == 2);
+    applyAcp(conversationId, 'session/update', turnId: turn, params: {
+      'update': {'sessionUpdate': 'agent_message_chunk', 'messageId': 'reply',
+        'content': {'text': 'complete'}}
+    });
+    completePrompt(conversationId, turnId: turn);
+    final committed = runtime.messages.firstWhere((m) => m.user == 2);
+    for (final snapshot in [[old], [old.copyWith(streamMeta: const {})]]) {
+      coordinator.replaceConversationSnapshot(conversationId: conversationId,
+          mode: kChatRuntimeModeAgent, messages: snapshot);
+      expect(runtime.messages.single.text, 'partial complete');
+      expect(runtime.messages.single.streamMeta?['stopReason'], 'end_turn');
+      expect(runtime.messages.single.streamMeta?['isFinal'], true);
+      expect(runtime.hasInFlightTask, false);
+    }
+    // A durable completed projection may still supply additional metadata.
+    final restored = committed.copyWith(turnUsage: {'inputTokens': 123});
+    coordinator.replaceConversationSnapshot(conversationId: conversationId,
+        mode: kChatRuntimeModeAgent, messages: [restored]);
+    expect(runtime.messages.single.turnUsage?['inputTokens'], 123);
+  });
+
+  test('persistence uses the completed projection after awaiting metadata I/O', () async {
+    const conversationId = 99201;
+    const turn = 'metadata-race-turn';
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    var held = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methodChannel, (call) async {
+      recordedMethodCalls.add(call);
+      if (call.method == 'updateConversation' && !held) {
+        held = true;
+        entered.complete();
+        await release.future;
+      }
+      if (call.method == 'getConversations' || call.method == 'getSceneModelBindings') return <Map<String, dynamic>>[];
+      if (call.method == 'getSceneVoiceConfig') return <String, dynamic>{'autoPlay': false};
+      return 'SUCCESS';
+    });
+    coordinator.beginAcpTurn(taskId: turn, conversationId: conversationId, mode: kChatRuntimeModeAgent);
+    applyAcp(conversationId, 'session/update', turnId: turn, params: {
+      'update': {'sessionUpdate': 'agent_message_chunk', 'messageId': 'reply',
+        'content': {'text': 'partial '}}
+    });
+    final saving = coordinator.persistRuntimeConversation(
+      conversationId: conversationId, mode: kChatRuntimeModeAgent, persistMessages: true);
+    await entered.future;
+    applyAcp(conversationId, 'session/update', turnId: turn, params: {
+      'update': {'sessionUpdate': 'agent_message_chunk', 'messageId': 'reply',
+        'content': {'text': 'complete'}}
+    });
+    completePrompt(conversationId, turnId: turn, params: {'stopReason': 'end_turn'});
+    final current = coordinator.runtimeFor(conversationId: conversationId, mode: kChatRuntimeModeAgent)!;
+    expect(current.messages.firstWhere((m) => m.user == 2).streamMeta?['stopReason'], 'end_turn');
+    release.complete();
+    await saving;
+    await coordinator.flushAllPendingPersistence();
+    final write = recordedMethodCalls.firstWhere((c) => c.method == 'replaceConversationMessages');
+    final rows = (write.arguments['messages'] as List).cast<Map>();
+    final answer = rows.singleWhere((r) => r['user'] == 2);
+    expect(answer['content']['text'], 'partial complete');
+    expect(answer['streamMeta']['isFinal'], true);
+    expect(answer['streamMeta']['stopReason'], 'end_turn');
+  });
+
+  test('persists ACP runtime messages back to native history', () async {
+    const conversationId = 2201;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.messages.insert(0, ChatMessageModel.userMessage('用户输入'));
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: 'turn-persist',
+      params: <String, dynamic>{
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'message-persist',
+          'content': <String, dynamic>{'text': 'ACP 回复'},
         },
       },
     );
@@ -655,1473 +1962,897 @@ void main() {
         .where((call) => call.method == 'replaceConversationMessages')
         .toList();
     expect(replaceCalls, isNotEmpty);
-
     final args = Map<String, dynamic>.from(
       (replaceCalls.last.arguments as Map).cast<String, dynamic>(),
     );
     expect(args['conversationId'], conversationId);
-    expect(args['mode'], 'codex');
-
-    final messages = (args['messages'] as List)
-        .whereType<Map>()
-        .map((item) => Map<String, dynamic>.from(item.cast<String, dynamic>()))
-        .toList();
+    expect(args['mode'], kChatRuntimeModeAgent);
     expect(
-      messages.any(
-        (message) =>
-            message['user'] == 1 &&
-            ((message['content'] as Map?)?['text'] == '第一句标题应该保留'),
-      ),
-      isTrue,
-    );
-    expect(
-      messages.any(
-        (message) =>
-            message['user'] == 2 &&
-            ((message['content'] as Map?)?['text'] == 'Codex reply'),
+      (args['messages'] as List).any(
+        (message) => (message as Map)['content']?['text'] == 'ACP 回复',
       ),
       isTrue,
     );
   });
 
-  test('records the active ACP Agent on text and tool messages', () {
-    const conversationId = 2002;
-    coordinator.ensureRuntime(
-      conversationId: conversationId,
+  test('partial idle page updates preserve committed messages', () async {
+    final runtime = coordinator.ensureRuntime(
+      conversationId: 99111,
       mode: kChatRuntimeModeAgent,
     );
-
-    coordinator.applyAgentEvent(
-      conversationId: conversationId,
-      event: {
-        'agentId': 'claude-code-acp',
-        'agentName': 'Claude Code',
-        'message': {
-          'method': 'item/agentMessage/delta',
-          'params': {'turnId': 'turn-claude', 'delta': 'Claude reply'},
-        },
-      },
-    );
-    coordinator.applyAgentEvent(
-      conversationId: conversationId,
-      event: {
-        'agentId': 'claude-code-acp',
-        'agentName': 'Claude Code',
-        'message': {
-          'method': 'item/started',
-          'params': {
-            'turnId': 'turn-claude',
-            'item': {
-              'id': 'tool-1',
-              'type': 'commandExecution',
-              'command': 'pwd',
-              'status': 'running',
-            },
-          },
-        },
-      },
-    );
-
-    final runtime = coordinator.runtimeFor(
-      conversationId: conversationId,
+    final old = ChatMessageModel.userMessage('keep original task');
+    runtime.messages.add(old);
+    await coordinator.persistConversationMessageSnapshot(
+      conversationId: 99111,
       mode: kChatRuntimeModeAgent,
-    )!;
-    final assistant = runtime.messages.singleWhere(
-      (message) => message.user == 2,
+      messages: [],
     );
-    final tool = runtime.messages.singleWhere(
-      (message) => message.cardData?['type'] == 'agent_tool_summary',
+    expect(runtime.messages.map((m) => m.id), contains(old.id));
+    final calls = recordedMethodCalls.where(
+      (c) => c.method == 'replaceConversationMessages',
     );
-    expect(assistant.agentId, 'claude-code-acp');
-    expect(assistant.agentName, 'Claude Code');
-    expect(tool.agentId, 'claude-code-acp');
-    expect(tool.agentName, 'Claude Code');
+    expect(calls.last.arguments['allowHistoryRemoval'], false);
+    expect(calls.last.arguments['messages'], isNotEmpty);
   });
 
   test(
-    'keeps DSH reasoning steps separate and finalizes each at the next output boundary',
-    () {
-      const conversationId = 2003;
-      const turnId = 'dsh-turn-multi-thinking';
+    'ordinary completion persistence cannot clear an empty runtime history',
+    () async {
+      coordinator.ensureRuntime(
+        conversationId: 99110,
+        mode: kChatRuntimeModeAgent,
+      );
+      await coordinator.persistRuntimeConversation(
+        conversationId: 99110,
+        mode: kChatRuntimeModeAgent,
+        persistMessages: true,
+      );
+      expect(
+        recordedMethodCalls.where(
+          (c) => c.method == 'replaceConversationMessages',
+        ),
+        isEmpty,
+      );
+    },
+  );
 
-      void apply(String method, Map<String, dynamic> params) {
-        coordinator.applyAgentEvent(
-          conversationId: conversationId,
-          event: <String, dynamic>{
-            'agentId': 'deepseek-harness',
-            'agentName': 'DeepSeek Harness',
-            'message': <String, dynamic>{
-              'method': method,
-              'params': <String, dynamic>{'turnId': turnId, ...params},
+  test(
+    'persists an empty snapshot when the caller owns message replacement',
+    () async {
+      const conversationId = 2200;
+      coordinator.ensureRuntime(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+
+      await coordinator.persistRuntimeConversation(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        persistMessages: true,
+        allowHistoryRemoval: true,
+      );
+
+      final replaceCalls = recordedMethodCalls
+          .where((call) => call.method == 'replaceConversationMessages')
+          .toList();
+      expect(replaceCalls, isNotEmpty);
+      expect(replaceCalls.last.arguments['conversationId'], conversationId);
+      expect(replaceCalls.last.arguments['messages'], isEmpty);
+    },
+  );
+
+  test(
+    'page snapshot preserves admitted prompt timing through history',
+    () async {
+      const conversationId = 2211;
+      const turnId = 'snapshot-timed-request';
+      coordinator.beginAcpTurn(
+        taskId: turnId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      final startedAt = runtime.agentEntryStartTimes['prompt:$turnId'];
+      expect(startedAt, isA<int>());
+      coordinator.replaceConversationSnapshot(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        messages: List<ChatMessageModel>.from(runtime.messages),
+        isAiResponding: runtime.isAiResponding,
+        currentDispatchTurnId: runtime.currentDispatchTurnId,
+        lastAgentTurnId: runtime.lastAgentTurnId,
+      );
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: turnId,
+        params: {
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': '完成'},
+          },
+        },
+      );
+      completePrompt(conversationId, turnId: turnId);
+      final reply = runtime.messages.singleWhere(
+        (m) => m.type == 1 && m.user == 2,
+      );
+      expect(reply.turnUsage?['endedAt'], greaterThanOrEqualTo(startedAt!));
+      expect(reply.turnUsage?['durationMs'], isNonNegative);
+      await coordinator.flushPendingPersistence(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      final saved = recordedMethodCalls.lastWhere(
+        (call) => call.method == 'replaceConversationMessages',
+      );
+      final json = (saved.arguments['messages'] as List)
+          .cast<Map>()
+          .singleWhere((message) => message['id'] == reply.id);
+      expect(
+        ChatMessageModel.fromJson(Map<String, dynamic>.from(json)).turnUsage,
+        reply.turnUsage,
+      );
+    },
+  );
+
+  test(
+    'prompt timing belongs to the final visible reply in a multi-message turn',
+    () {
+      const conversationId = 2210;
+      const turnId = 'multi-reply';
+      applyAcp(conversationId, 'turn/started', turnId: turnId);
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      runtime.agentEntryStartTimes['prompt:$turnId'] =
+          DateTime.now().millisecondsSinceEpoch - 65000;
+      for (final entry in [('progress', '我先检查一下'), ('answer', '最终结果')]) {
+        applyAcp(
+          conversationId,
+          'session/update',
+          turnId: turnId,
+          params: {
+            'update': {
+              'sessionUpdate': 'agent_message_chunk',
+              'messageId': entry.$1,
+              'content': {'type': 'text', 'text': entry.$2},
             },
           },
         );
       }
+      coordinator.applyAcpPromptResponse(
+        taskId: turnId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        stopReason: 'end_turn',
+        sessionId: null,
+      );
+      final replies = runtime.messages
+          .where((message) => message.type == 1 && message.user == 2)
+          .toList();
+      expect(replies, hasLength(2));
+      final answer = replies.singleWhere((message) => message.text == '最终结果');
+      final progress = replies.singleWhere(
+        (message) => message.text == '我先检查一下',
+      );
+      expect(answer.turnUsage?['durationMs'], greaterThanOrEqualTo(65000));
+      expect(answer.turnUsage?['endedAt'], isA<int>());
+      expect(progress.turnUsage?['endedAt'], isNull);
+    },
+  );
 
-      apply('item/reasoning/delta', <String, dynamic>{
-        'itemId': 'dsh-step-1-thought',
-        'delta': '第一阶段：先分析工作区。',
-      });
-      apply('item/started', <String, dynamic>{
-        'item': <String, dynamic>{
-          'id': 'dsh-tool-1',
-          'type': 'commandExecution',
-          'command': 'pwd',
-          'status': 'running',
+  for (final reason in ['end_turn', 'cancelled', 'error']) {
+    test('prompt timing is finalized once and isolated: $reason', () {
+      const conversationId = 2209;
+      const turnId = 'timed-request';
+      applyAcp(conversationId, 'turn/started', turnId: turnId);
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      runtime.agentEntryStartTimes['prompt:$turnId'] =
+          DateTime.now().millisecondsSinceEpoch - 65000;
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: turnId,
+        params: {
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': '已有结果'},
+          },
         },
-      });
-      apply('item/reasoning/delta', <String, dynamic>{
-        'itemId': 'dsh-step-2-thought',
-        'delta': '第二阶段：根据工具结果继续判断。',
-      });
-      apply('item/agentMessage/delta', <String, dynamic>{
-        'itemId': 'dsh-step-2-message',
-        'delta': '这是最终回答。',
-      });
+      );
+      expect(runtime.messages.where((m) => m.user == 2).last.turnUsage, isNull);
+      coordinator.applyAcpPromptResponse(
+        taskId: turnId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        stopReason: reason,
+        sessionId: null,
+      );
+      final reply = runtime.messages
+          .where((m) => m.type == 1 && m.user == 2)
+          .last;
+      expect(reply.turnUsage?['durationMs'], greaterThanOrEqualTo(65000));
+      expect(reply.turnUsage?['endedAt'], isA<int>());
+      final restored = ChatMessageModel.fromJson(reply.toJson());
+      expect(restored.turnUsage, reply.turnUsage);
+      applyAcp(conversationId, 'turn/started', turnId: 'next-request');
+      coordinator.applyAcpPromptResponse(
+        taskId: turnId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        stopReason: reason,
+        sessionId: null,
+      );
+      expect(
+        runtime.messages.singleWhere((m) => m.id == reply.id).turnUsage,
+        restored.turnUsage,
+      );
+      expect(runtime.currentDispatchTurnId, 'next-request');
+    });
+  }
+
+  test(
+    'accepts final ACP turn usage after the turn completion fence',
+    () async {
+      const conversationId = 2202;
+      const turnId = 'turn-late-usage';
+      const sessionId = 'session-late-usage';
+      const messageId = 'message-late-usage';
+
+      applyAcp(
+        conversationId,
+        'turn/started',
+        turnId: turnId,
+        sessionId: sessionId,
+      );
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: turnId,
+        sessionId: sessionId,
+        params: const <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': messageId,
+            'content': <String, dynamic>{'type': 'text', 'text': '最终回复'},
+          },
+        },
+      );
+      completePrompt(conversationId, turnId: turnId, sessionId: sessionId);
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: turnId,
+        sessionId: sessionId,
+        params: const <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': messageId,
+            'content': <String, dynamic>{'type': 'text', 'text': ''},
+            '_meta': <String, dynamic>{
+              'cn.com.omnimind.agent': <String, dynamic>{
+                'usage': <String, dynamic>{
+                  'latestPromptTokens': 16076,
+                  'promptTokenThreshold': 128000,
+                  'turnUsage': <String, dynamic>{
+                    'ctx': 16076,
+                    'in': 16076,
+                    'out': 1470,
+                    'cache': 10770,
+                  },
+                },
+              },
+            },
+          },
+        },
+      );
 
       final runtime = coordinator.runtimeFor(
         conversationId: conversationId,
         mode: kChatRuntimeModeAgent,
       )!;
-      final thinkingCards = runtime.messages
-          .where((message) => message.cardData?['type'] == 'deep_thinking')
-          .toList(growable: false);
-
-      expect(thinkingCards, hasLength(2));
-      expect(
-        thinkingCards
-            .map((message) => message.cardData?['thinkingContent'])
-            .toSet(),
-        <String>{'第一阶段：先分析工作区。', '第二阶段：根据工具结果继续判断。'},
+      final answer = runtime.messages.singleWhere(
+        (message) => message.id == '$turnId-$messageId-agent-message',
       );
+      expect(answer.turnUsage, <String, dynamic>{
+        'endedAt': isA<int>(),
+        'durationMs': isNonNegative,
+        'ctx': 16076,
+        'in': 16076,
+        'out': 1470,
+        'cache': 10770,
+      });
+      expect(runtime.isAiResponding, isFalse);
+
+      await coordinator.flushPendingPersistence(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      final replaceCalls = recordedMethodCalls
+          .where((call) => call.method == 'replaceConversationMessages')
+          .toList();
+      expect(replaceCalls, isNotEmpty);
+      final persisted = Map<String, dynamic>.from(
+        ((replaceCalls.last.arguments as Map)['messages'] as List)
+            .cast<Map>()
+            .singleWhere((message) => message['id'] == answer.id)
+            .cast<String, dynamic>(),
+      );
+      expect(persisted['turnUsage'], answer.turnUsage);
+    },
+  );
+
+  test(
+    'ignores automatic compaction metadata instead of persisting a private card',
+    () async {
+      const conversationId = 2203;
+      const turnId = 'turn-compaction-persist';
+      const sessionId = 'session-compaction-persist';
+
+      applyAcp(
+        conversationId,
+        'turn/started',
+        turnId: turnId,
+        sessionId: sessionId,
+      );
+      applyAcp(
+        conversationId,
+        'session/update',
+        turnId: turnId,
+        sessionId: sessionId,
+        params: const <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_thought_chunk',
+            'messageId': 'thought-compaction-persist',
+            'content': <String, dynamic>{'type': 'text', 'text': ''},
+            '_meta': <String, dynamic>{
+              'cn.com.omnimind.agent': <String, dynamic>{
+                'compaction': <String, dynamic>{
+                  'status': 'completed',
+                  'trigger': 'auto',
+                  'latestPromptTokens': 126000,
+                  'promptTokenThreshold': 128000,
+                },
+              },
+            },
+          },
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final runtime = coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(runtime.messages, isEmpty);
+      expect(runtime.isContextCompressing, isFalse);
       expect(
-        thinkingCards.every(
-          (message) =>
-              message.cardData?['isLoading'] == false &&
-              message.cardData?['stage'] == 4,
+        recordedMethodCalls.where(
+          (call) => call.method == 'upsertConversationUiCard',
         ),
-        isTrue,
+        isEmpty,
       );
-      expect(runtime.activeThinkingCardId, isNull);
     },
   );
 
-  test('replaces divergent agent snapshots instead of concatenating', () async {
-    const conversationId = 1003;
-    const taskId = 'agent-task-divergent-snapshot';
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': '第一版：正在分析问题。',
-      'isFinal': false,
-    });
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': '最终版：已经定位到根因并准备修复。',
-      'isFinal': false,
-    });
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.single.text, '最终版：已经定位到根因并准备修复。');
-  });
-
-  test('keeps visible agent text when a later agent error arrives', () async {
-    const conversationId = 1004;
-    const taskId = 'agent-task-error-after-content';
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': '这是一段已经成功生成的正文。',
-      'isFinal': false,
-    });
-    await emitPlatformEvent('onAgentError', <String, dynamic>{
-      'taskId': taskId,
-      'error':
-          'Agent execution failed: length=140; regionStart=0; bytePairLength=138',
-    });
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.single.text, '这是一段已经成功生成的正文。');
-    expect(runtime.messages.single.isError, isFalse);
-  });
-
   test(
-    'binds turn usage and continue metadata to the failed assistant turn',
-    () async {
-      const conversationId = 10041;
-      const taskId = 'agent-task-continueable-error';
-      const entryId = '$taskId-text';
-
+    'manual compaction marker does not manufacture an automatic or user turn',
+    () {
+      const conversationId = 2204;
       final runtime = coordinator.ensureRuntime(
         conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
+        mode: kChatRuntimeModeAgent,
       );
-      coordinator.registerTask(
-        taskId: taskId,
+
+      coordinator.beginContextCompaction(
         conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
+        mode: kChatRuntimeModeAgent,
       );
 
-      await emitPlatformEvent('onAgentStreamEvent', <String, dynamic>{
-        'taskId': taskId,
-        'conversationId': conversationId,
-        'conversationMode': ConversationMode.normal.storageValue,
-        'seq': 1,
-        'kind': 'text_snapshot',
-        'entryId': entryId,
-        'roundIndex': 1,
-        'isFinal': true,
-        'text': 'partial reply',
-        'turnUsage': {'ctx': 20000, 'in': 10000, 'out': 87, 'cache': 10000},
-      });
-
-      await emitPlatformEvent('onAgentStreamEvent', <String, dynamic>{
-        'taskId': taskId,
-        'conversationId': conversationId,
-        'conversationMode': ConversationMode.normal.storageValue,
-        'seq': 2,
-        'kind': 'error',
-        'entryId': entryId,
-        'roundIndex': 1,
-        'error': 'network interrupted',
-        'errorText': 'network interrupted',
-        'continueable': true,
-        'continueResumeMode': 'approximate',
-        'retryable': true,
-        'persistAsError': false,
-        'turnUsage': {'ctx': 20000, 'in': 10000, 'out': 87, 'cache': 10000},
-      });
-
-      expect(runtime.messages, hasLength(1));
-      final message = runtime.messages.single;
-      expect(message.id, entryId);
-      expect(message.turnUsage?['ctx'], 20000);
-      expect(message.turnUsage?['in'], 10000);
-      expect(message.content?['agentContinueable'], isTrue);
-      expect(message.content?['agentContinueResumeMode'], 'approximate');
-      expect(message.content?['agentRetryable'], isTrue);
+      final marker = runtime.messages.single;
+      expect(marker.user, 3);
+      expect(marker.cardData?['type'], 'context_compaction_marker');
+      expect(marker.cardData?['trigger'], 'manual');
+      expect(runtime.messages.where((message) => message.user == 1), isEmpty);
     },
   );
 
-  test(
-    'shows an error bubble when agent fails before any visible text',
-    () async {
-      const conversationId = 1005;
-      const taskId = 'agent-task-empty-error';
-
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onAgentError', <String, dynamic>{
-        'taskId': taskId,
-        'error':
-            'Agent execution failed: length=140; regionStart=0; bytePairLength=138',
-      });
-
-      expect(runtime.messages, hasLength(1));
-      expect(
-        runtime.messages.single.text,
-        contains('length=140; regionStart=0; bytePairLength=138'),
-      );
-      expect(runtime.messages.single.isError, isTrue);
-    },
-  );
-
-  test('routes chat task chunks to the bound conversation only', () async {
-    const conversationA = 2001;
-    const conversationB = 2002;
-    const taskId = 'chat-task-a';
-
-    coordinator.ensureRuntime(
-      conversationId: conversationA,
-      mode: kChatRuntimeModeOpenClaw,
-    );
-    coordinator.ensureRuntime(
-      conversationId: conversationB,
-      mode: kChatRuntimeModeOpenClaw,
-    );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationA,
-      mode: kChatRuntimeModeOpenClaw,
-    );
-
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"text":"hello from openclaw"}',
-      'type': null,
-    });
-
-    final runtimeA = coordinator.runtimeFor(
-      conversationId: conversationA,
-      mode: kChatRuntimeModeOpenClaw,
-    )!;
-    final runtimeB = coordinator.runtimeFor(
-      conversationId: conversationB,
-      mode: kChatRuntimeModeOpenClaw,
-    )!;
-
-    expect(runtimeA.messages, hasLength(1));
-    expect(runtimeA.messages.first.id, taskId);
-    expect(runtimeA.messages.first.text, 'hello from openclaw');
-    expect(runtimeB.messages, isEmpty);
-  });
-
-  test('parses raw OpenAI chat chunks into visible assistant text', () async {
-    const conversationId = 2201;
-    const taskId = 'chat-task-openai';
-
-    coordinator.ensureRuntime(
+  test('routes normal chat chunks through the ACP stream', () {
+    const conversationId = 2301;
+    const turnId = 'turn-normal';
+    coordinator.beginAcpTurn(
+      taskId: turnId,
       conversationId: conversationId,
       mode: kChatRuntimeModeNormal,
     );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"hello from pure chat"}}]}',
-      'type': null,
-    });
-
-    final runtime = coordinator.runtimeFor(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    )!;
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.first.id, taskId);
-    expect(runtime.messages.first.text, 'hello from pure chat');
-  });
-
-  test('parses usage performance metrics from pure-chat usage chunks', () async {
-    const conversationId = 2211;
-    const taskId = 'chat-task-usage-performance';
-
-    coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"hello from pure chat"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content':
-          '{"choices":[],"usage":{"prompt_tokens":15,"completion_tokens":100,"total_tokens":115,"performance":{"prefill_tokens_per_second":36.6,"decode_tokens_per_second":12.4}}}',
-      'type': null,
-    });
-
-    final runtime = coordinator.runtimeFor(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    )!;
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.first.text, 'hello from pure chat');
-    expect(runtime.messages.first.content?['prefillTokensPerSecond'], 36.6);
-    expect(runtime.messages.first.content?['decodeTokensPerSecond'], 12.4);
-  });
-
-  test('primes pure-chat thinking card immediately before streaming', () {
-    const conversationId = 2204;
-    const taskId = 'chat-task-thinking-prime';
-
-    coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    coordinator.primePureChatThinking(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    final runtime = coordinator.runtimeFor(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    )!;
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.first.cardData?['type'], 'deep_thinking');
-    expect(runtime.messages.first.cardData?['isLoading'], isTrue);
-    expect(runtime.messages.first.cardData?['thinkingContent'], '');
-  });
-
-  test(
-    'removes primed thinking card when no reasoning chunk arrives',
-    () async {
-      const conversationId = 2206;
-      const taskId = 'chat-task-thinking-empty';
-
-      coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      coordinator.primePureChatThinking(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"没有思考流也要正常收尾。"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessageEnd', <String, dynamic>{
-        'taskID': taskId,
-      });
-
-      final runtime = coordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      )!;
-
-      expect(runtime.messages, hasLength(1));
-      expect(runtime.messages.single.id, taskId);
-      expect(runtime.messages.single.text, '没有思考流也要正常收尾。');
-    },
-  );
-
-  test('renders pure-chat reasoning as a deep thinking card', () async {
-    const conversationId = 2203;
-    const taskId = 'chat-task-thinking';
-
-    coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"reasoning_content":"先分析一下问题。"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"这是最终回答。"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessageEnd', <String, dynamic>{
-      'taskID': taskId,
-    });
-
-    final runtime = coordinator.runtimeFor(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    )!;
-
-    expect(runtime.messages, hasLength(2));
-    expect(runtime.messages.first.id, taskId);
-    expect(runtime.messages.first.text, '这是最终回答。');
-
-    final thinkingCard = runtime.messages.last;
-    expect(thinkingCard.cardData?['type'], 'deep_thinking');
-    expect(thinkingCard.cardData?['thinkingContent'], '先分析一下问题。');
-    expect(thinkingCard.cardData?['isLoading'], isFalse);
-    expect(thinkingCard.cardData?['stage'], 4);
-  });
-
-  test(
-    'keeps the full pure-chat reasoning prefix across delta chunks',
-    () async {
-      const conversationId = 2205;
-      const taskId = 'chat-task-thinking-delta';
-
-      coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      coordinator.primePureChatThinking(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"先"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"分析"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"一下问题。"}}]}',
-        'type': null,
-      });
-
-      final runtime = coordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      )!;
-      final thinkingCard = runtime.messages.single;
-
-      expect(thinkingCard.cardData?['type'], 'deep_thinking');
-      expect(thinkingCard.cardData?['thinkingContent'], '先分析一下问题。');
-    },
-  );
-
-  test(
-    'preserves whitespace and punctuation in pure-chat reasoning delta chunks',
-    () async {
-      const conversationId = 2207;
-      const taskId = 'chat-task-thinking-whitespace';
-
-      coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      coordinator.primePureChatThinking(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"先想"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"："}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"\\n"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"  再做"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"reasoning_content":"。"}}]}',
-        'type': null,
-      });
-
-      final runtime = coordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      )!;
-      final thinkingCard = runtime.messages.single;
-
-      expect(thinkingCard.cardData?['type'], 'deep_thinking');
-      expect(thinkingCard.cardData?['thinkingContent'], '先想：\n  再做。');
-    },
-  );
-
-  test(
-    'preserves whitespace and punctuation in pure-chat content delta chunks',
-    () async {
-      const conversationId = 2208;
-      const taskId = 'chat-task-content-whitespace';
-
-      coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"Hello"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":","}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":" "}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"world"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"!"}}]}',
-        'type': null,
-      });
-
-      final runtime = coordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      )!;
-
-      expect(runtime.messages, hasLength(1));
-      expect(runtime.messages.single.text, 'Hello, world!');
-    },
-  );
-
-  test('preserves repeated punctuation in pure-chat content chunks', () async {
-    const conversationId = 2209;
-    const taskId = 'chat-task-content-repeated-punctuation';
-
-    coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"你好"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"，"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"世界"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"。"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"再见"}}]}',
-      'type': null,
-    });
-    await emitPlatformEvent('onChatMessage', <String, dynamic>{
-      'taskID': taskId,
-      'content': '{"choices":[{"delta":{"content":"。"}}]}',
-      'type': null,
-    });
-
-    final runtime = coordinator.runtimeFor(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    )!;
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.single.text, '你好，世界。再见。');
-  });
-
-  test(
-    'accepts cumulative pure-chat content snapshots without duplication',
-    () async {
-      const conversationId = 2210;
-      const taskId = 'chat-task-content-cumulative';
-
-      coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"Hello"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"Hello,"}}]}',
-        'type': null,
-      });
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"Hello, world!"}}]}',
-        'type': null,
-      });
-
-      final runtime = coordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      )!;
-
-      expect(runtime.messages, hasLength(1));
-      expect(runtime.messages.single.text, 'Hello, world!');
-    },
-  );
-
-  test(
-    'keeps chat page streaming active when overlay chat also listens',
-    () async {
-      const conversationId = 2202;
-      const taskId = 'chat-task-overlay';
-      final overlayService = AiChatService();
-      String? overlayMessage;
-      overlayService.setOnMessageCallback((taskId, content, type) {
-        overlayMessage = content;
-      });
-
-      coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onChatMessage', <String, dynamic>{
-        'taskID': taskId,
-        'content': '{"choices":[{"delta":{"content":"shared pure chat"}}]}',
-        'type': null,
-      });
-
-      final runtime = coordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      )!;
-
-      expect(runtime.messages, hasLength(1));
-      expect(runtime.messages.first.text, 'shared pure chat');
-      expect(
-        overlayMessage,
-        '{"choices":[{"delta":{"content":"shared pure chat"}}]}',
-      );
-
-      overlayService.dispose();
-    },
-  );
-
-  test('clears transient agent thinking state when a session ends', () {
-    const conversationId = 4001;
-
     final runtime = coordinator.ensureRuntime(
       conversationId: conversationId,
       mode: kChatRuntimeModeNormal,
     );
-    runtime.currentDispatchTaskId = 'agent-task';
-    runtime.deepThinkingContent = 'old thinking';
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: turnId,
+      mode: kChatRuntimeModeNormal,
+      params: <String, dynamic>{
+        'update': <String, dynamic>{
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'message-normal',
+          'content': <String, dynamic>{'text': '普通聊天回复'},
+        },
+      },
+    );
+    completePrompt(
+      conversationId,
+      turnId: turnId,
+      mode: kChatRuntimeModeNormal,
+      params: <String, dynamic>{'status': 'completed'},
+    );
+
+    expect(runtime.messages.single.text, '普通聊天回复');
+    expect(runtime.isAiResponding, isFalse);
+  });
+
+  test('clears transient runtime state when an ACP session ends', () {
+    const conversationId = 2401;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.currentDispatchTurnId = 'turn-clear';
+    runtime.lastAgentTurnId = 'turn-clear';
+    runtime.activeRunId = 'run-clear';
+    runtime.activeAcpTurnId = 'acp-turn-clear';
+    runtime.activeAcpSessionId = 'session-clear';
+    runtime.currentAiMessages['message-clear'] = 'stale text';
+    runtime.agentReplayDeltaOffsets['message-clear'] = 4;
+    runtime.pendingAcpAssistantPresentation['pending-clear'] = {
+      'recovery': {'error': 'stale'},
+    };
+    runtime.isAiResponding = true;
     runtime.isDeepThinking = true;
-    runtime.currentThinkingStage = 4;
-    runtime.lastAgentTaskId = 'agent-task';
-    runtime.activeToolCardId = 'agent-task-tool-1';
-    runtime.activeThinkingCardId = 'agent-task-thinking';
-    runtime.pendingAgentTextTaskId = 'agent-task';
-    runtime.waitingThinkingBeforeAgentTextTaskId = 'agent-task';
-    runtime.pendingThinkingRoundSplit = true;
-    runtime.toolCardSequence = 3;
-    runtime.thinkingRound = 2;
+    runtime.activeThinkingCardId = 'thought';
+    runtime.activeToolCardId = 'tool';
 
     coordinator.clearConversationRuntimeSession(
       conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
+      mode: kChatRuntimeModeAgent,
     );
 
-    expect(runtime.currentDispatchTaskId, isNull);
-    expect(runtime.deepThinkingContent, isEmpty);
+    expect(runtime.currentDispatchTurnId, isNull);
+    expect(runtime.lastAgentTurnId, isNull);
+    expect(runtime.activeRunId, isNull);
+    expect(runtime.currentAiMessages, isEmpty);
+    expect(runtime.agentReplayDeltaOffsets, isEmpty);
+    expect(runtime.pendingAcpAssistantPresentation, isEmpty);
+    expect(runtime.isAiResponding, isFalse);
     expect(runtime.isDeepThinking, isFalse);
-    expect(runtime.currentThinkingStage, 1);
-    expect(runtime.lastAgentTaskId, isNull);
-    expect(runtime.activeToolCardId, isNull);
     expect(runtime.activeThinkingCardId, isNull);
-    expect(runtime.pendingAgentTextTaskId, isNull);
-    expect(runtime.waitingThinkingBeforeAgentTextTaskId, isNull);
-    expect(runtime.pendingThinkingRoundSplit, isFalse);
-    expect(runtime.toolCardSequence, 0);
-    expect(runtime.thinkingRound, 0);
+    expect(runtime.activeToolCardId, isNull);
+    expect(runtime.completedAgentTurnIds, contains('run-clear'));
+    expect(runtime.completedAgentTurnIds, contains('acp-turn-clear'));
+    expect(runtime.completedAcpTurnIds, contains('acp-turn-clear'));
   });
 
   test(
-    'shows thinking before assistant content when reasoning arrives later',
-    () async {
-      const conversationId = 4451;
-      const taskId = 'agent-thinking-before-content';
-
+    'unregistering a local task also clears its distinct official ACP turn',
+    () {
+      const conversationId = 2404;
+      const taskId = 'local-run-2404';
+      const officialTurnId = 'acp-turn-2404';
       final runtime = coordinator.ensureRuntime(
         conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
+        mode: kChatRuntimeModeAgent,
       );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
+      coordinator.beginAcpTurn(
         taskId: taskId,
         conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
+        mode: kChatRuntimeModeAgent,
       );
+      applyAcp(conversationId, 'turn/started', turnId: officialTurnId);
 
-      await emitPlatformEvent('onAgentThinkingStart', <String, dynamic>{
-        'taskId': taskId,
-      });
-      await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-        'taskId': taskId,
-        'message': '先给出结论。',
-        'isFinal': false,
-      });
+      expect(runtime.activeAcpTurnId, officialTurnId);
+      expect(runtime.isAiResponding, isTrue);
 
-      expect(
-        visibleMessageIds(runtime),
-        equals(<String>['$taskId-thinking', '$taskId-text']),
-      );
+      coordinator.unregisterTask(taskId);
 
-      await emitPlatformEvent('onAgentThinkingUpdate', <String, dynamic>{
-        'taskId': taskId,
-        'thinking': '我先检查一下上下文。',
-      });
-
-      expect(
-        visibleMessageIds(runtime),
-        equals(<String>['$taskId-thinking', '$taskId-text']),
-      );
-      expect(
-        runtime.messages
-            .firstWhere((message) => message.id == '$taskId-text')
-            .text,
-        '先给出结论。',
-      );
+      expect(runtime.activeAcpTurnId, isNull);
+      expect(runtime.activeAcpSessionId, isNull);
+      expect(runtime.isAiResponding, isFalse);
+      expect(runtime.isContextCompressing, isFalse);
+      expect(runtime.isInputAreaVisible, isTrue);
+      expect(runtime.completedAcpTurnIds, contains(officialTurnId));
     },
   );
 
-  test(
-    'keeps assistant content visible when tool calls start afterwards',
-    () async {
-      const conversationId = 4501;
-      const taskId = 'agent-task-with-content';
+  test('late thinking cleanup for an old task cannot clear the new task', () {
+    const conversationId = 2405;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: 'local-old-2405',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    applyAcp(conversationId, 'turn/started', turnId: 'acp-old-2405');
+    coordinator.registerTask(
+      taskId: 'local-new-2405',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: 'local-new-2405',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.isDeepThinking = true;
+    runtime.deepThinkingContent = 'new turn reasoning';
+    runtime.activeThinkingCardId = 'local-new-2405-thinking';
 
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
+    coordinator.clearTaskThinkingPresentation(
+      taskId: 'local-old-2405',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
 
-      await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-        'taskId': taskId,
-        'message': '看起来克隆还没完全完成，只有 `.git` 目录。让我再等待一下，然后重新检查。',
-        'isFinal': false,
-      });
+    expect(runtime.isDeepThinking, isTrue);
+    expect(runtime.deepThinkingContent, 'new turn reasoning');
+    expect(runtime.activeThinkingCardId, 'local-new-2405-thinking');
+  });
 
-      await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-        'taskId': taskId,
-        'toolName': 'terminal_execute',
-        'displayName': 'terminal_execute',
-        'toolType': 'terminal',
-        'summary': '检查 git 状态',
-      });
-
-      final textMessage = runtime.messages.firstWhere(
-        (msg) => msg.id == '$taskId-text',
-      );
-      final toolMessage = runtime.messages.firstWhere(
-        (msg) => msg.cardData?['type'] == 'agent_tool_summary',
-      );
-
-      expect(textMessage.text, contains('克隆还没完全完成'));
-      expect(toolMessage.cardData?['toolType'], 'terminal');
-      expect(runtime.pendingAgentTextTaskId, isNull);
-    },
-  );
-
-  test('keeps visible order as thinking then content then tool card', () async {
-    const conversationId = 4520;
-    const taskId = 'agent-thinking-content-tool';
-
+  test('beginAcpTurn admits a pure chat runtime when it is created lazily', () {
+    const conversationId = 2406;
+    const taskId = 'pure-chat-lazy-runtime';
     final runtime = coordinator.ensureRuntime(
       conversationId: conversationId,
       mode: kChatRuntimeModeNormal,
     );
-    runtime.currentDispatchTaskId = taskId;
+
     coordinator.registerTask(
       taskId: taskId,
       conversationId: conversationId,
       mode: kChatRuntimeModeNormal,
     );
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeNormal,
+    );
 
-    await emitPlatformEvent('onAgentThinkingStart', <String, dynamic>{
-      'taskId': taskId,
-    });
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': '让我先检查仓库状态。',
-      'isFinal': false,
-    });
-    await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-      'taskId': taskId,
-      'toolName': 'terminal_execute',
-      'displayName': 'terminal_execute',
-      'toolType': 'terminal',
-      'summary': '检查 git 状态',
-    });
-
-    final visibleIds = visibleMessageIds(runtime);
-    expect(visibleIds, hasLength(3));
-    expect(visibleIds[0], '$taskId-thinking');
-    expect(visibleIds[1], '$taskId-text');
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.currentDispatchTurnId, taskId);
+    expect(runtime.activeRunId, taskId);
     expect(
-      runtime.messages
-          .firstWhere(
-            (message) => message.cardData?['type'] == 'agent_tool_summary',
-          )
-          .id,
-      visibleIds[2],
+      coordinator.isTaskActive(
+        taskId: taskId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeNormal,
+      ),
+      isTrue,
     );
   });
 
-  test('stores toolTitle from agent tool events on tool cards', () async {
-    const conversationId = 4555;
-    const taskId = 'agent-task-title';
+  test(
+    'bindAcpSession reserves the official identity before prompt events',
+    () {
+      const conversationId = 24061;
+      const taskId = 'session-reservation-task';
+      final runtime = coordinator.ensureRuntime(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      coordinator.beginAcpTurn(
+        taskId: taskId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
 
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
+      expect(
+        coordinator.bindAcpSession(
+          taskId: taskId,
+          conversationId: conversationId,
+          mode: kChatRuntimeModeAgent,
+          sessionId: 'session-reserved',
+        ),
+        isTrue,
+      );
+      expect(runtime.activeAcpSessionId, 'session-reserved');
+      expect(runtime.knownAcpSessionIds, contains('session-reserved'));
+
+      coordinator.unregisterTask(
+        taskId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+    },
+  );
+
+  test('official terminal event retires only the matching task binding', () {
+    const conversationId = 24062;
+    const taskId = 'terminal-binding-task';
+    const sessionId = 'terminal-binding-session';
+    const turnId = 'terminal-binding-turn';
+
+    coordinator.beginAcpTurn(
       taskId: taskId,
       conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
+      mode: kChatRuntimeModeAgent,
     );
-
-    await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-      'taskId': taskId,
-      'toolName': 'file_read',
-      'displayName': '读取文件',
-      'toolType': 'workspace',
-      'toolTitle': '查看配置',
-      'summary': '查看配置',
-      'argsJson': jsonEncode({'tool_title': '查看配置', 'path': 'README.md'}),
-    });
-
-    final toolMessage = runtime.messages.firstWhere(
-      (msg) => msg.cardData?['type'] == 'agent_tool_summary',
-    );
-
-    expect(toolMessage.cardData?['toolTitle'], '查看配置');
-  });
-
-  test('releases buffered final content after a short timeout', () async {
-    const conversationId = 4606;
-    const taskId = 'agent-timeout-release';
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onAgentThinkingStart', <String, dynamic>{
-      'taskId': taskId,
-    });
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': '即使没等到思考文本，也要尽快显示正文。',
-      'isFinal': true,
-      'prefillTokensPerSecond': 12.3,
-      'decodeTokensPerSecond': 45.6,
-    });
-
     expect(
-      visibleMessageIds(runtime),
-      equals(<String>['$taskId-thinking', '$taskId-text']),
+      coordinator.bindAcpSession(
+        taskId: taskId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        sessionId: sessionId,
+      ),
+      isTrue,
     );
-    final textMessage = runtime.messages.firstWhere(
-      (message) => message.id == '$taskId-text',
+
+    completePrompt(conversationId, turnId: turnId, sessionId: sessionId);
+
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(runtime.isAiResponding, isFalse);
+    expect(
+      coordinator.isTaskActive(
+        taskId: taskId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      ),
+      isFalse,
     );
-    expect(textMessage.text, '即使没等到思考文本，也要尽快显示正文。');
-    expect(textMessage.content?['prefillTokensPerSecond'], 12.3);
-    expect(textMessage.content?['decodeTokensPerSecond'], 45.6);
+  });
+
+  test('rebinds a task without leaving the old runtime active', () {
+    const oldConversationId = 2407;
+    const newConversationId = 2408;
+    const taskId = 'handoff-task';
+    final oldRuntime = coordinator.ensureRuntime(
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final newRuntime = coordinator.ensureRuntime(
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    coordinator.registerTask(
+      taskId: taskId,
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(oldRuntime.hasInFlightTask, isFalse);
+    expect(newRuntime.isAiResponding, isTrue);
+    expect(
+      coordinator.isTaskActive(
+        taskId: taskId,
+        conversationId: newConversationId,
+        mode: kChatRuntimeModeAgent,
+      ),
+      isTrue,
+    );
+  });
+
+  test('scoped late cleanup cannot clear a task after it changes runtime', () {
+    const oldConversationId = 2409;
+    const newConversationId = 2410;
+    const taskId = 'reused-task-id';
+    final oldRuntime = coordinator.ensureRuntime(
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final newRuntime = coordinator.ensureRuntime(
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.registerTask(
+      taskId: taskId,
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    // This is the old runtime's delayed callback. Its identity must be
+    // checked before the shared task binding is used for cleanup.
+    coordinator.unregisterTask(
+      taskId,
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(oldRuntime.hasInFlightTask, isFalse);
+    expect(newRuntime.isAiResponding, isTrue);
+    expect(newRuntime.activeRunId, taskId);
+  });
+
+  test('beginAcpTurn rebinds through the same task admission path', () {
+    const oldConversationId = 2411;
+    const newConversationId = 2412;
+    const taskId = 'direct-begin-rebind';
+    final oldRuntime = coordinator.ensureRuntime(
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final newRuntime = coordinator.ensureRuntime(
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: oldConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: newConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(oldRuntime.hasInFlightTask, isFalse);
+    expect(newRuntime.isAiResponding, isTrue);
+    expect(
+      coordinator.isTaskActive(
+        taskId: taskId,
+        conversationId: oldConversationId,
+        mode: kChatRuntimeModeAgent,
+      ),
+      isFalse,
+    );
+    expect(
+      coordinator.isTaskActive(
+        taskId: taskId,
+        conversationId: newConversationId,
+        mode: kChatRuntimeModeAgent,
+      ),
+      isTrue,
+    );
+  });
+
+  test('fences a sessionless late turn event after runtime reset', () {
+    const conversationId = 2403;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.beginAcpTurn(
+      taskId: 'run-reset',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    runtime.activeAcpSessionId = 'session-reset';
+    runtime.activeAcpTurnId = 'acp-turn-reset';
+
+    coordinator.clearConversationRuntimeSession(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(runtime.acceptsAcpEvent(turnId: 'acp-turn-reset'), isFalse);
+    // A new sessionless turn remains compatible with the legacy wire shape.
+    expect(runtime.acceptsAcpEvent(turnId: 'acp-turn-new'), isTrue);
   });
 
   test(
-    'stores stream meta on deep thinking cards for history restoration',
-    () async {
-      const conversationId = 4666;
-      const taskId = 'agent-task-thinking-persist';
-
+    'fences late events from a reset session but allows a new turn to reuse it',
+    () {
+      const conversationId = 2402;
       final runtime = coordinator.ensureRuntime(
         conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
+        mode: kChatRuntimeModeAgent,
       );
 
-      await emitPlatformEvent('onAgentThinkingStart', <String, dynamic>{
-        'taskId': taskId,
-      });
-      await emitPlatformEvent('onAgentThinkingUpdate', <String, dynamic>{
-        'taskId': taskId,
-        'thinking': '恢复后也要能看到这段思考',
-      });
-      await Future<void>.delayed(Duration.zero);
-      final thinkingMessage = runtime.messages.firstWhere(
-        (message) => message.id == '$taskId-thinking',
+      expect(
+        runtime.acceptsAcpEvent(
+          sessionId: 'session-retired',
+          turnId: 'turn-old',
+          allowSessionAdmission: true,
+        ),
+        isTrue,
       );
-      expect(thinkingMessage.cardData?['type'], 'deep_thinking');
-      expect(thinkingMessage.cardData?['thinkingContent'], '恢复后也要能看到这段思考');
-      expect(thinkingMessage.streamMeta?['seq'], 1);
-      expect(thinkingMessage.streamMeta?['roundIndex'], 1);
-      expect(thinkingMessage.streamMeta?['kind'], 'thinking_snapshot');
-      expect(thinkingMessage.streamMeta?['parentTaskId'], taskId);
+      coordinator.clearConversationRuntimeSession(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+
+      expect(
+        runtime.acceptsAcpEvent(
+          sessionId: 'session-retired',
+          turnId: 'turn-old',
+        ),
+        isFalse,
+      );
+
+      coordinator.beginAcpTurn(
+        taskId: 'run-new',
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      expect(
+        runtime.acceptsAcpEvent(
+          sessionId: 'session-retired',
+          turnId: 'turn-new',
+          allowSessionAdmission: true,
+        ),
+        isTrue,
+      );
     },
   );
 
-  test(
-    'renders later content plus tool-call rounds as new assistant messages instead of overwriting earlier ones',
-    () async {
-      const conversationId = 4601;
-      const taskId = 'agent-task-multi-round';
+  test('projects active Xiaowan conversations for the drawer', () {
+    const conversationId = 2010;
+    const taskId = 'drawer-running-task';
 
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-        'taskId': taskId,
-        'message': '第一轮：先检查仓库状态。',
-        'isFinal': false,
-      });
-
-      await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-        'taskId': taskId,
-        'toolName': 'terminal_execute',
-        'displayName': 'terminal_execute',
-        'toolType': 'terminal',
-        'summary': '检查 git 状态',
-      });
-
-      await emitPlatformEvent('onAgentToolCallComplete', <String, dynamic>{
-        'taskId': taskId,
-        'toolName': 'terminal_execute',
-        'displayName': 'terminal_execute',
-        'toolType': 'terminal',
-        'summary': 'git 状态已返回',
-        'success': true,
-      });
-
-      await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-        'taskId': taskId,
-        'message': '第二轮：继续等待克隆完成。',
-        'isFinal': false,
-      });
-
-      await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-        'taskId': taskId,
-        'message': '第二轮：继续等待克隆完成，然后再次检查。',
-        'isFinal': false,
-      });
-
-      final firstRoundMessage = runtime.messages.firstWhere(
-        (msg) => msg.id == '$taskId-text',
-      );
-      final secondRoundMessage = runtime.messages.firstWhere(
-        (msg) => msg.id == '$taskId-text-2',
-      );
-
-      expect(firstRoundMessage.text, '第一轮：先检查仓库状态。');
-      expect(secondRoundMessage.text, '第二轮：继续等待克隆完成，然后再次检查。');
-      for (final message in <ChatMessageModel>[
-        firstRoundMessage,
-        secondRoundMessage,
-      ]) {
-        expect(message.streamMeta?['parentTaskId'], taskId);
-        expect(message.streamMeta?['kind'], 'text_snapshot');
-        expect(message.streamMeta?['seq'], isNotNull);
-      }
-      expect(runtime.pendingAgentTextTaskId, taskId);
-    },
-  );
-
-  test(
-    'finalizes each agent thinking card when the stream moves on to tool or text output',
-    () async {
-      const conversationId = 4602;
-      const taskId = 'agent-task-thinking-collapse';
-
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onAgentThinkingStart', <String, dynamic>{
-        'taskId': taskId,
-      });
-      await emitPlatformEvent('onAgentThinkingUpdate', <String, dynamic>{
-        'taskId': taskId,
-        'thinking': '第一轮先分析仓库状态。',
-      });
-      await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-        'taskId': taskId,
-        'toolName': 'terminal_execute',
-        'displayName': 'terminal_execute',
-        'toolType': 'terminal',
-        'summary': '检查 git 状态',
-      });
-
-      final firstThinkingCard = runtime.messages.firstWhere(
-        (message) => message.id == '$taskId-thinking',
-      );
-      expect(firstThinkingCard.cardData?['isLoading'], isFalse);
-      expect(firstThinkingCard.cardData?['stage'], 4);
-      expect(firstThinkingCard.cardData?['endTime'], isNotNull);
-
-      await emitPlatformEvent('onAgentThinkingStart', <String, dynamic>{
-        'taskId': taskId,
-      });
-      await emitPlatformEvent('onAgentThinkingUpdate', <String, dynamic>{
-        'taskId': taskId,
-        'thinking': '第二轮根据工具结果继续分析。',
-      });
-
-      final secondThinkingCard = runtime.messages.firstWhere(
-        (message) => message.id == '$taskId-thinking-2',
-      );
-      expect(secondThinkingCard.cardData?['isLoading'], isTrue);
-      expect(secondThinkingCard.cardData?['stage'], 1);
-
-      await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-        'taskId': taskId,
-        'message': '第二轮给出最终结论。',
-        'isFinal': false,
-      });
-
-      final finalizedSecondThinkingCard = runtime.messages.firstWhere(
-        (message) => message.id == '$taskId-thinking-2',
-      );
-      expect(finalizedSecondThinkingCard.cardData?['isLoading'], isFalse);
-      expect(finalizedSecondThinkingCard.cardData?['stage'], 4);
-      expect(runtime.activeThinkingCardId, isNull);
-      expect(runtime.isDeepThinking, isFalse);
-    },
-  );
-
-  test('forces tools layer when browser or terminal tools start', () async {
-    const conversationId = 5001;
-    const taskId = 'agent-tool-task';
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
+    coordinator.beginAcpTurn(
       taskId: taskId,
       conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
+      mode: kChatRuntimeModeAgent,
     );
 
-    await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-      'taskId': taskId,
-      'toolName': 'browser_use',
-      'displayName': 'browser_use',
-      'toolType': 'browser',
-      'summary': 'open browser',
-    });
+    expect(coordinator.activeAgentConversationIds, contains(conversationId));
+    expect(coordinator.isAgentConversationActive(conversationId), isTrue);
 
-    expect(runtime.chatIslandDisplayLayer, ChatIslandDisplayLayer.tools);
-    expect(runtime.lastAgentToolType, 'browser');
+    coordinator.unregisterTask(taskId);
+    expect(
+      coordinator.activeAgentConversationIds,
+      isNot(contains(conversationId)),
+    );
+    expect(coordinator.isAgentConversationActive(conversationId), isFalse);
+  });
 
-    await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-      'taskId': taskId,
-      'toolName': 'terminal_execute',
-      'displayName': 'terminal_execute',
-      'toolType': 'terminal',
-      'summary': 'run terminal',
-    });
-
+  test('maps ACP tool updates to the tools island', () {
+    const conversationId = 2501;
+    applyAcp(
+      conversationId,
+      'item/started',
+      turnId: 'turn-tool',
+      params: <String, dynamic>{
+        'item': <String, dynamic>{
+          'id': 'tool-1',
+          'type': 'commandExecution',
+          'command': 'pwd',
+          'status': 'running',
+        },
+      },
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
     expect(runtime.chatIslandDisplayLayer, ChatIslandDisplayLayer.tools);
     expect(runtime.lastAgentToolType, 'terminal');
-  });
-
-  test('stores browser session snapshot when browser tool completes', () async {
-    const conversationId = 6001;
-    const taskId = 'agent-browser-task';
-    const workspaceId = 'conversation_6001';
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-      'taskId': taskId,
-      'toolName': 'browser_use',
-      'displayName': 'browser_use',
-      'toolType': 'browser',
-      'summary': 'browser start',
-    });
-
-    await emitPlatformEvent('onAgentToolCallComplete', <String, dynamic>{
-      'taskId': taskId,
-      'toolName': 'browser_use',
-      'displayName': 'browser_use',
-      'toolType': 'browser',
-      'summary': 'browser ready',
-      'workspaceId': workspaceId,
-      'success': true,
-      'rawResultJson': jsonEncode(<String, dynamic>{
-        'activeTabId': 7,
-        'currentUrl': 'https://example.com/login',
-        'pageTitle': 'Sign In',
-        'userAgentProfile': 'desktop_safari',
-      }),
-    });
-
-    final snapshot = runtime.browserSessionSnapshot;
-    expect(runtime.chatIslandDisplayLayer, ChatIslandDisplayLayer.tools);
-    expect(runtime.lastAgentToolType, 'browser');
-    expect(snapshot, isNotNull);
-    expect(snapshot?.workspaceId, workspaceId);
-    expect(snapshot?.activeTabId, 7);
-    expect(snapshot?.currentUrl, 'https://example.com/login');
-    expect(snapshot?.title, 'Sign In');
-    expect(snapshot?.userAgentProfile, 'desktop_safari');
-  });
-
-  test(
-    'uses cardId from tool events when completing interrupted tools',
-    () async {
-      const conversationId = 6501;
-      const taskId = 'agent-interrupted-tool-task';
-      const cardId = 'agent-interrupted-tool-task-tool-9';
-
-      final runtime = coordinator.ensureRuntime(
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-      runtime.currentDispatchTaskId = taskId;
-      coordinator.registerTask(
-        taskId: taskId,
-        conversationId: conversationId,
-        mode: kChatRuntimeModeNormal,
-      );
-
-      await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-        'taskId': taskId,
-        'cardId': cardId,
-        'toolName': 'terminal_execute',
-        'displayName': 'terminal_execute',
-        'toolType': 'terminal',
-        'summary': '执行长命令',
-        'argsJson': jsonEncode(<String, dynamic>{'command': 'sleep 30'}),
-      });
-
-      await emitPlatformEvent('onAgentToolCallComplete', <String, dynamic>{
-        'taskId': taskId,
-        'cardId': cardId,
-        'toolName': 'terminal_execute',
-        'displayName': 'terminal_execute',
-        'toolType': 'terminal',
-        'status': 'interrupted',
-        'summary': '工具调用已被用户手动停止',
-        'success': false,
-        'interruptedBy': 'user',
-        'interruptionReason': 'manual_stop',
-      });
-
-      final toolMessage = runtime.messages.firstWhere(
-        (message) => message.id == cardId,
-      );
-
-      expect(toolMessage.cardData?['status'], 'interrupted');
-      expect(toolMessage.cardData?['interruptedBy'], 'user');
-      expect(toolMessage.cardData?['interruptionReason'], 'manual_stop');
-      expect(runtime.activeToolCardId, isNull);
-    },
-  );
-
-  test('continues assistant output after interrupted tool completes', () async {
-    const conversationId = 6502;
-    const taskId = 'agent-interrupted-continue-task';
-    const cardId = 'agent-interrupted-continue-task-tool-2';
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-    runtime.currentDispatchTaskId = taskId;
-    coordinator.registerTask(
-      taskId: taskId,
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-    );
-
-    await emitPlatformEvent('onAgentToolCallStart', <String, dynamic>{
-      'taskId': taskId,
-      'cardId': cardId,
-      'toolName': 'browser_use',
-      'displayName': 'browser_use',
-      'toolType': 'browser',
-      'summary': '打开页面',
-    });
-
-    await emitPlatformEvent('onAgentToolCallComplete', <String, dynamic>{
-      'taskId': taskId,
-      'cardId': cardId,
-      'toolName': 'browser_use',
-      'displayName': 'browser_use',
-      'toolType': 'browser',
-      'status': 'interrupted',
-      'summary': '工具调用已被用户手动停止',
-      'success': false,
-      'interruptedBy': 'user',
-      'interruptionReason': 'manual_stop',
-    });
-
-    await emitPlatformEvent('onAgentChatMessage', <String, dynamic>{
-      'taskId': taskId,
-      'message': '浏览器工具已停止，我先直接告诉你页面当前不可达。',
-      'isFinal': false,
-    });
-
-    final textMessage = runtime.messages.firstWhere(
-      (message) => message.id == '$taskId-text',
-    );
-    expect(textMessage.text, contains('浏览器工具已停止'));
-  });
-
-  test('applies initial island layer when a runtime is created late', () {
-    const conversationId = 7001;
-
-    final runtime = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-      initialChatIslandDisplayLayer: ChatIslandDisplayLayer.mode,
-    );
-
-    expect(runtime.chatIslandDisplayLayer, ChatIslandDisplayLayer.mode);
-
-    final reused = coordinator.ensureRuntime(
-      conversationId: conversationId,
-      mode: kChatRuntimeModeNormal,
-      initialChatIslandDisplayLayer: ChatIslandDisplayLayer.tools,
-    );
-
-    expect(identical(runtime, reused), isTrue);
-    expect(reused.chatIslandDisplayLayer, ChatIslandDisplayLayer.mode);
-  });
-
-  test('maps legacy model island layer wire value to tools', () {
-    expect(
-      ChatIslandDisplayLayer.fromWireName('model'),
-      ChatIslandDisplayLayer.tools,
-    );
   });
 }
