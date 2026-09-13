@@ -83,6 +83,31 @@ jobs:
           find app/build/outputs/apk -name "*.apk" -exec cp {} apk-out/ \;
           ls -la apk-out
 
+      - name: Verify APK contents (MediaTek NPU dispatch + LiteRT)
+        run: |
+          APK=$(ls apk-out/*.apk | head -1)
+          unzip -l "$APK" | grep -iE "LiteRtDispatch|liblitertlm|neuron" || true
+          unzip -l "$APK" | grep -qi "LiteRtDispatch_MediaTek.so" && echo "NPU dispatch lib present" || echo "WARN: dispatch lib missing"
+
+      - name: Publish APK to a release (CDN delivery)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.6.2.3-omniinfer-fix1
+          name: "OmniInfer 本地模型/权限接线修复 APK (v0.6.2.3-fix1)"
+          prerelease: true
+          draft: false
+          body: |
+            基于 v0.6.2.3-omniinfer，修复用户实测的 4 个问题：
+            - 唤起宠物：悬浮窗 + 无障碍权限合并为一次引导（此前只弹无障碍）
+            - 设置页文案：「本地模型」→「本地模型服务」
+            - 本地模型服务页：补回集成接线（MnnLocalModelsChannel 注册、LocalModelFeatureInstaller 安装、ChannelManager/MainActivity 钩子转发），修复「配置加载失败/市场为空」
+            - 设置页补回 iMessage 渠道入口与陪伴权限授权入口（+ 对应路由）
+            - 顺带修复：StorageService 缺少字体特效开关方法导致编译失败
+            天玑(MT6991) NPU：内置 libLiteRtDispatch_MediaTek.so，q4_ekv1280_mt6991 模型自动走 Backend.NPU。
+          files: apk-out/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push APK chunks to artifacts branch
         run: |
           git config user.email "hUh63@users.noreply.github.com"
