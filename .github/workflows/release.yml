@@ -242,6 +242,20 @@ jobs:
           printf '%s' "${RELEASE_KEYSTORE_B64}" | base64 --decode > "${RUNNER_TEMP}/release.jks"
           chmod 600 "${RUNNER_TEMP}/release.jks"
 
+      - name: Fetch framework sources
+        run: |
+          FB=third_party/omniinfer/framework
+          mkdir -p $FB
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/b10919" -o /tmp/llama.tgz
+          tar xzf /tmp/llama.tgz -C /tmp
+          rm -rf $FB/llama.cpp
+          mv /tmp/llama.cpp-b10919 $FB/llama.cpp
+          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/a03b005cf6f888ebf092e4753840f935827f9c36" -o /tmp/mnn.tgz
+          tar xzf /tmp/mnn.tgz -C /tmp
+          rm -rf $FB/mnn
+          mv /tmp/MNN-a03b005cf6f888ebf092e4753840f935827f9c36 $FB/mnn
+          ls $FB/llama.cpp/CMakeLists.txt $FB/mnn/CMakeLists.txt
+
       - name: Build production release APKs
         shell: bash
         env:
