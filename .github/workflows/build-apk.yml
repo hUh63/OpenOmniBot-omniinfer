@@ -92,12 +92,16 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2.3-omniinfer-fix1
-          name: "OmniInfer 本地模型/权限接线修复 APK (v0.6.2.3-fix1)"
+          tag_name: v0.6.2.3-omniinfer-fix2
+          name: "OmniInfer 本地模型崩溃修复 APK (v0.6.2.3-fix2)"
           prerelease: true
           draft: false
           body: |
-            基于 v0.6.2.3-omniinfer，修复用户实测的 4 个问题：
+            基于 v0.6.2.3-omniinfer-fix1，修复真机实测崩溃：
+            - **修复 llama.cpp CPU flash-attention 段错误**（ggml_compute_forward_flash_attn_ext SIGSEGV）：
+              天玑等无 NPU/GPU 加速器的设备此前强制开启 CPU 版 FA，现默认关闭（HTP/GPU 后端仍开启），
+              并支持通过 config {"flash_attn": true} 显式开启。
+            含 fix1 的全部 4 项修复：
             - 唤起宠物：悬浮窗 + 无障碍权限合并为一次引导（此前只弹无障碍）
             - 设置页文案：「本地模型」→「本地模型服务」
             - 本地模型服务页：补回集成接线（MnnLocalModelsChannel 注册、LocalModelFeatureInstaller 安装、ChannelManager/MainActivity 钩子转发），修复「配置加载失败/市场为空」
