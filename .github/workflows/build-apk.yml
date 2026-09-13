@@ -52,6 +52,12 @@ jobs:
           tar xzf /tmp/llama.tgz -C /tmp
           rm -rf $FB/llama.cpp
           mv /tmp/llama.cpp-b10919 $FB/llama.cpp
+          # Drop SVE/SVE2 CPU variants. Their SVE kernels SIGSEGV on some mobile SoCs
+          # (reproduced on MediaTek Dimensity MT6991: flash-attn + Q4_K repack GEMM).
+          # Runtime then falls back to android_armv8.6_1 (DOTPROD+FP16+i8mm, no SVE).
+          sed -i -E '/ggml_add_cpu_backend_variant\(android_armv9/d' $FB/llama.cpp/ggml/src/CMakeLists.txt
+          echo "--- remaining Android CPU variants ---"
+          grep -n "android_armv" $FB/llama.cpp/ggml/src/CMakeLists.txt
           curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/a03b005cf6f888ebf092e4753840f935827f9c36" -o /tmp/mnn.tgz
           tar xzf /tmp/mnn.tgz -C /tmp
           rm -rf $FB/mnn
@@ -92,16 +98,19 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2.3-omniinfer-fix2
-          name: "OmniInfer 本地模型崩溃修复 APK (v0.6.2.3-fix2)"
+          tag_name: v0.6.2.3-omniinfer-fix3
+          name: "OmniInfer 本地模型崩溃修复 APK (v0.6.2.3-fix3)"
           prerelease: true
           draft: false
           body: |
-            基于 v0.6.2.3-omniinfer-fix1，修复真机实测崩溃：
-            - **修复 llama.cpp CPU flash-attention 段错误**（ggml_compute_forward_flash_attn_ext SIGSEGV）：
-              天玑等无 NPU/GPU 加速器的设备此前强制开启 CPU 版 FA，现默认关闭（HTP/GPU 后端仍开启），
-              并支持通过 config {"flash_attn": true} 显式开启。
-            含 fix1 的全部 4 项修复：
+            基于 v0.6.2.3-omniinfer-fix2，继续修复真机崩溃：
+            - **剔除 llama.cpp 的 SVE/SVE2 CPU 变体**：该天玑(MT6991)设备上 SVE 内核在
+              flash-attention 与 Q4_K repack GEMM 两处均 SIGSEGV（空指针）。构建时不再产出
+              android_armv9.0_1 / 9.2_1 / 9.2_2（均含 SVE），运行时自动回落到
+              android_armv8.6_1（DOTPROD+FP16+i8mm，无 SVE），兼顾稳定与性能。
+            含 fix2：
+            - CPU 端默认关闭 flash attention（HTP/GPU 仍开启，可用 config {"flash_attn": true} 开启）
+            含 fix1 的 4 项修复：
             - 唤起宠物：悬浮窗 + 无障碍权限合并为一次引导（此前只弹无障碍）
             - 设置页文案：「本地模型」→「本地模型服务」
             - 本地模型服务页：补回集成接线（MnnLocalModelsChannel 注册、LocalModelFeatureInstaller 安装、ChannelManager/MainActivity 钩子转发），修复「配置加载失败/市场为空」
