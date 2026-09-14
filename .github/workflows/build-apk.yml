@@ -96,21 +96,19 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2.3-omniinfer-fix4
-          name: "OmniInfer 本地模型崩溃修复 APK (v0.6.2.3-fix4)"
+          tag_name: v0.6.2.3-omniinfer-fix5
+          name: "OmniInfer 预填充可取消 + 阶段诊断 APK (v0.6.2.3-fix5)"
           prerelease: true
           draft: false
           body: |
-            基于 v0.6.2.3-omniinfer-fix3，把"构建期删变体"改为**运行时保守自动降级**：
-            - **CPU 变体全部保留**（不再删除 android_armv9.* / SVE 变体）。
-            - **运行时选档**：按 ggml_backend_score 排序，结合策略 cpu_backend_policy
-              （默认 conservative：跳过 SVE/SVE2 档）+ 拒绝列表 cpu_variant_deny 选择变体。
-            - **B 同进程探针**：加载后、对外服务前跑一次受信号保护(sigsetjmp)的 1-token 预热解码；
-              命中崩溃则 unload 当前档并自动换下一档重试（默认开启，cpu_probe=0 可关）。
-            - **A 跨重启降级**：状态写入 cache_dir/omniinfer_cpu_state.txt；若上次在生成中崩退，
-              该档自动进拒绝列表，下次启动直接降档。
+            基于 v0.6.2.3-omniinfer-fix4：
+            - **预填充(prefill)现在可取消**：decode_batched 每批检查取消标志；长 prompt 卡在预填充时，
+              点停止立即生效（此前取消标志只在生成阶段按 token 检查，卡预填充就停不掉）。
+            - **新增阶段诊断日志**（tag OmniInferJni），一次运行即可定位卡点：
+              generate: enter / template applied / sampler configured / parser ready / prefill done。
+            含 fix4：运行时保守自动降级（CPU 变体全保留 + A 跨重启降级 + B 同进程探针）
             含 fix2：CPU 端默认关闭 flash attention（可用 config {"flash_attn": true} 开启）
-            含 fix1 的 4 项修复：
+            含 fix1 的 4 项修复
             - 唤起宠物：悬浮窗 + 无障碍权限合并为一次引导（此前只弹无障碍）
             - 设置页文案：「本地模型」→「本地模型服务」
             - 本地模型服务页：补回集成接线（MnnLocalModelsChannel 注册、LocalModelFeatureInstaller 安装、ChannelManager/MainActivity 钩子转发），修复「配置加载失败/市场为空」
