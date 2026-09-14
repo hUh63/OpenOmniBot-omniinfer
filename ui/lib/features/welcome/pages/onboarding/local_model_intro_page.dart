@@ -11,8 +11,8 @@ import 'package:ui/widgets/settings_section_title.dart';
 
 // ---------- SVG icons ----------
 
-const String kOnboardingRecommendedModelId = 'gemma-4-E2B-it';
-const String kOnboardingRecommendedBackend = 'litert';
+const String kOnboardingRecommendedModelId = 'Gemma-4-E2B';
+const String kOnboardingRecommendedBackend = 'llama.cpp';
 
 const String _kShieldSvg = '''
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
