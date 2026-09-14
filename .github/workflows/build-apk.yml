@@ -96,16 +96,21 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2.3-omniinfer-fix5
-          name: "OmniInfer 预填充可取消 + 阶段诊断 APK (v0.6.2.3-fix5)"
+          tag_name: v0.6.2.3-omniinfer-fix6
+          name: "OmniInfer 修复变体降级失效 + 会话串行化 APK (v0.6.2.3-fix6)"
           prerelease: true
           draft: false
           body: |
-            基于 v0.6.2.3-omniinfer-fix4：
-            - **预填充(prefill)现在可取消**：decode_batched 每批检查取消标志；长 prompt 卡在预填充时，
-              点停止立即生效（此前取消标志只在生成阶段按 token 检查，卡预填充就停不掉）。
-            - **新增阶段诊断日志**（tag OmniInferJni），一次运行即可定位卡点：
-              generate: enter / template applied / sampler configured / parser ready / prefill done。
+            基于 v0.6.2.3-omniinfer-fix5：
+            - **修复降级逻辑自我失效（关键）**：fix4 的 A 机制在加载成功后写了 ARMED=<当前档>，
+              却从未清除。于是每次启动都会把"上次用过的档"拉黑，几次启动后 armv8 全被拉黑、
+             候选为空，代码回退成"交给 ggml 自动选"，又选回了 SVE 的 armv9.0_1 —— 正是最初的崩溃。
+              现在：ARMED 只在一次 generate() 期间生效、生成结束立即清除；候选被拉黑到空时自动重置
+              黑名单；且**任何情况下都不会再回退到 SVE/armv9 变体**（兜底显式加载 armv8.0_1）。
+            - **会话串行化**：nativeGenerate/nativeReset/nativeLoadHistory 增加每 handle 互斥锁。
+              此前同一个 handle 并发 generate 会同时改同一份 llama_context / KV cache，导致
+              ggml_compute_forward_set_rows 里的 GGML_ASSERT 越界崩溃（回复完闪退 / 停止也闪退）。
+            - 保留 fix5：预填充(prefill)可取消 + 阶段诊断日志
             含 fix4：运行时保守自动降级（CPU 变体全保留 + A 跨重启降级 + B 同进程探针）
             含 fix2：CPU 端默认关闭 flash attention（可用 config {"flash_attn": true} 开启）
             含 fix1 的 4 项修复
