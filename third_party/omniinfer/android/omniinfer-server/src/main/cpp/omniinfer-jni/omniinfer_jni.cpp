@@ -81,6 +81,10 @@ struct Session {
   std::atomic<bool> cancelled{false};
   std::atomic<bool> graceful_stop{false};  // true = /v1/cancel, false = hard cancel (disconnect)
   bool thinking_enabled = false;
+  // Serialises access to the underlying backend/context. Two concurrent generate()
+  // calls on the same handle corrupt the shared llama_context / KV cache, which
+  // shows up as GGML_ASSERT(...) in ggml_compute_forward_set_rows.
+  mutable std::mutex mtx;
 };
 
 std::mutex g_sessions_mutex;
@@ -394,6 +398,9 @@ jstring NativeGenerate(JNIEnv* env, jobject, jlong handle, jstring system_prompt
     session = it->second;
   }
 
+  // A second generate() on the same handle must wait for the first to finish rather
+  // than mutate the shared llama_context concurrently.
+  std::lock_guard<std::mutex> session_lock(session->mtx);
   session->cancelled.store(false);
   session->graceful_stop.store(false);
   const std::string req = JStringToStdString(env, request_json);
@@ -467,9 +474,13 @@ jstring NativeGenerate(JNIEnv* env, jobject, jlong handle, jstring system_prompt
 }
 
 jboolean NativeLoadHistory(JNIEnv* env, jobject, jlong handle, jobjectArray roles, jobjectArray contents) {
-  std::lock_guard<std::mutex> guard(g_sessions_mutex);
-  auto it = g_sessions.find(static_cast<int64_t>(handle));
-  if (it == g_sessions.end()) return JNI_FALSE;
+  Session* session = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(g_sessions_mutex);
+    auto it = g_sessions.find(static_cast<int64_t>(handle));
+    if (it == g_sessions.end()) return JNI_FALSE;
+    session = it->second;
+  }
 
   const jsize count = roles ? env->GetArrayLength(roles) : 0;
   if (count != (contents ? env->GetArrayLength(contents) : 0)) return JNI_FALSE;
@@ -482,7 +493,8 @@ jboolean NativeLoadHistory(JNIEnv* env, jobject, jlong handle, jobjectArray role
     env->DeleteLocalRef(jr);
     env->DeleteLocalRef(jc);
   }
-  return it->second->backend->load_history(msgs) ? JNI_TRUE : JNI_FALSE;
+  std::lock_guard<std::mutex> lock(session->mtx);
+  return session->backend->load_history(msgs) ? JNI_TRUE : JNI_FALSE;
 }
 
 jboolean NativePrewarmImage(JNIEnv*, jobject, jlong, jbyteArray, jint) {
@@ -496,9 +508,15 @@ void NativeSetThinkMode(JNIEnv*, jobject, jlong handle, jboolean enabled) {
 }
 
 void NativeReset(JNIEnv*, jobject, jlong handle) {
-  std::lock_guard<std::mutex> guard(g_sessions_mutex);
-  auto it = g_sessions.find(static_cast<int64_t>(handle));
-  if (it != g_sessions.end()) it->second->backend->reset();
+  Session* session = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(g_sessions_mutex);
+    auto it = g_sessions.find(static_cast<int64_t>(handle));
+    if (it == g_sessions.end()) return;
+    session = it->second;
+  }
+  std::lock_guard<std::mutex> lock(session->mtx);
+  session->backend->reset();
 }
 
 void NativeCancel(JNIEnv*, jobject, jlong handle) {
@@ -525,6 +543,7 @@ void NativeFree(JNIEnv*, jobject, jlong handle) {
     session = it->second;
     g_sessions.erase(it);
   }
+  { std::lock_guard<std::mutex> lock(session->mtx); }  // drain any in-flight generate()
   delete session;
   LogPrint(ANDROID_LOG_INFO, "NativeFree: session " + std::to_string(handle) + " destroyed");
 }
