@@ -341,7 +341,26 @@ jlong NativeInit(JNIEnv* env, jobject, jstring config_json) {
 
   LogPrint(ANDROID_LOG_INFO, "NativeInit: backend=" + backend_name + " model=" + *model_path);
 
-  if (!backend->load(*model_path, config, native_lib_dir, n_threads, n_ctx)) {
+  // Load, retrying with the next lower CPU variant whenever the warm-up probe
+  // caught a crash in the previously selected one (conservative auto-downgrade).
+  bool loaded = false;
+  constexpr int kMaxCpuVariantRetries = 4;
+  for (int attempt = 0; attempt <= kMaxCpuVariantRetries; ++attempt) {
+    if (backend->load(*model_path, config, native_lib_dir, n_threads, n_ctx)) {
+      loaded = true;
+      break;
+    }
+    if (!omniinfer::g_cpuVariantRetry) break;
+    omniinfer::g_cpuVariantRetry = false;
+    LogPrint(ANDROID_LOG_WARN,
+        "NativeInit: CPU variant crashed in warm-up probe; retrying with a lower tier");
+#if defined(OMNIINFER_BACKEND_LLAMA_CPP)
+    backend = std::make_unique<omniinfer::LlamaCppBackend>();
+#else
+    break;
+#endif
+  }
+  if (!loaded) {
     StoreLastError("Backend '" + backend_name + "' failed to load model: " + *model_path);
     LogPrint(ANDROID_LOG_ERROR, "NativeInit: " + backend_name + " load failed");
     return 0;
