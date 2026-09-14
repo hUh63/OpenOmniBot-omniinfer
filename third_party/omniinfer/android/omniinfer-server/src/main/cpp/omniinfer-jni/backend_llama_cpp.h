@@ -25,8 +25,17 @@
 #include <dlfcn.h>
 #include <vector>
 #include <cstring>
+#include <csignal>
+#include <csetjmp>
+#include <fstream>
+#include <algorithm>
 
 namespace omniinfer {
+
+// Set by LlamaCppBackend::load() when it bailed out because the selected CPU
+// backend variant crashed during the warm-up probe. NativeInit() reads it to
+// retry once with the next lower variant.
+inline bool g_cpuVariantRetry = false;
 
 class LlamaCppBackend : public InferenceBackend {
 public:
@@ -68,6 +77,11 @@ public:
 
       log_ggml_backends("after load_all");
     });
+
+    // Select the CPU backend variant. All variants stay shipped; instead of
+    // deleting the unstable ones at build time we apply a runtime policy +
+    // deny-list + persisted crash history (conservative auto-downgrade).
+    cpu_select_variant_(config_json, native_lib_dir);
 
     llama_model_params mp = llama_model_default_params();
     std::vector<ggml_backend_dev_t> selected_devices;
@@ -158,6 +172,15 @@ public:
             "Loaded mmproj: %s", mmproj_path.c_str());
       }
     }
+
+    // (B) Warm-up probe: exercise the real kernels once under a signal guard, so
+    // a broken CPU variant is detected and downgraded WITHOUT killing the app.
+    if (!cpu_variant_probe_(config_json)) {
+      cpu_finish_(/*ok=*/false);   // blacklist this variant + persist deny list
+      poisoned_ = true;            // do not free possibly-corrupt native state
+      return false;                // caller retries with the next lower variant
+    }
+    cpu_finish_(/*ok=*/true);      // (A) persist the working variant
 
     return true;
   }
@@ -613,7 +636,219 @@ full_prefill:
   const char* name() const override { return "llama.cpp"; }
 
 private:
+  // ------------------------------------------------------------------
+  // CPU backend variant selection + conservative auto-downgrade (A + B).
+  // Every variant stays shipped; unstable ones are avoided at runtime via
+  // policy / deny-list / persisted crash history instead of build-time removal.
+  // ------------------------------------------------------------------
+  std::string cpu_variant_{};
+  std::string state_path_{};
+  std::vector<std::string> deny_{};
+  bool poisoned_ = false;
+
+  inline static volatile sig_atomic_t s_guard_ = 0;
+  inline static sigjmp_buf* s_jmp_ = nullptr;
+  inline static struct sigaction s_old_[4];
+
+  static void crash_trampoline_(int sig) {
+    if (s_guard_ && s_jmp_) { siglongjmp(*s_jmp_, sig); }
+    _exit(128 + sig);
+  }
+
+  static std::string base_name_(const std::string& p) {
+    const auto s = p.find_last_of('/');
+    return s == std::string::npos ? p : p.substr(s + 1);
+  }
+
+  static bool conservative_(const std::string& config_json) {
+    const std::string policy = extract_string(config_json, "cpu_backend_policy");
+    // Default = conservative: the SVE/SVE2 (armv9.*) tiers are unstable on some
+    // mobile SoCs. "auto"/"aggressive" opts into trying every tier (still probed).
+    return policy != "auto" && policy != "aggressive";
+  }
+
+  static bool is_denied_(const std::string& name, const std::vector<std::string>& deny) {
+    for (const auto& d : deny) if (!d.empty() && name.find(d) != std::string::npos) return true;
+    return false;
+  }
+
+  static std::string state_file_(const std::string& config_json) {
+    const std::string cache = extract_string(config_json, "cache_dir");
+    return cache.empty() ? std::string() : (cache + "/omniinfer_cpu_state.txt");
+  }
+
+  static void read_state_(const std::string& path, std::string& armed, std::vector<std::string>& deny) {
+    armed.clear(); deny.clear();
+    if (path.empty()) return;
+    std::ifstream in(path);
+    if (!in) return;
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.rfind("ARMED=", 0) == 0) {
+        const std::string v = line.substr(6);
+        if (v != "-") armed = v;
+      } else if (line.rfind("DENY=", 0) == 0) {
+        const std::string v = line.substr(5);
+        size_t p = 0;
+        while (p <= v.size()) {
+          const auto q = v.find(',', p);
+          const std::string t = v.substr(p, q == std::string::npos ? std::string::npos : q - p);
+          if (!t.empty()) deny.push_back(t);
+          if (q == std::string::npos) break;
+          p = q + 1;
+        }
+      }
+    }
+  }
+
+  static void write_state_(const std::string& path, const std::string& armed,
+                           const std::vector<std::string>& deny) {
+    if (path.empty()) return;
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return;
+    out << "ARMED=" << (armed.empty() ? "-" : armed) << "\nDENY=";
+    for (size_t i = 0; i < deny.size(); ++i) { if (i) out << ','; out << deny[i]; }
+    out << "\n";
+  }
+
+  // Best-first list of usable CPU variant .so paths (score-based, filtered).
+  static std::vector<std::string> cpu_candidates_(const std::string& dir,
+                                                  const std::string& config_json,
+                                                  const std::vector<std::string>& deny) {
+    std::vector<std::pair<int, std::string>> scored;
+    const std::string want = extract_string(config_json, "cpu_variant");
+    const bool cons = conservative_(config_json);
+    DIR* d = opendir(dir.c_str());
+    if (d) {
+      struct dirent* e;
+      while ((e = readdir(d)) != nullptr) {
+        const std::string name = e->d_name;
+        if (name.rfind("libggml-cpu-", 0) != 0) continue;
+        if (name.size() < 4 || name.substr(name.size() - 3) != ".so") continue;
+        if (!want.empty() && name.find(want) == std::string::npos) continue;
+        if (is_denied_(name, deny)) continue;
+        if (cons && name.find("armv9") != std::string::npos) continue;  // SVE/SVE2 tiers
+        const std::string path = dir + "/" + name;
+        void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!h) continue;
+        auto fn = (int (*)(void)) dlsym(h, "ggml_backend_score");
+        const int s = fn ? fn() : 0;
+        dlclose(h);
+        if (s > 0) scored.emplace_back(s, path);
+      }
+      closedir(d);
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const std::pair<int, std::string>& a, const std::pair<int, std::string>& b) {
+                return a.first > b.first;
+              });
+    std::vector<std::string> out;
+    out.reserve(scored.size());
+    for (auto& p : scored) out.push_back(p.second);
+    return out;
+  }
+
+  // Unload whatever CPU backend ggml auto-picked, then load the requested variant.
+  static bool replace_cpu_backend_(const std::string& path) {
+    if (path.empty()) return false;
+    for (size_t i = ggml_backend_reg_count(); i-- > 0; ) {
+      ggml_backend_reg_t reg = ggml_backend_reg_get(i);
+      const char* nm = ggml_backend_reg_name(reg);
+      if (nm && std::strcmp(nm, "CPU") == 0) ggml_backend_unload(reg);
+    }
+    return ggml_backend_load(path.c_str()) != nullptr;
+  }
+
+  void cpu_select_variant_(const std::string& config_json, const std::string& dir) {
+    state_path_ = state_file_(config_json);
+    std::string armed;
+    read_state_(state_path_, armed, deny_);
+    const std::string extra = extract_string(config_json, "cpu_variant_deny");
+    {
+      size_t p = 0;
+      while (p <= extra.size()) {
+        const auto q = extra.find(',', p);
+        const std::string t = extra.substr(p, q == std::string::npos ? std::string::npos : q - p);
+        if (!t.empty()) deny_.push_back(t);
+        if (q == std::string::npos) break;
+        p = q + 1;
+      }
+    }
+    if (!armed.empty()) {
+      // Previous run died while using `armed` -> blacklist it and downgrade.
+      deny_.push_back(armed);
+      write_state_(state_path_, "", deny_);
+      __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+          "CPU variant '%s' crashed previously; adding to deny list", armed.c_str());
+    }
+    const std::vector<std::string> cands = cpu_candidates_(dir, config_json, deny_);
+    if (!cands.empty()) {
+      const bool ok = replace_cpu_backend_(cands.front());
+      cpu_variant_ = base_name_(cands.front());
+      __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+          "CPU variant selected: %s (candidates=%zu, %s)", cpu_variant_.c_str(),
+          cands.size(), ok ? "loaded" : "load-failed");
+    } else {
+      cpu_variant_.clear();
+      __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
+          "No allowed CPU variant; keeping ggml default selection");
+    }
+  }
+
+  // (B) Run one guarded 1-token decode. false => the variant crashed on this op.
+  bool cpu_variant_probe_(const std::string& config_json) {
+    if (!ctx_) return true;
+    if (!extract_bool(config_json, "cpu_probe", true)) return true;
+    static sigjmp_buf jb;
+    s_guard_ = 1;
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = crash_trampoline_;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, &s_old_[0]);
+    sigaction(SIGBUS,  &sa, &s_old_[1]);
+    sigaction(SIGILL,  &sa, &s_old_[2]);
+    sigaction(SIGFPE,  &sa, &s_old_[3]);
+    const int crashed = sigsetjmp(jb, 1);
+    if (crashed == 0) {
+      s_jmp_ = &jb;
+      llama_memory_clear(llama_get_memory(ctx_), true);
+      common_batch_clear(batch_);
+      common_batch_add(batch_, 1 /*BOS*/, 0, {0}, false);
+      llama_decode(ctx_, batch_);
+      llama_memory_clear(llama_get_memory(ctx_), true);
+    }
+    sigaction(SIGSEGV, &s_old_[0], nullptr);
+    sigaction(SIGBUS,  &s_old_[1], nullptr);
+    sigaction(SIGILL,  &s_old_[2], nullptr);
+    sigaction(SIGFPE,  &s_old_[3], nullptr);
+    s_guard_ = 0;
+    s_jmp_ = nullptr;
+    if (crashed != 0) {
+      __android_log_print(ANDROID_LOG_ERROR, "OmniInferJni",
+          "CPU variant '%s' probe CRASHED (signal %d)", cpu_variant_.c_str(), crashed);
+      return false;
+    }
+    return true;
+  }
+
+  void cpu_finish_(bool ok) {
+    if (ok) {
+      write_state_(state_path_, cpu_variant_, deny_);
+      g_cpuVariantRetry = false;
+    } else {
+      if (!cpu_variant_.empty()) deny_.push_back(cpu_variant_);
+      write_state_(state_path_, "", deny_);
+      g_cpuVariantRetry = true;
+    }
+  }
+
+  // ------------------------------------------------------------------
+
   void release() {
+    // After a caught SIGSEGV the native state may be corrupt; do not touch it.
+    if (poisoned_) return;
     if (mtmd_ctx_) { mtmd_free(mtmd_ctx_); mtmd_ctx_ = nullptr; }
     if (sampler_) { common_sampler_free(sampler_); sampler_ = nullptr; }
     chat_templates_.reset();
