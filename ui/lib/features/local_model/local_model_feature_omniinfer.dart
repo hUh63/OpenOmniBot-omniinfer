@@ -4,8 +4,8 @@ import 'package:ui/services/mnn_local_models_service.dart';
 class _OmniinferLocalModelFeature extends LocalModelFeature {
   static const String _builtinProfileId = 'omniinfer-local';
   static const String _legacyBuiltinProfileId = 'mnn-local';
-  static const String _recommendedBackend = 'litert';
-  static const String _recommendedModelId = 'gemma-4-E2B-it';
+  static const String _recommendedBackend = 'llama.cpp';
+  static const String _recommendedModelId = 'Gemma-4-E2B';
 
   @override
   bool get enabled => true;
