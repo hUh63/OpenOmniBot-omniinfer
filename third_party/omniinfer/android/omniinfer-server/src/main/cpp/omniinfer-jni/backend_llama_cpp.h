@@ -29,6 +29,7 @@
 #include <csetjmp>
 #include <fstream>
 #include <algorithm>
+#include <mutex>
 
 namespace omniinfer {
 
@@ -510,6 +511,9 @@ full_prefill:
 
     std::vector<llama_token> generated_toks;
     int n_generated = 0;
+    // Arm the crash guard for the variant that is about to run inference. If the
+    // process dies before the end of this loop, the next launch will blacklist it.
+    if (!state_path_.empty()) write_state_(state_path_, cpu_variant_, deny_);
     while (!cancelled.load()) {
       if (n_generated >= eff_max_tokens) break;
       if (cur_pos_ >= n_ctx_ - 4) shift_context();
@@ -546,6 +550,10 @@ full_prefill:
         }
       }
     }
+
+    // Generation finished (normally or by cancellation) - disarm the crash guard so a
+    // later, unrelated crash does not blacklist a perfectly good CPU variant.
+    if (!state_path_.empty()) write_state_(state_path_, "", deny_);
 
     // Hard cancel (client disconnect): invalidate cache for clean state.
     if (cancelled.load() && !graceful_stop.load()) {
@@ -800,18 +808,25 @@ private:
       __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
           "CPU variant '%s' crashed previously; adding to deny list", armed.c_str());
     }
-    const std::vector<std::string> cands = cpu_candidates_(dir, config_json, deny_);
-    if (!cands.empty()) {
-      const bool ok = replace_cpu_backend_(cands.front());
-      cpu_variant_ = base_name_(cands.front());
-      __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
-          "CPU variant selected: %s (candidates=%zu, %s)", cpu_variant_.c_str(),
-          cands.size(), ok ? "loaded" : "load-failed");
-    } else {
-      cpu_variant_.clear();
+    std::vector<std::string> cands = cpu_candidates_(dir, config_json, deny_);
+    if (cands.empty() && !deny_.empty()) {
+      // Safety: the deny list has blacklisted every allowed variant. Reset it rather
+      // than fall back to ggml's auto-pick, which may select an unstable SVE variant.
       __android_log_print(ANDROID_LOG_WARN, "OmniInferJni",
-          "No allowed CPU variant; keeping ggml default selection");
+          "CPU deny list exhausted all candidates; resetting deny list");
+      deny_.clear();
+      write_state_(state_path_, "", deny_);
+      cands = cpu_candidates_(dir, config_json, deny_);
     }
+    // Never leave ggml's own (possibly armv9/SVE) default choice in place: if even the
+    // unfiltered scan found nothing, load the lowest, SVE-free variant explicitly.
+    const std::string chosen =
+        cands.empty() ? (dir + "/libggml-cpu-android_armv8.0_1.so") : cands.front();
+    const bool ok = replace_cpu_backend_(chosen);
+    cpu_variant_ = base_name_(chosen);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "CPU variant selected: %s (candidates=%zu, %s)", cpu_variant_.c_str(),
+        cands.size(), ok ? "loaded" : "load-failed");
   }
 
   // (B) Run one guarded 1-token decode. false => the variant crashed on this op.
@@ -854,7 +869,11 @@ private:
 
   void cpu_finish_(bool ok) {
     if (ok) {
-      write_state_(state_path_, cpu_variant_, deny_);
+      // Do NOT arm here. Arming is scoped to a single generation() call (see there);
+      // arming at load time made every fresh launch blacklist the variant it had just
+      // used, so 4 launches exhausted all armv8 variants and we fell back to the SVE
+      // armv9.0_1 backend - i.e. straight back into the original crash.
+      write_state_(state_path_, "", deny_);
       g_cpuVariantRetry = false;
     } else {
       if (!cpu_variant_.empty()) deny_.push_back(cpu_variant_);
