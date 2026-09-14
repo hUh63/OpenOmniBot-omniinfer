@@ -199,6 +199,10 @@ public:
       std::atomic<bool>& graceful_stop,
       const std::string& sampling_json = "") override {
 
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "generate: enter msgs_json=%zuB tools_json=%zuB max_tokens=%d thinking=%d",
+        messages_json.size(), tools_json.size(), max_tokens, (int) thinking_enabled);
+
     // Build full messages vector.
     std::vector<common_chat_msg> messages;
     if (!messages_json.empty()) {
@@ -253,7 +257,11 @@ public:
     }
 
     common_chat_params params = common_chat_templates_apply(chat_templates_.get(), inputs);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "generate: template applied prompt=%zuB parser=%zuB grammar=%zuB has_tools=%d",
+        params.prompt.size(), params.parser.size(), params.grammar.size(), (int) has_tools);
     apply_sampling_params(sampling_json, params);
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni", "generate: sampler configured");
     common_sampler_reset(sampler_);
 
     // Build parser params for tool call detection.
@@ -262,6 +270,7 @@ public:
     if (!params.parser.empty()) {
       parser_params.parser.load(params.parser);
     }
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni", "generate: parser ready");
 
     // Prefill with KV cache prefix reuse.
     auto t_prefill_start = std::chrono::steady_clock::now();
@@ -433,7 +442,14 @@ full_prefill:
         // No cache match (or fallback from failed seq_rm/decode): full clear + full prefill.
         cur_pos_ = 0;
         llama_memory_clear(llama_get_memory(ctx_), false);
-        if (decode_batched(prompt_toks, 0, true) != 0) return "";
+        {
+          const int rc = decode_batched(prompt_toks, 0, true, &cancelled);
+          if (rc != 0) {
+            if (rc == 2) __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+                "generate: cancelled during prefill");
+            return "";
+          }
+        }
         cur_pos_ = (int)prompt_toks.size();
       }
 
@@ -444,6 +460,9 @@ full_prefill:
 
     auto t_prefill_end = std::chrono::steady_clock::now();
     int64_t prefill_us = std::chrono::duration_cast<std::chrono::microseconds>(t_prefill_end - t_prefill_start).count();
+    __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+        "generate: prefill done tokens=%d cached=%d image=%d in %.1f s",
+        n_prompt_tokens, n_cached_tokens, n_image_tokens, prefill_us / 1e6);
 
     // Generate tokens.
     common_sampler_reset(sampler_);
@@ -1370,8 +1389,10 @@ private:
     has_cache_ = false;
   }
 
-  int decode_batched(const std::vector<llama_token>& toks, llama_pos start, bool last_logit = false) {
+  int decode_batched(const std::vector<llama_token>& toks, llama_pos start, bool last_logit = false,
+                     const std::atomic<bool>* cancel = nullptr) {
     for (int i = 0; i < (int)toks.size(); i += n_batch_) {
+      if (cancel && cancel->load()) return 2;   // aborted during prefill
       int n = std::min((int)toks.size() - i, n_batch_);
       common_batch_clear(batch_);
       if (start + i + n >= n_ctx_ - 4) shift_context();
