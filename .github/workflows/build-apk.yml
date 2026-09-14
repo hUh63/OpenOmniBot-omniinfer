@@ -96,12 +96,20 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2.3-omniinfer-fix6
-          name: "OmniInfer 修复变体降级失效 + 会话串行化 APK (v0.6.2.3-fix6)"
+          tag_name: v0.6.2.3-omniinfer-fix7
+          name: "OmniInfer 默认后端改回 OmniInfer-llama + 卡死诊断 APK (v0.6.2.3-fix7)"
           prerelease: true
           draft: false
           body: |
-            基于 v0.6.2.3-omniinfer-fix5：
+            基于 v0.6.2.3-omniinfer-fix6：
+            - **推理后端默认改回 OmniInfer-llama（llama.cpp）**：新人引导页此前把后端强制设成
+              litert(LiteRT-LM)，卸载重装后走一遍引导，后端就成了 LiteRT-LM，只能导 .litertlm，
+              导 GGUF 会报「Please select a .litertlm model file」。现在引导推荐与内置本地模型
+              profile 的推荐后端都改为 llama.cpp，推荐模型改为 llama 市场的 Gemma-4-E2B。
+            - **卡死定位日志**：预填充每批打印 prefill progress i/total，解码每 32 token 打印
+              decode progress n=.. pos=..；配合 generate: enter / prefill done 可判断是"慢"还是"真卡死"。
+            - **卡死不再拖垮整个 app**：会话锁改为 std::timed_mutex，等 150s 仍拿不到锁就放弃本次
+              请求并打日志，避免一个卡住的生成把后续所有聊天永久堵住。
             - **修复降级逻辑自我失效（关键）**：fix4 的 A 机制在加载成功后写了 ARMED=<当前档>，
               却从未清除。于是每次启动都会把"上次用过的档"拉黑，几次启动后 armv8 全被拉黑、
              候选为空，代码回退成"交给 ggml 自动选"，又选回了 SVE 的 armv9.0_1 —— 正是最初的崩溃。
