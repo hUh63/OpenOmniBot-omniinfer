@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -83,8 +84,9 @@ struct Session {
   bool thinking_enabled = false;
   // Serialises access to the underlying backend/context. Two concurrent generate()
   // calls on the same handle corrupt the shared llama_context / KV cache, which
-  // shows up as GGML_ASSERT(...) in ggml_compute_forward_set_rows.
-  mutable std::mutex mtx;
+  // shows up as GGML_ASSERT(...) in ggml_compute_forward_set_rows. timed_mutex so a
+  // wedged generation cannot block every later request forever.
+  mutable std::timed_mutex mtx;
 };
 
 std::mutex g_sessions_mutex;
@@ -399,8 +401,15 @@ jstring NativeGenerate(JNIEnv* env, jobject, jlong handle, jstring system_prompt
   }
 
   // A second generate() on the same handle must wait for the first to finish rather
-  // than mutate the shared llama_context concurrently.
-  std::lock_guard<std::mutex> session_lock(session->mtx);
+  // than mutate the shared llama_context concurrently. Give up after 150s so one
+  // wedged generation does not freeze the whole app.
+  std::unique_lock<std::timed_mutex> session_lock(session->mtx, std::defer_lock);
+  if (!session_lock.try_lock_for(std::chrono::seconds(150))) {
+    LogPrint(ANDROID_LOG_ERROR,
+        "NativeGenerate: session " + std::to_string(handle) +
+        " busy for 150s (previous generation still running); aborting this request");
+    return StdStringToJString(env, "");
+  }
   session->cancelled.store(false);
   session->graceful_stop.store(false);
   const std::string req = JStringToStdString(env, request_json);
@@ -493,7 +502,7 @@ jboolean NativeLoadHistory(JNIEnv* env, jobject, jlong handle, jobjectArray role
     env->DeleteLocalRef(jr);
     env->DeleteLocalRef(jc);
   }
-  std::lock_guard<std::mutex> lock(session->mtx);
+  std::lock_guard<std::timed_mutex> lock(session->mtx);
   return session->backend->load_history(msgs) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -515,7 +524,7 @@ void NativeReset(JNIEnv*, jobject, jlong handle) {
     if (it == g_sessions.end()) return;
     session = it->second;
   }
-  std::lock_guard<std::mutex> lock(session->mtx);
+  std::lock_guard<std::timed_mutex> lock(session->mtx);
   session->backend->reset();
 }
 
@@ -543,7 +552,7 @@ void NativeFree(JNIEnv*, jobject, jlong handle) {
     session = it->second;
     g_sessions.erase(it);
   }
-  { std::lock_guard<std::mutex> lock(session->mtx); }  // drain any in-flight generate()
+  { std::lock_guard<std::timed_mutex> lock(session->mtx); }  // drain any in-flight generate()
   delete session;
   LogPrint(ANDROID_LOG_INFO, "NativeFree: session " + std::to_string(handle) + " destroyed");
 }
