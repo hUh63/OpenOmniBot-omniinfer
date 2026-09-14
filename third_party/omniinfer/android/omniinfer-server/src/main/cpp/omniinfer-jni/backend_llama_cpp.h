@@ -532,6 +532,10 @@ full_prefill:
       n_generated++;
       generated_toks.push_back(tok);
       if (counting_reasoning) n_reasoning_tokens++;
+      if (n_generated % 32 == 0) {
+        __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+            "decode progress n=%d pos=%d", n_generated, (int) cur_pos_);
+      }
 
       common_batch_clear(batch_);
       common_batch_add(batch_, tok, cur_pos_, {0}, true);
@@ -1410,8 +1414,13 @@ private:
 
   int decode_batched(const std::vector<llama_token>& toks, llama_pos start, bool last_logit = false,
                      const std::atomic<bool>* cancel = nullptr) {
-    for (int i = 0; i < (int)toks.size(); i += n_batch_) {
+    const int total = (int) toks.size();
+    for (int i = 0; i < total; i += n_batch_) {
       if (cancel && cancel->load()) return 2;   // aborted during prefill
+      if (total > n_batch_ * 2) {
+        __android_log_print(ANDROID_LOG_INFO, "OmniInferJni",
+            "prefill progress %d/%d", std::min(i + n_batch_, total), total);
+      }
       int n = std::min((int)toks.size() - i, n_batch_);
       common_batch_clear(batch_);
       if (start + i + n >= n_ctx_ - 4) shift_context();
