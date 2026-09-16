@@ -403,13 +403,24 @@ jstring NativeGenerate(JNIEnv* env, jobject, jlong handle, jstring system_prompt
   // A second generate() on the same handle must wait for the first to finish rather
   // than mutate the shared llama_context concurrently. Give up after 150s so one
   // wedged generation does not freeze the whole app.
+  const auto lock_t0 = std::chrono::steady_clock::now();
+  LogPrint(ANDROID_LOG_INFO,
+      "nativeGenerate: acquiring session lock handle=" + std::to_string(handle));
   std::unique_lock<std::timed_mutex> session_lock(session->mtx, std::defer_lock);
   if (!session_lock.try_lock_for(std::chrono::seconds(150))) {
     LogPrint(ANDROID_LOG_ERROR,
         "NativeGenerate: session " + std::to_string(handle) +
         " busy for 150s (previous generation still running); aborting this request");
-    return StdStringToJString(env, "");
+    // Surface it as an error instead of an empty string, so the client shows a
+    // message rather than spinning forever.
+    return StdStringToJString(env,
+        "{\"error\":\"local model busy: a previous generation is still running\"}");
   }
+  LogPrint(ANDROID_LOG_INFO,
+      "nativeGenerate: session lock acquired handle=" + std::to_string(handle) +
+      " wait_ms=" +
+      std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - lock_t0).count()));
   session->cancelled.store(false);
   session->graceful_stop.store(false);
   const std::string req = JStringToStdString(env, request_json);
