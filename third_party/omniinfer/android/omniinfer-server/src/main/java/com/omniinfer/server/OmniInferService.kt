@@ -22,6 +22,11 @@ import kotlinx.serialization.json.*
 import java.util.UUID
 import kotlin.coroutines.CoroutineContext
 
+// fix8 diagnostics: count concurrent chat requests so logcat shows whether a new
+// request overlaps (active>1) with a previous one, or a previous one never ended.
+private val chatReqSeq = java.util.concurrent.atomic.AtomicLong(0)
+private val activeChatReq = java.util.concurrent.atomic.AtomicInteger(0)
+
 class OmniInferService : Service() {
     companion object {
         private const val TAG = "OmniInferService"
@@ -141,6 +146,19 @@ class OmniInferService : Service() {
     }
 
     private suspend fun handleChatCompletion(call: ApplicationCall) {
+        val reqId = chatReqSeq.incrementAndGet()
+        val active = activeChatReq.incrementAndGet()
+        val startedAt = System.currentTimeMillis()
+        Log.i(TAG, "chatreq#$reqId START active=$active")
+        try {
+            handleChatCompletionBody(call, reqId)
+        } finally {
+            Log.i(TAG, "chatreq#$reqId END active=${activeChatReq.decrementAndGet()} " +
+                "elapsed_ms=${System.currentTimeMillis() - startedAt}")
+        }
+    }
+
+    private suspend fun handleChatCompletionBody(call: ApplicationCall, reqId: Long) {
         val body = call.receiveText()
         val req = Json.parseToJsonElement(body).jsonObject
 
@@ -149,6 +167,7 @@ class OmniInferService : Service() {
             return
         }
         val stream = req["stream"]?.jsonPrimitive?.booleanOrNull ?: false
+        Log.i(TAG, "chatreq#$reqId parsed stream=$stream msgs=${messages.size} tools=${req["tools"] != null}")
         val requestModel = req["model"]?.jsonPrimitive?.contentOrNull ?: "omniinfer"
         val includeUsage = req["stream_options"]?.jsonObject?.get("include_usage")?.jsonPrimitive?.booleanOrNull ?: true
 
