@@ -103,6 +103,8 @@ object OmniInferBridge {
         repeatLastN: Int? = null,
         callback: OmniInferStreamCallback? = null
     ): String {
+        val t0 = System.currentTimeMillis()
+        Log.i(TAG, "generate enter handle=$handle liteRt=${liteRtHandles.containsKey(handle)}")
         liteRtHandles[handle]?.let { liteRt ->
             val sb = StringBuilder()
             sb.append("{\"thinking_enabled\":").append(thinkEnabled)
@@ -124,7 +126,9 @@ object OmniInferBridge {
             if (typicalP != null) sb.append(",\"typical_p\":").append(typicalP)
             if (repeatLastN != null) sb.append(",\"repeat_last_n\":").append(repeatLastN)
             sb.append("}")
-            return liteRt.generate(messagesJson, imageDataArray, sb.toString(), callback)
+            val liteRtResult = liteRt.generate(messagesJson, imageDataArray, sb.toString(), callback)
+            Log.i(TAG, "generate exit handle=$handle ms=${System.currentTimeMillis() - t0} len=${liteRtResult.length}")
+            return liteRtResult
         }
         if (!isNativeLibraryLoaded) return ""
         // Build request JSON by string concatenation to avoid org.json re-serialization
@@ -150,7 +154,9 @@ object OmniInferBridge {
         if (typicalP != null) sb.append(",\"typical_p\":").append(typicalP)
         if (repeatLastN != null) sb.append(",\"repeat_last_n\":").append(repeatLastN)
         sb.append("}")
-        return nativeGenerate(handle, "", "", sb.toString(), imageDataArray, callback)
+        val nativeResult = nativeGenerate(handle, "", "", sb.toString(), imageDataArray, callback)
+        Log.i(TAG, "generate exit handle=$handle ms=${System.currentTimeMillis() - t0} len=${nativeResult.length}")
+        return nativeResult
     }
 
     fun loadHistory(handle: Long, roles: Array<String>, contents: Array<String>): Boolean {
