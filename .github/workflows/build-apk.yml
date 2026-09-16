@@ -96,37 +96,26 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2.3-omniinfer-fix7
-          name: "OmniInfer 默认后端改回 OmniInfer-llama + 卡死诊断 APK (v0.6.2.3-fix7)"
+          tag_name: v0.6.2.3-omniinfer-fix8
+          name: "OmniInfer 多窗口卡住定位（三层日志）+ 默认后端 llama.cpp (v0.6.2.3-fix8)"
           prerelease: true
           draft: false
           body: |
-            基于 v0.6.2.3-omniinfer-fix6：
-            - **推理后端默认改回 OmniInfer-llama（llama.cpp）**：新人引导页此前把后端强制设成
-              litert(LiteRT-LM)，卸载重装后走一遍引导，后端就成了 LiteRT-LM，只能导 .litertlm，
-              导 GGUF 会报「Please select a .litertlm model file」。现在引导推荐与内置本地模型
-              profile 的推荐后端都改为 llama.cpp，推荐模型改为 llama 市场的 Gemma-4-E2B。
-            - **卡死定位日志**：预填充每批打印 prefill progress i/total，解码每 32 token 打印
-              decode progress n=.. pos=..；配合 generate: enter / prefill done 可判断是"慢"还是"真卡死"。
-            - **卡死不再拖垮整个 app**：会话锁改为 std::timed_mutex，等 150s 仍拿不到锁就放弃本次
-              请求并打日志，避免一个卡住的生成把后续所有聊天永久堵住。
-            - **修复降级逻辑自我失效（关键）**：fix4 的 A 机制在加载成功后写了 ARMED=<当前档>，
-              却从未清除。于是每次启动都会把"上次用过的档"拉黑，几次启动后 armv8 全被拉黑、
-             候选为空，代码回退成"交给 ggml 自动选"，又选回了 SVE 的 armv9.0_1 —— 正是最初的崩溃。
-              现在：ARMED 只在一次 generate() 期间生效、生成结束立即清除；候选被拉黑到空时自动重置
-              黑名单；且**任何情况下都不会再回退到 SVE/armv9 变体**（兜底显式加载 armv8.0_1）。
-            - **会话串行化**：nativeGenerate/nativeReset/nativeLoadHistory 增加每 handle 互斥锁。
-              此前同一个 handle 并发 generate 会同时改同一份 llama_context / KV cache，导致
-              ggml_compute_forward_set_rows 里的 GGML_ASSERT 越界崩溃（回复完闪退 / 停止也闪退）。
+            基于 v0.6.2.3-omniinfer-fix7：
+            - **多窗口"一直卡在正在回复"三层定位日志**（本次是诊断版）：
+              1) HTTP 层 OmniInferService: chatreq#N START/END active=K —— 能看出有两个请求同时在飞
+                 （active>1），或者上一个请求根本没 END（被卡住的流/生成）。
+              2) 桥接层 OmniInferBridge: generate enter/exit handle=.. ms=.. len=.. —— 进入/离开 native。
+              3) native 层 OmniInferJni: nativeGenerate acquiring/acquired session lock wait_ms=..
+                 + generate: enter / prefill progress / decode progress —— 是否卡在会话锁上。
+            - 等不到会话锁（150s）时由静默返回空串改为返回 {"error":"local model busy..."}，
+              前端能显示错误而不是一直转圈。
+            - 保留 fix7：默认后端 = OmniInfer-llama(llama.cpp)，引导页不再强制 litert
+            - 保留 fix6：变体降级自我失效修复 + 会话串行化
             - 保留 fix5：预填充(prefill)可取消 + 阶段诊断日志
-            含 fix4：运行时保守自动降级（CPU 变体全保留 + A 跨重启降级 + B 同进程探针）
-            含 fix2：CPU 端默认关闭 flash attention（可用 config {"flash_attn": true} 开启）
-            含 fix1 的 4 项修复
-            - 唤起宠物：悬浮窗 + 无障碍权限合并为一次引导（此前只弹无障碍）
-            - 设置页文案：「本地模型」→「本地模型服务」
-            - 本地模型服务页：补回集成接线（MnnLocalModelsChannel 注册、LocalModelFeatureInstaller 安装、ChannelManager/MainActivity 钩子转发），修复「配置加载失败/市场为空」
-            - 设置页补回 iMessage 渠道入口与陪伴权限授权入口（+ 对应路由）
-            - 顺带修复：StorageService 缺少字体特效开关方法导致编译失败
+            - 保留 fix4：运行时保守自动降级（CPU 变体全保留 + A 跨重启降级 + B 同进程探针）
+            - 保留 fix2：CPU 端默认关闭 flash attention（config {"flash_attn": true} 可开启）
+            - 保留 fix1 的 4 项修复（权限合并引导、文案、本地模型服务接线、iMessage/陪伴入口）
             天玑(MT6991) NPU：内置 libLiteRtDispatch_MediaTek.so，q4_ekv1280_mt6991 模型自动走 Backend.NPU。
           files: apk-out/*.apk
         env:
