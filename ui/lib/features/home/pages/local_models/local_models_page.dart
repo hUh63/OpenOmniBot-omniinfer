@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:ui/l10n/l10n.dart';
+import 'package:ui/services/inference_backend.dart';
 import 'package:ui/services/mnn_local_models_service.dart';
 import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/app_text_styles.dart';
@@ -17,11 +18,6 @@ enum _LocalModelsTab { service, market }
 enum _PortTarget { local, lan }
 
 enum _AccentTone { neutral, accent, success, info, warning, danger }
-
-const String _llamaCppBackend = 'llama.cpp';
-const String _omniinferMnnBackend = 'omniinfer-mnn';
-const String _omniinferQnnBackend = 'executorch-qnn';
-const String _omniinferLiteRtBackend = 'litert';
 
 class LocalModelsPage extends StatefulWidget {
   const LocalModelsPage({
@@ -177,9 +173,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
 
   Future<void> _bootstrap({String? preferredBackend}) async {
     try {
-      final normalizedPreferredBackend = _normalizeBackendName(
-        preferredBackend,
-      );
+      final normalizedPreferredBackend = tryNormalizeInferenceBackend(preferredBackend);
       if (normalizedPreferredBackend != null) {
         await MnnLocalModelsService.setBackend(normalizedPreferredBackend);
       }
@@ -204,25 +198,6 @@ class _LocalModelsPageState extends State<LocalModelsPage>
         _refreshInstalled(silent: true),
         _refreshMarket(silent: true),
       ]);
-    }
-  }
-
-  String? _normalizeBackendName(String? raw) {
-    switch (raw?.trim().toLowerCase()) {
-      case _llamaCppBackend:
-        return _llamaCppBackend;
-      case 'mnn':
-      case _omniinferMnnBackend:
-        return _omniinferMnnBackend;
-      case 'qnn':
-      case _omniinferQnnBackend:
-        return _omniinferQnnBackend;
-      case 'litert':
-      case 'litert-lm':
-      case 'litertlm':
-        return _omniinferLiteRtBackend;
-      default:
-        return null;
     }
   }
 
@@ -1426,19 +1401,19 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       value: backend,
       items: const [
         DropdownMenuItem(
-          value: _llamaCppBackend,
+          value: kBackendLlamaCpp,
           child: Text('OmniInfer-llama'),
         ),
         DropdownMenuItem(
-          value: _omniinferMnnBackend,
+          value: kBackendOmniInferMnn,
           child: Text('omniinfer-mnn'),
         ),
         DropdownMenuItem(
-          value: _omniinferQnnBackend,
+          value: kBackendExecutorchQnn,
           child: Text('omniinfer-npu'),
         ),
         DropdownMenuItem(
-          value: _omniinferLiteRtBackend,
+          value: kBackendLiteRt,
           child: Text('LiteRT-LM'),
         ),
       ],
@@ -1740,7 +1715,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
             label: context.l10n.localModelsFilterAndSource,
             subtitle: context.l10n.localModelsFilterAndSourceDesc,
           ),
-          _buildBackendDropdown(backend: config?.backend ?? _llamaCppBackend),
+          _buildBackendDropdown(backend: config?.backend ?? kBackendLlamaCpp),
           if (config?.availableSources.isNotEmpty == true) ...[
             const SizedBox(height: 12),
             _buildDropdownField(
@@ -2586,19 +2561,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     );
   }
 
-  String _backendLabel(String backend) {
-    switch (backend) {
-      case _omniinferMnnBackend:
-        return 'omniinfer-mnn';
-      case _omniinferQnnBackend:
-        return 'omniinfer-npu';
-      case _omniinferLiteRtBackend:
-        return 'LiteRT-LM';
-      case _llamaCppBackend:
-      default:
-        return 'OmniInfer-llama';
-    }
-  }
+  String _backendLabel(String backend) => inferenceBackendLabel(backend);
 
   double _modelSizeSortValue(MnnLocalModel model) {
     if (model.sizeB > 0) {
