@@ -15,6 +15,7 @@ RUN_FLUTTER=1
 RUN_WEBCHAT=1
 RUN_LIVE="${OMNIBOT_LIVE_PROVIDER_TEST:-0}"
 HARNESS_CLI_DIR=""
+DSH_DEPS_DIR=""
 RUN_LIVE_HARNESSES=0
 
 usage() {
@@ -27,6 +28,7 @@ Options:
   --skip-gradle   Skip Android/JVM tests.
   --skip-flutter  Skip Flutter tests.
   --skip-webchat  Skip WebChat conversation reconciliation tests.
+  --dsh DIR       Run DSH thinking wire regressions with installed Pi dependencies.
   --harnesses DIR Run required Codex/Claude Code output regressions with a
                   disposable installed CLI directory (no real Provider calls).
   --live-harnesses DIR  Also run all five official Harnesses against the real
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --skip-gradle) RUN_GRADLE=0 ;;
     --skip-flutter) RUN_FLUTTER=0 ;;
     --skip-webchat) RUN_WEBCHAT=0 ;;
+    --dsh) [[ $# -ge 2 && -d "$2/node_modules" ]] || { echo '--dsh requires an installed dependency directory' >&2; exit 2; }; DSH_DEPS_DIR="$(cd "$2" && pwd)"; shift ;;
     --harnesses) [[ $# -ge 2 && -d "$2/node_modules" ]] || { echo '--harnesses requires an installed CLI directory' >&2; exit 2; }; HARNESS_CLI_DIR="$2"; shift ;;
     --live-harnesses) [[ $# -ge 2 && -d "$2/node_modules" ]] || { echo '--live-harnesses requires an installed CLI directory' >&2; exit 2; }; HARNESS_CLI_DIR="$2"; RUN_LIVE=1; RUN_LIVE_HARNESSES=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -249,6 +252,11 @@ if [[ "$RUN_LIVE" == "1" ]]; then
   run_step "Live Provider smoke" node scripts/agent_provider_smoke.mjs
 else
   printf '\n== Live Provider smoke ==\nSKIPPED (use --live with a test-token environment variable)\n'
+fi
+
+if [[ -n "$DSH_DEPS_DIR" ]]; then
+  run_step "DSH reasoning on/off wire regression (official Pi serializer)" \
+    node scripts/verify-dsh-reasoning-wire.mjs "$DSH_DEPS_DIR"
 fi
 
 if [[ -n "$HARNESS_CLI_DIR" ]]; then
