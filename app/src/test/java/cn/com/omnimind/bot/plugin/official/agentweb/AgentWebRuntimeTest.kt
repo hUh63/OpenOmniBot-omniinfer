@@ -191,11 +191,30 @@ class AgentWebRuntimeTest {
         assertTrue(patch.contains("\"model\":\"glm-5\""))
         assertTrue(patch.contains("\"input\":[\"text\",\"image\"]"))
         assertTrue(patch.contains("\"reasoningEfforts\""))
-        assertTrue(patch.contains("\"off\":null"))
+        assertTrue(patch.contains("\"off\":\"none\""))
         assertTrue(patch.contains("\"minimal\":\"minimal\""))
         assertTrue(patch.contains("\"X-Route\":\"mobile\""))
         assertTrue(patch.contains("\"reasoning\":\"high\""))
         assertFalse(patch.contains("secret"))
+    }
+
+    @Test
+    fun `DSH ACP off is explicit on generic OpenAI routes and keeps native provider dialects`() {
+        val gateway = buildDeepSeekProviderPatch(
+            provider(baseUrl = "https://gateway.example.com/v1"),
+            "gateway-reasoner", "off", acp = true,
+        )
+        assertTrue(gateway.contains("\"off\":\"none\""))
+        assertTrue(gateway.contains("\"reasoning\":\"off\""))
+        assertTrue(gateway.contains("- id: acp"))
+        for (protocol in listOf("deepseek", "anthropic")) {
+            val native = buildDeepSeekProviderPatch(
+                provider(baseUrl = "https://api.$protocol.com", protocolType = protocol),
+                "native-model", "off", acp = true,
+            )
+            assertTrue(native.contains("\"off\":null"))
+            assertFalse(native.contains("\"off\":\"none\""))
+        }
     }
 
     @Test
