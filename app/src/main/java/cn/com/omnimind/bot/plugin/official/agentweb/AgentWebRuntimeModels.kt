@@ -272,7 +272,14 @@ internal fun buildDeepSeekProviderPatch(
         }
         if (route == DEEPSEEK_HARNESS_FALLBACK_ROUTE || effort != null) {
             put("reasoningEfforts", buildJsonObject {
-                put("off", JsonNull)
+                // A generic OpenAI route needs an explicit wire value. Null means
+                // "omit", which leaves a thinking-by-default server enabled.
+                // Known provider dialects keep Pi's own off serialization.
+                if (route == DEEPSEEK_HARNESS_FALLBACK_ROUTE && api == "openai-completions") {
+                    put("off", "none")
+                } else {
+                    put("off", JsonNull)
+                }
                 DEEPSEEK_REASONING_EFFORTS
                     .filterNot { it == "off" }
                     .forEach { level -> put(level, level) }
