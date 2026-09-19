@@ -1,31 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/services.dart';
-
-const String _llamaCppBackend = 'llama.cpp';
-const String _omniinferMnnBackend = 'omniinfer-mnn';
-const String _omniinferQnnBackend = 'executorch-qnn';
-const String _omniinferLiteRtBackend = 'litert';
-
-String _normalizeInferenceBackend(Object? raw) {
-  final value = (raw ?? '').toString().trim();
-  switch (value) {
-    case _llamaCppBackend:
-      return _llamaCppBackend;
-    case 'mnn':
-    case _omniinferMnnBackend:
-      return _omniinferMnnBackend;
-    case 'qnn':
-    case _omniinferQnnBackend:
-      return _omniinferQnnBackend;
-    case 'litert':
-    case 'litert-lm':
-    case 'litertlm':
-      return _omniinferLiteRtBackend;
-    default:
-      return _llamaCppBackend;
-  }
-}
+import 'package:ui/services/inference_backend.dart';
 
 class MnnLocalDownloadInfo {
   final int state;
@@ -197,7 +173,7 @@ class MnnLocalConfig {
 
   factory MnnLocalConfig.fromMap(Map<dynamic, dynamic>? map) {
     return MnnLocalConfig(
-      backend: _normalizeInferenceBackend(map?['backend']),
+      backend: normalizeInferenceBackend(map?['backend']),
       autoStartOnAppOpen: map?['autoStartOnAppOpen'] == true,
       apiRunning: map?['apiRunning'] == true,
       apiReady: map?['apiReady'] == true,
@@ -210,7 +186,7 @@ class MnnLocalConfig {
       availableSources: ((map?['availableSources'] as List?) ?? const [])
           .map((item) => item.toString())
           .toList(),
-      loadedBackend: _normalizeInferenceBackend(map?['loadedBackend']),
+      loadedBackend: normalizeInferenceBackend(map?['loadedBackend']),
       loadedModelId: (map?['loadedModelId'] ?? '').toString(),
       lanProxyRunning: map?['lanProxyRunning'] == true,
       lanHost: (map?['lanHost'] ?? '').toString(),
@@ -444,14 +420,14 @@ class MnnLocalModelsService {
 
   static Future<String> getBackend() async {
     final result = await _channel.invokeMethod<String>('getBackend');
-    return _normalizeInferenceBackend(result);
+    return normalizeInferenceBackend(result);
   }
 
   static Future<String> setBackend(String backend) async {
     final result = await _channel.invokeMethod<String>('setBackend', {
       'backend': backend,
     });
-    return _normalizeInferenceBackend(result ?? backend);
+    return normalizeInferenceBackend(result ?? backend);
   }
 
   static Future<Map<String, dynamic>> importModel() async {
