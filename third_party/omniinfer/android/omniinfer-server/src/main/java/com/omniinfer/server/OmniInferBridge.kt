@@ -13,7 +13,19 @@ object OmniInferBridge {
     private val nextLiteRtHandle = AtomicLong(-1L)
     @Volatile private var lastError: String = ""
 
-    val isNativeLibraryLoaded: Boolean by lazy {
+    /**
+     * True once the JNI bridge is usable, either from the APK's bundled native
+     * libraries or from a downloaded engine package. In the downloaded-engine mode
+     * the APK ships no inference `.so` files at all, so
+     * [OmniInferEngineLoader] loads them and reports back via
+     * [markEngineNativeLibsLoaded].
+     */
+    val isNativeLibraryLoaded: Boolean
+        get() = engineNativeLibsLoaded || loadBundledNativeLibrary
+
+    @Volatile private var engineNativeLibsLoaded: Boolean = false
+
+    private val loadBundledNativeLibrary: Boolean by lazy {
         runCatching {
             System.loadLibrary(LIB_NAME)
             true
@@ -21,6 +33,11 @@ object OmniInferBridge {
             Log.w(TAG, "Failed to load $LIB_NAME: ${error.message}")
             false
         }
+    }
+
+    /** Called by [OmniInferEngineLoader] after it `System.load`ed the engine payload. */
+    internal fun markEngineNativeLibsLoaded() {
+        engineNativeLibsLoaded = true
     }
 
     /**
@@ -206,7 +223,24 @@ object OmniInferBridge {
         return buildMap { json.keys().forEach { key -> put(key, json.optString(key)) } }
     }
 
+    /**
+     * Ask the native side to try opening every `libggml-*.so` in [dir], exactly the
+     * way `ggml_backend_load_all_from_path()` would, without registering anything.
+     *
+     * Used to validate a synthesised native lib directory (filtered CPU variants,
+     * or a downloaded engine payload) before it is handed to the backend. Returns
+     * the names of the loadable ggml libraries, or an empty list when the OS linker
+     * refuses the directory.
+     */
+    fun probeLibDir(dir: String): List<String> {
+        if (!isNativeLibraryLoaded) return emptyList()
+        val json = runCatching { JSONObject(nativeProbeLibDir(dir)) }.getOrNull() ?: return emptyList()
+        val loaded = json.optJSONArray("loaded") ?: return emptyList()
+        return buildList { for (i in 0 until loaded.length()) add(loaded.optString(i)) }
+    }
+
     private external fun nativeInit(configJson: String): Long
+    private external fun nativeProbeLibDir(dir: String): String
     private external fun nativeGetLastError(): String
     private external fun nativeGenerate(handle: Long, systemPrompt: String?, prompt: String, requestJson: String, imageDataArray: Array<ByteArray>?, callback: OmniInferStreamCallback?): String
     private external fun nativeLoadHistory(handle: Long, roles: Array<String>, contents: Array<String>): Boolean
