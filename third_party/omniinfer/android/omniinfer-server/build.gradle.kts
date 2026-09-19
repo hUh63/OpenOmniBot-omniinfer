@@ -1,7 +1,12 @@
 import org.gradle.jvm.tasks.Jar
 import org.gradle.api.tasks.bundling.Zip
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
+import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Element
 
@@ -491,7 +496,7 @@ fun readElfNeeded(file: File): List<String> {
     if (bytes[4] != 2.toByte() || bytes[5] != 1.toByte()) {
         throw GradleException("Unsupported ELF class/endianness in ${file.name} (expected ELF64 LE)")
     }
-    val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
     fun u16(offset: Long): Int = buffer.getShort(offset.toInt()).toInt() and 0xFFFF
     fun u32(offset: Long): Long = buffer.getInt(offset.toInt()).toLong() and 0xFFFFFFFFL
     fun u64(offset: Long): Long = buffer.getLong(offset.toInt())
@@ -687,7 +692,7 @@ val bundleEnginePackage by tasks.registering {
         zipFile.delete()
 
         fun sha256Of(file: File): String {
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val digest = MessageDigest.getInstance("SHA-256")
             file.inputStream().use { input ->
                 val buffer = ByteArray(1 shl 16)
                 while (true) {
@@ -719,12 +724,12 @@ val bundleEnginePackage by tasks.registering {
             )
         )
 
-        java.util.zip.ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
-            zip.putNextEntry(java.util.zip.ZipEntry("manifest.json"))
+        ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+            zip.putNextEntry(ZipEntry("manifest.json"))
             zip.write(manifest.toByteArray(Charsets.UTF_8))
             zip.closeEntry()
             packaged.forEach { file ->
-                zip.putNextEntry(java.util.zip.ZipEntry("lib/arm64-v8a/${file.name}"))
+                zip.putNextEntry(ZipEntry("lib/arm64-v8a/${file.name}"))
                 file.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
             }
@@ -742,7 +747,7 @@ val bundleEnginePackage by tasks.registering {
             map["name"] as String to map
         }.toMap()
         var seen = 0
-        java.util.zip.ZipFile(zipFile).use { archive ->
+        ZipFile(zipFile).use { archive ->
             val manifestEntry = archive.getEntry("manifest.json")
                 ?: throw GradleException("Engine zip is missing manifest.json")
             val zipManifest = archive.getInputStream(manifestEntry).use { it.readBytes().decodeToString() }
@@ -766,7 +771,7 @@ val bundleEnginePackage by tasks.registering {
                 if (bytes.size.toLong() != declaredSize) {
                     throw GradleException("Engine lib $libName size mismatch (${bytes.size} != $declaredSize)")
                 }
-                val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+                val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
                     .joinToString("") { "%02x".format(it) }
                 if (digest != declaredEntry["sha256"]) {
                     throw GradleException("Engine lib $libName failed SHA-256 verification")
