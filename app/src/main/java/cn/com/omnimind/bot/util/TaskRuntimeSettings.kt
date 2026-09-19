@@ -250,7 +250,7 @@ object TaskRuntimeSettings {
             context,
             if (petHintShown) OVERLAY_ALERT_CHANNEL_ID else CHANNEL_ID
         )
-            .setSmallIcon(context.applicationInfo.icon.takeIf { it != 0 } ?: R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title.ifBlank { "Omnibot task completed" })
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
