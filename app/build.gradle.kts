@@ -34,6 +34,25 @@ val llmThuModel = prop("LLMTHU_MODEL")
     .ifBlank { "GLM-5.1" }
 val bundleLlmThuProvider = prop("OOB_BUNDLE_LLMTHU_PROVIDER") == "1"
 val omnibotProfile = prop("OMNIBOT_PROFILE").ifBlank { "main" }
+
+/**
+ * ABIs packaged into the APK.
+ *
+ * Upstream OmniInfer warns that when LiteRT-LM is on the classpath its transitive
+ * native dependencies also ship an `x86_64` slice (liblitertlm_jni.so,
+ * libLiteRt.so, libLiteRtClGlAccelerator.so — ~32 MB) that is dead weight in a
+ * device APK. Release builds therefore pass -Pomniinfer.abis=arm64-v8a; the
+ * default keeps x86_64 so emulator/desktop-flavoured local builds keep working.
+ *
+ *   release (arm64 devices): -Pomniinfer.abis=arm64-v8a
+ *   emulator:                (leave unset)
+ */
+val appAbis: List<String> =
+    prop("omniinfer.abis").ifBlank { "arm64-v8a,x86_64" }
+        .split(',')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .ifEmpty { listOf("arm64-v8a", "x86_64") }
 require(omnibotProfile in setOf("main", "investor")) {
     "OMNIBOT_PROFILE must be main or investor: $omnibotProfile"
 }
@@ -191,7 +210,7 @@ android {
             preferPackagedOmniFlowRuntime.toString(),
         )
         ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+            abiFilters.addAll(appAbis)
         }
 
     }
