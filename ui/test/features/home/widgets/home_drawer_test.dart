@@ -242,6 +242,113 @@ void main() {
     });
   });
 
+  testWidgets(
+    'running Web quick action shows a status dot and stops from the menu',
+    (tester) async {
+      var statusCode = 'RUNNING';
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pluginChannel, (call) async {
+            calls.add(call);
+            if (call.method == 'listActions') {
+              return <Map<String, Object?>>[
+                <String, Object?>{
+                  'id': 'open_kimi_web',
+                  'pluginId': 'com.omnimind.agent-web',
+                  'displayName': 'Kimi Code Web',
+                  'description': 'Open Kimi Web',
+                  'presentation': <String, Object?>{
+                    'placements': <String>['home_drawer_quick_launch'],
+                    'agentId': 'kimi-code-acp',
+                    'quickLaunchOrder': 0,
+                    'statusAction': 'get_kimi_web_status',
+                    'stopAction': 'stop_kimi_web',
+                    'label': <String, String>{
+                      'zh': 'Kimi Code Web',
+                      'en': 'Kimi Code Web',
+                    },
+                    'shortLabel': <String, String>{
+                      'zh': 'Kimi Web',
+                      'en': 'Kimi Web',
+                    },
+                  },
+                },
+              ];
+            }
+            if (call.method == 'invokeAction') {
+              final actionId = (call.arguments as Map)['actionId'] as String;
+              if (actionId == 'get_kimi_web_status') {
+                return <String, Object?>{
+                  'success': true,
+                  'code': statusCode,
+                  'serviceId': 'kimi',
+                  'packageId': 'kimi',
+                  'running': statusCode != 'NOT_RUNNING',
+                };
+              }
+              if (actionId == 'stop_kimi_web') {
+                statusCode = 'NOT_RUNNING';
+                return <String, Object?>{
+                  'success': true,
+                  'code': 'STOPPED',
+                  'serviceId': 'kimi',
+                  'packageId': 'kimi',
+                  'running': false,
+                };
+              }
+            }
+            return null;
+          });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DefaultAssetBundle(
+            bundle: _SvgTestAssetBundle(),
+            child: _buildProviderScope(
+              child: const Scaffold(
+                body: SizedBox(
+                  width: 360,
+                  height: 720,
+                  child: HomeDrawer(embedded: true),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final chip = find.byKey(const ValueKey('home-drawer-web-kimi-code-acp'));
+      final statusDot = find.byKey(
+        const ValueKey('home-drawer-web-status-kimi-code-acp'),
+      );
+      expect(chip, findsOneWidget);
+      expect(statusDot, findsOneWidget);
+
+      await tester.longPress(chip);
+      await tester.pumpAndSettle();
+      expect(find.text('Open Kimi Code Web'), findsOneWidget);
+      expect(find.text('Stop'), findsOneWidget);
+
+      await tester.tap(find.text('Stop'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      final stopInvocation = calls.lastWhere(
+        (call) =>
+            call.method == 'invokeAction' &&
+            (call.arguments as Map)['actionId'] == 'stop_kimi_web',
+      );
+      expect(stopInvocation.arguments, <String, Object?>{
+        'pluginId': 'com.omnimind.agent-web',
+        'actionId': 'stop_kimi_web',
+        'arguments': <String, dynamic>{},
+      });
+      expect(statusDot, findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('embedded mode routes new conversation through callback', (
     tester,
   ) async {
