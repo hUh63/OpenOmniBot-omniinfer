@@ -1,0 +1,21 @@
+# gitleaks configuration.
+#
+# We keep the built-in default ruleset and only add allowlists for content this
+# project does not author. Everything we do own stays covered by the defaults.
+#
+# NOTE: gitleaks 8.24.x (the version CI installs) only understands the singular
+# "[allowlist]" table. The plural "[[allowlists]]" form is accepted but silently
+# ignored by that version - do not rewrite this until the scanner in CI is
+# upgraded and re-verified.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vendored upstream OmniInfer mirror: third_party/omniinfer is a wholesale, gitignored copy of the upstream project (see .gitignore). The findings there are upstream documentation examples, unit-test fixtures and generated headers - not our credentials, and none of it is authored or editable here."
+# Deliberately not anchored: gitleaks reports workspace-relative paths in git
+# mode but absolute paths for a directory scan, and the prefix should match
+# either way.
+paths = [
+  '''third_party/omniinfer/''',
+]
