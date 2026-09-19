@@ -97,6 +97,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -2516,6 +2517,7 @@ internal class LocalAcpRuntime(
                 AcpPermissionBehavior.ASK_USER
             }
         }
+        persistSessionConfiguration(session)
         val options = sessionConfigOptions(session).map(::acpConfigOptionPayload)
         emitAcpNotification(
             sessionId = threadId,
@@ -3773,6 +3775,12 @@ internal class LocalAcpRuntime(
         // pseudo turn in the UI and gets persisted back over the real history.
         if (threadId in replaySuppressedThreads) return
         val isReplay = threadId in replayingThreads
+        if (!isReplay && update is SessionUpdate.ConfigOptionUpdate) {
+            sessions[threadId]?.let { session ->
+                runCatching { persistSessionConfiguration(session, update.configOptions) }
+                    .onFailure { Log.e(TAG, "Failed to persist ACP configuration update", it) }
+            }
+        }
 
         // Never let a timeline update through without a turn id. Updates that
         // arrive outside an active prompt come via the notify callback with
@@ -3901,9 +3909,49 @@ internal class LocalAcpRuntime(
         )
     }
 
-    private fun registerSession(session: ClientSession, cwd: String) {
-        sessions[session.sessionId.value] = session
-        sessionCwds[session.sessionId.value] = cwd
+    private suspend fun registerSession(session: ClientSession, cwd: String) {
+        val sessionId = session.sessionId.value
+        sessions[sessionId] = session
+        sessionCwds[sessionId] = cwd
+        // Some Harnesses restore only the last prompt's configuration. Replay
+        // accepted idle edits through ACP before returning the restored session.
+        // The existing profile store owns persistence and session deletion.
+        val saved = profileStore.sessionConfiguration(sessionId)
+        try {
+            for ((key, encoded) in saved) {
+                if (!key.startsWith("acp.config:")) continue
+                val raw = Json.parseToJsonElement(encoded) as JsonPrimitive
+                val value: Any = if (raw.isString) raw.content else checkNotNull(raw.booleanOrNull)
+                setConfigOption(mapOf(
+                    "sessionId" to sessionId,
+                    "configId" to key.removePrefix("acp.config:"),
+                    "value" to value,
+                ))
+            }
+        } catch (error: Throwable) {
+            sessions.remove(sessionId, session)
+            sessionCwds.remove(sessionId)
+            runCatching { profileStore.saveSessionConfiguration(sessionId, saved) }
+                .onFailure(error::addSuppressed)
+            throw error
+        }
+    }
+
+    private fun persistSessionConfiguration(
+        session: ClientSession,
+        options: List<SessionConfigOption> = sessionConfigOptions(session),
+    ) {
+        if (options.isEmpty()) return
+        val values = profileStore.sessionConfiguration(session.sessionId.value)
+            .filterKeys { !it.startsWith("acp.config:") }.toMutableMap()
+        for (option in options) {
+            val value = when (option) {
+                is SessionConfigOption.Select -> JsonPrimitive(option.currentValue.value)
+                is SessionConfigOption.BooleanOption -> JsonPrimitive(option.currentValue)
+            }
+            values["acp.config:${option.id.value}"] = value.toString()
+        }
+        profileStore.saveSessionConfiguration(session.sessionId.value, values)
     }
 
     private fun markTurnTiming(
