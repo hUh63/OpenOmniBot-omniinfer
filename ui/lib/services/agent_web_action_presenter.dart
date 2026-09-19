@@ -1,4 +1,5 @@
 import 'package:ui/core/router/go_router_manager.dart';
+import 'package:ui/services/agent_web_status_service.dart';
 import 'package:ui/services/omni_plugin_service.dart';
 import 'package:ui/utils/ui.dart';
 
@@ -100,6 +101,39 @@ class AgentWebActionPresenter {
         text('启动 Web 界面失败：$error', 'Failed to open Web UI: $error'),
         type: ToastType.error,
       );
+    }
+  }
+
+  /// Stops the managed Web process behind [action] and presents the outcome.
+  /// Returns true when the runtime confirms the process stopped.
+  static Future<bool> stop(
+    OmniPluginActionItem action, {
+    required bool english,
+  }) async {
+    final label = action.localizedPresentationValue(
+      'label',
+      english: english,
+      fallback: action.displayName,
+    );
+    String text(String zh, String en) => english ? en : zh;
+
+    try {
+      final stopped = await AgentWebStatusService.stop(action);
+      if (stopped) {
+        showToast(text('$label 已停止', '$label stopped'));
+        return true;
+      }
+      showToast(
+        text('$label 停止失败，请重试', 'Failed to stop $label; try again'),
+        type: ToastType.error,
+      );
+      return false;
+    } catch (error) {
+      showToast(
+        text('停止 Web 界面失败：$error', 'Failed to stop Web UI: $error'),
+        type: ToastType.error,
+      );
+      return false;
     }
   }
 }
