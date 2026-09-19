@@ -14,10 +14,25 @@ plugins {
 
 val ktorVersion: String = findProperty("omniinfer.ktor.version")?.toString() ?: "3.1.3"
 val liteRtLmVersion: String = findProperty("omniinfer.litertlm.version")?.toString() ?: "0.11.0"
+
+/**
+ * Native packaging mode (mirrors upstream OmniInfer):
+ *
+ *  - `true`  (default) self-contained: the inference `.so` files are bundled in the
+ *            AAR/APK, published as the `omniinfer` artifact.
+ *  - `false` lite: Kotlin/dex only, no native inference libraries. The engine is
+ *            delivered at runtime as a verified zip (see the `bundleEnginePackage`
+ *            task below, `OmniInferEngineDownloader` and `OmniInferEngineLoader`).
+ *
+ * One source tree, two artifacts — never add both to the same app.
+ */
+val bundleNativeLibs: Boolean =
+    findProperty("omniinfer.packaging.native_bundled")?.toString()?.toBooleanStrictOrNull() ?: true
 val omniInferMavenGroup: String =
     findProperty("omniinfer.maven.group")?.toString() ?: "io.github.omnimind-ai"
 val omniInferMavenArtifact: String =
-    findProperty("omniinfer.maven.artifact")?.toString() ?: "omniinfer"
+    findProperty("omniinfer.maven.artifact")?.toString()
+        ?: if (bundleNativeLibs) "omniinfer" else "omniinfer-lite"
 val omniInferMavenVersion: String =
     findProperty("omniinfer.maven.version")?.toString() ?: "0.1.0-SNAPSHOT"
 val omniInferMavenRepo: String =
@@ -226,6 +241,17 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    if (!bundleNativeLibs) {
+        // Lite AAR: keep every native library out of the artifact. Both the
+        // CMake-produced llama.cpp/ggml libraries and any prebuilt jniLibs are
+        // filtered here; the runtime engine payload supplies them instead.
+        packaging {
+            jniLibs {
+                excludes += listOf("**/*.so")
+            }
+        }
+    }
 }
 
 kotlin {
@@ -421,4 +447,343 @@ val verifyAarDependencyMetadata by tasks.registering {
 
 tasks.named("bundleMavenCentralPublication") {
     dependsOn(verifyAarDependencyMetadata)
+}
+
+
+// ---------------------------------------------------------------------------
+// Engine package (downloaded-runtime mode)
+//
+// Mirrors upstream OmniInfer: `gradle :omniinfer-server:bundleEnginePackage`
+// produces
+//   build/distributions/engine/omniinfer-engine-<version>-arm64-v8a.zip
+//   build/distributions/engine/omniinfer-engine-<version>-arm64-v8a.zip.sha256
+// and then reopens the finished zip and verifies every entry against the manifest.
+//
+// Layout inside the zip (consumed by OmniInferEngineDownloader/Loader):
+//   manifest.json
+//   lib/arm64-v8a/*.so
+// ---------------------------------------------------------------------------
+
+/** System libraries that are supplied by the platform and never packaged. */
+val systemLibNames = setOf(
+    "libc.so", "libm.so", "libdl.so", "libz.so", "liblog.so", "libandroid.so",
+    "libstdc++.so", "libc++_shared.so", "libunwind.so", "libOpenSLES.so",
+    "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so", "libGLESv3.so", "libvulkan.so",
+    "libnativewindow.so", "libsync.so", "libjnigraphics.so",
+)
+
+fun isSystemLib(name: String): Boolean =
+    name in systemLibNames || name.startsWith("libcdsprpc") || name.startsWith("libadsprpc")
+
+/**
+ * Minimal ELF64 little-endian reader returning the DT_NEEDED soname list.
+ * Section headers are used when present (the normal case for AGP-stripped
+ * libraries); the program-header view is the fallback for fully stripped files.
+ */
+fun readElfNeeded(file: File): List<String> {
+    val bytes = file.readBytes()
+    if (bytes.size < 64 ||
+        bytes[0] != 0x7F.toByte() || bytes[1] != 'E'.code.toByte() ||
+        bytes[2] != 'L'.code.toByte() || bytes[3] != 'F'.code.toByte()
+    ) {
+        return emptyList()
+    }
+    if (bytes[4] != 2.toByte() || bytes[5] != 1.toByte()) {
+        throw GradleException("Unsupported ELF class/endianness in ${file.name} (expected ELF64 LE)")
+    }
+    val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    fun u16(offset: Long): Int = buffer.getShort(offset.toInt()).toInt() and 0xFFFF
+    fun u32(offset: Long): Long = buffer.getInt(offset.toInt()).toLong() and 0xFFFFFFFFL
+    fun u64(offset: Long): Long = buffer.getLong(offset.toInt())
+    fun str(offset: Long): String {
+        var end = offset.toInt()
+        while (end < bytes.size && bytes[end] != 0.toByte()) end++
+        return String(bytes, offset.toInt(), end - offset.toInt(), Charsets.UTF_8)
+    }
+
+    val shoff = u64(0x28L)
+    val shentsize = u16(0x3AL).toLong()
+    val shnum = u16(0x3CL)
+
+    var dynOffset = -1L
+    var dynSize = -1L
+    var strtabOffset = -1L
+
+    if (shoff > 0L && shnum > 0) {
+        var dynLink = -1L
+        for (index in 0 until shnum) {
+            val base = shoff + index.toLong() * shentsize
+            if (u32(base + 4L) == 6L) { // SHT_DYNAMIC
+                dynOffset = u64(base + 0x18L)
+                dynSize = u64(base + 0x20L)
+                dynLink = u32(base + 0x28L)
+            }
+        }
+        if (dynLink >= 0L) {
+            strtabOffset = u64(shoff + dynLink * shentsize + 0x18L) // .dynstr
+        }
+    }
+
+    // Fallback: no section headers (or no SHT_DYNAMIC) -> use program headers.
+    if (dynOffset < 0L) {
+        val phoff = u64(0x20L)
+        val phentsize = u16(0x36L).toLong()
+        val phnum = u16(0x38L)
+        val loads = mutableListOf<LongArray>() // vaddr, offset, filesz
+        if (phoff > 0L && phnum > 0) {
+            for (index in 0 until phnum) {
+                val base = phoff + index.toLong() * phentsize
+                when (u32(base)) {
+                    1L -> loads += longArrayOf(u64(base + 0x10L), u64(base + 0x08L), u64(base + 0x20L))
+                    2L -> {
+                        dynOffset = u64(base + 0x08L)
+                        dynSize = u64(base + 0x20L)
+                    }
+                }
+            }
+        }
+        if (dynOffset >= 0L) {
+            var pos = dynOffset
+            val stop = dynOffset + dynSize
+            while (pos + 16L <= stop) {
+                if (u64(pos) == 5L) { // DT_STRTAB
+                    val strtabVaddr = u64(pos + 8L)
+                    loads.forEach { load ->
+                        val vaddr = load[0]
+                        if (strtabVaddr >= vaddr && strtabVaddr < vaddr + load[2]) {
+                            strtabOffset = load[1] + (strtabVaddr - vaddr)
+                        }
+                    }
+                    break
+                }
+                pos += 16L
+            }
+        }
+    }
+
+    if (dynOffset < 0L || strtabOffset < 0L) return emptyList()
+
+    val needed = mutableListOf<String>()
+    var pos = dynOffset
+    val stop = dynOffset + dynSize
+    while (pos + 16L <= stop) {
+        val tag = u64(pos)
+        val value = u64(pos + 8L)
+        if (tag == 0L) break // DT_NULL
+        if (tag == 1L) needed += str(strtabOffset + value) // DT_NEEDED
+        pos += 16L
+    }
+    return needed
+}
+
+val engineDistributionDir = layout.buildDirectory.dir("distributions/engine")
+
+/** Explicit engine lib source; override with -Pomniinfer.engine.jni_dir=... */
+val engineJniDirOverride: File? =
+    findProperty("omniinfer.engine.jni_dir")?.toString()?.let(::File)
+
+/**
+ * Locate the merged arm64-v8a native libs of the release variant. The AGP
+ * intermediate path has moved between versions, so scan for it and fall back to
+ * the current layout instead of hard-coding one.
+ */
+fun resolveEngineJniDir(): File {
+    engineJniDirOverride?.let { return it }
+    val intermediates =
+        layout.buildDirectory.dir("intermediates/merged_native_libs").get().asFile
+    intermediates.walkTopDown()
+        .filter { it.isDirectory && it.name == "arm64-v8a" && it.parentFile?.name == "lib" }
+        .maxByOrNull { it.lastModified() }
+        ?.let { return it }
+    return File(intermediates, "release/mergeReleaseNativeLibs/out/lib/arm64-v8a")
+}
+
+/** Extra library file names (or prefixes) to include, comma separated. */
+val engineExtraLibs: List<String> =
+    findProperty("omniinfer.engine.extra_libs")?.toString().orEmpty()
+        .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
+val engineBackends: List<String> = buildList {
+    if (enableLlamaCpp) add("llama.cpp-cpu")
+    if (enableLlamaCppHtp) add("llama.cpp-htp")
+    if (enableLiteRtLm) { add("litert-lm-cpu"); add("litert-lm-gpu") }
+    if (enableMnn) { add("mnn-cpu"); add("mnn-opencl"); add("mnn-vulkan") }
+}.distinct()
+
+val bundleEnginePackage by tasks.registering {
+    group = "distribution"
+    description = "Build a downloadable OmniInfer engine zip plus its .sha256 checksum"
+    dependsOn(tasks.matching { it.name == "mergeReleaseNativeLibs" })
+    outputs.dir(engineDistributionDir)
+
+    doLast {
+        val sourceDir = resolveEngineJniDir()
+        if (!sourceDir.isDirectory) {
+            throw GradleException(
+                "Engine native lib dir not found: ${sourceDir.absolutePath}. " +
+                    "Run :omniinfer-server:assembleRelease first, or pass -Pomniinfer.engine.jni_dir=..."
+            )
+        }
+        val allLibs = sourceDir.listFiles().orEmpty()
+            .filter { it.isFile && it.name.endsWith(".so") }
+            .sortedBy { it.name }
+        if (allLibs.isEmpty()) {
+            throw GradleException("No .so files found in ${sourceDir.absolutePath}")
+        }
+
+        // --- coreLibs: DT_NEEDED closure of the JNI bridge, dependencies first ---
+        val neededBy = allLibs.associate { it.name to readElfNeeded(it) }
+        val bridge = "libomniinfer-jni.so"  // OmniInferEngineManifest.JNI_BRIDGE_LIB
+        if (bridge !in neededBy) {
+            throw GradleException(
+                "Engine build is missing $bridge in ${sourceDir.absolutePath}; cannot derive coreLibs."
+            )
+        }
+        val ordered = mutableListOf<String>()
+        val visiting = mutableSetOf<String>()
+        fun visit(name: String) {
+            if (name in ordered || name in visiting) return
+            visiting += name
+            neededBy[name].orEmpty()
+                .filter { it != name && it in neededBy }
+                .sorted()
+                .forEach { visit(it) }
+            visiting -= name
+            ordered += name
+        }
+        visit(bridge)
+        val coreLibs = ordered
+        if (coreLibs.last() != bridge) {
+            throw GradleException("coreLibs must end with $bridge, got $coreLibs")
+        }
+
+        // --- packaged set: core chain + ggml variants/accelerators (+ extras) ---
+        val packaged = allLibs.filter { file ->
+            val name = file.name
+            name in coreLibs ||
+                name.startsWith("libggml-cpu-") ||
+                name.startsWith("libggml-htp-") ||
+                name == "libggml-hexagon.so" ||
+                name == "libggml-opencl.so" ||
+                engineExtraLibs.any { name == it || name.startsWith(it) }
+        }
+        if (packaged.isEmpty()) {
+            throw GradleException("Engine package would be empty; check the backend flags.")
+        }
+
+        packaged.flatMap { neededBy[it.name].orEmpty() }
+            .filter { !isSystemLib(it) && it !in packaged.map { file -> file.name } }
+            .distinct()
+            .forEach { missing ->
+                logger.warn("Engine package: dependency $missing is not packaged; the target device must supply it")
+            }
+
+        val engineVersion = omniInferMavenVersion
+        val outDir = engineDistributionDir.get().asFile
+        outDir.mkdirs()
+        val zipName = "omniinfer-engine-$engineVersion-arm64-v8a"
+        val zipFile = File(outDir, "$zipName.zip")
+        val checksumFile = File(outDir, "$zipName.zip.sha256")
+        zipFile.delete()
+
+        fun sha256Of(file: File): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(1 shl 16)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        val libEntries = packaged.associate { file ->
+            file.name to mapOf(
+                "name" to file.name,
+                "sha256" to sha256Of(file),
+                "sizeBytes" to file.length(),
+            )
+        }
+        val manifest = groovy.json.JsonOutput.toJson(
+            mapOf(
+                "formatVersion" to 1,
+                "engineVersion" to engineVersion,
+                "interfaceVersion" to 1,
+                "abi" to "arm64-v8a",
+                "minSdk" to 26,
+                "backends" to engineBackends,
+                "coreLibs" to coreLibs,
+                "libs" to packaged.map { libEntries.getValue(it.name) },
+            )
+        )
+
+        java.util.zip.ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+            zip.putNextEntry(java.util.zip.ZipEntry("manifest.json"))
+            zip.write(manifest.toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+            packaged.forEach { file ->
+                zip.putNextEntry(java.util.zip.ZipEntry("lib/arm64-v8a/${file.name}"))
+                file.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+        }
+
+        val zipSha = sha256Of(zipFile)
+        checksumFile.writeText("$zipSha  ${zipFile.name}\n")
+
+        // --- verify the finished artifact against its own manifest ---
+        val slurper = groovy.json.JsonSlurper()
+        val parsed = slurper.parseText(manifest) as Map<*, *>
+        val declared = (parsed["libs"] as List<*>).map { entry ->
+            @Suppress("UNCHECKED_CAST")
+            val map = entry as Map<String, Any?>
+            map["name"] as String to map
+        }.toMap()
+        var seen = 0
+        java.util.zip.ZipFile(zipFile).use { archive ->
+            val manifestEntry = archive.getEntry("manifest.json")
+                ?: throw GradleException("Engine zip is missing manifest.json")
+            val zipManifest = archive.getInputStream(manifestEntry).use { it.readBytes().decodeToString() }
+            val zipParsed = slurper.parseText(zipManifest) as Map<*, *>
+            if (zipParsed["coreLibs"] != parsed["coreLibs"]) {
+                throw GradleException("Engine zip manifest coreLibs mismatch")
+            }
+            val entries = archive.entries().toList()
+            entries.forEach { entry ->
+                if (entry.isDirectory) return@forEach
+                val name = entry.name
+                if (name == "manifest.json") return@forEach
+                if (!name.startsWith("lib/arm64-v8a/") || !name.endsWith(".so")) {
+                    throw GradleException("Engine zip has an unexpected entry: $name")
+                }
+                val libName = name.substringAfterLast('/')
+                val declaredEntry = declared[libName]
+                    ?: throw GradleException("Engine zip contains unlisted lib: $libName")
+                val bytes = archive.getInputStream(entry).use { it.readBytes() }
+                val declaredSize = (declaredEntry["sizeBytes"] as Number).toLong()
+                if (bytes.size.toLong() != declaredSize) {
+                    throw GradleException("Engine lib $libName size mismatch (${bytes.size} != $declaredSize)")
+                }
+                val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+                    .joinToString("") { "%02x".format(it) }
+                if (digest != declaredEntry["sha256"]) {
+                    throw GradleException("Engine lib $libName failed SHA-256 verification")
+                }
+                seen++
+            }
+        }
+        if (seen != declared.size) {
+            throw GradleException("Engine zip is missing ${declared.size - seen} declared lib(s)")
+        }
+
+        logger.lifecycle(
+            "Engine package written: ${zipFile.absolutePath} " +
+                "(${packaged.size} libs, ${coreLibs.size} core, ${packaged.sumOf { it.length() } / (1024 * 1024)} MiB)"
+        )
+        logger.lifecycle("Engine checksum:      ${checksumFile.absolutePath}")
+        logger.lifecycle("Engine backends:      $engineBackends")
+        logger.lifecycle("Engine coreLibs:      $coreLibs")
+    }
 }
