@@ -8,6 +8,8 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <dlfcn.h>
+#include <dirent.h>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -347,26 +349,12 @@ jlong NativeInit(JNIEnv* env, jobject, jstring config_json) {
 
   LogPrint(ANDROID_LOG_INFO, "NativeInit: backend=" + backend_name + " model=" + *model_path);
 
-  // Load, retrying with the next lower CPU variant whenever the warm-up probe
-  // caught a crash in the previously selected one (conservative auto-downgrade).
-  bool loaded = false;
-  constexpr int kMaxCpuVariantRetries = 4;
-  for (int attempt = 0; attempt <= kMaxCpuVariantRetries; ++attempt) {
-    if (backend->load(*model_path, config, native_lib_dir, n_threads, n_ctx)) {
-      loaded = true;
-      break;
-    }
-    if (!omniinfer::g_cpuVariantRetry) break;
-    omniinfer::g_cpuVariantRetry = false;
-    LogPrint(ANDROID_LOG_WARN,
-        "NativeInit: CPU variant crashed in warm-up probe; retrying with a lower tier");
-#if defined(OMNIINFER_BACKEND_LLAMA_CPP)
-    backend = std::make_unique<omniinfer::LlamaCppBackend>();
-#else
-    break;
-#endif
-  }
-  if (!loaded) {
+  // Single load attempt. CPU variant selection is not a runtime concern any more:
+  // the host app passes a pre-filtered native lib dir, so the backend set ggml
+  // registers here is already the safe one for this device. Swapping a backend
+  // after registration is unsafe (see backend_llama_cpp.h), so there is no retry
+  // loop and no warm-up probe.
+  if (!backend->load(*model_path, config, native_lib_dir, n_threads, n_ctx)) {
     StoreLastError("Backend '" + backend_name + "' failed to load model: " + *model_path);
     LogPrint(ANDROID_LOG_ERROR, "NativeInit: " + backend_name + " load failed");
     return 0;
@@ -589,12 +577,64 @@ jstring NativeCollectDiagnosticsJson(JNIEnv* env, jobject, jlong handle) {
   return StdStringToJString(env, json.str());
 }
 
+// Probe a native library directory exactly the way ggml_backend_load_all_from_path()
+// would: dlopen every libggml-*.so found there and look for the backend entry
+// point. Nothing is registered, so the probe is side-effect free (the handle is
+// closed again right away; ggml itself does the same when a variant's score is
+// below zero).
+//
+// The host app uses this to validate a *synthesised* library directory before
+// handing it to the backend. If the Android linker refuses to open libraries
+// from that directory (namespace policy), the host falls back to
+// applicationInfo.nativeLibraryDir instead of ending up with no CPU backend.
+jstring NativeProbeLibDir(JNIEnv* env, jobject, jstring dir) {
+  const std::string d = JStringToStdString(env, dir);
+  std::vector<std::string> loaded;
+  std::vector<std::string> failed;
+
+  DIR* dp = opendir(d.c_str());
+  if (dp) {
+    while (auto* entry = readdir(dp)) {
+      const std::string name = entry->d_name;
+      if (name.rfind("libggml-", 0) != 0) continue;
+      if (name.size() < 4 || name.substr(name.size() - 3) != ".so") continue;
+      const std::string path = d + "/" + name;
+      void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+      if (!handle) {
+        failed.push_back(name + ": " + (dlerror() ? dlerror() : "dlopen failed"));
+        continue;
+      }
+      auto* score = reinterpret_cast<int (*)(void)>(dlsym(handle, "ggml_backend_score"));
+      const bool usable = score != nullptr;
+      dlclose(handle);
+      if (usable) {
+        loaded.push_back(name);
+      } else {
+        failed.push_back(name + ": missing ggml_backend_score");
+      }
+    }
+    closedir(dp);
+  } else {
+    failed.push_back("opendir failed");
+  }
+
+  std::ostringstream json;
+  json << "{\"dir\":\"" << d << "\",\"loaded\":[";
+  for (size_t i = 0; i < loaded.size(); ++i) { if (i) json << ","; json << "\"" << loaded[i] << "\""; }
+  json << "],\"failed\":[";
+  for (size_t i = 0; i < failed.size(); ++i) { if (i) json << ","; json << "\"" << failed[i] << "\""; }
+  json << "]}";
+  LogPrint(ANDROID_LOG_INFO, "NativeProbeLibDir: " + json.str());
+  return StdStringToJString(env, json.str());
+}
+
 // ---------------------------------------------------------------------------
 // JNI registration
 // ---------------------------------------------------------------------------
 
 JNINativeMethod kMethods[] = {
     {"nativeInit", "(Ljava/lang/String;)J", reinterpret_cast<void*>(NativeInit)},
+    {"nativeProbeLibDir", "(Ljava/lang/String;)Ljava/lang/String;", reinterpret_cast<void*>(NativeProbeLibDir)},
     {"nativeGetLastError", "()Ljava/lang/String;", reinterpret_cast<void*>(NativeGetLastError)},
     {"nativeGenerate", "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[[BLcom/omniinfer/server/OmniInferStreamCallback;)Ljava/lang/String;", reinterpret_cast<void*>(NativeGenerate)},
     {"nativeLoadHistory", "(J[Ljava/lang/String;[Ljava/lang/String;)Z", reinterpret_cast<void*>(NativeLoadHistory)},
