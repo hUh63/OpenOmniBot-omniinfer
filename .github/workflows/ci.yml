@@ -1,19 +1,25 @@
-name: CI
+name: Pull Request CI
 
 on:
   pull_request:
-  push:
     branches:
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 env:
-  JAVA_VERSION: '17'
+  JAVA_VERSION: '21'
   NODE_VERSION: '22'
   PNPM_VERSION: '10.28.0'
-  FLUTTER_VERSION: '3.38.7'
+  FLUTTER_VERSION: '3.47.2'
+  # API 37 is published by sdkmanager as the minor-version package 37.0.
+  ANDROID_PLATFORM_VERSION: '37.0'
   NDK_VERSION: '28.2.13676358'
   ALLOWED_THIRD_PARTY_WRAPPER_SHA: 'ee3739525a995bcb5601621a6e2daec1f183bbefc375743acc235cec33547e04'
 
@@ -39,7 +45,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: echo "Skipping gitleaks for fork PRs because repository secrets are not available to pull_request workflows from forks."
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -81,6 +87,25 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The legacy "tools" package was removed from Google's SDK
+          # repository; only platform-tools is needed from the defaults.
+          packages: platform-tools
+
+      - name: Cache Android SDK platform
+        id: cache-android-platform
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_SDK_ROOT }}/platforms/android-${{ env.ANDROID_PLATFORM_VERSION }}
+            ${{ env.ANDROID_SDK_ROOT }}/licenses
+          key: ${{ runner.os }}-android-platform-${{ env.ANDROID_PLATFORM_VERSION }}
+
+      - name: Install Android SDK platform
+        if: steps.cache-android-platform.outputs.cache-hit != 'true'
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-${{ env.ANDROID_PLATFORM_VERSION }}"
 
       - name: Cache Android NDK
         id: cache-android-ndk
@@ -108,16 +133,17 @@ jobs:
 
       - name: Flutter test
         working-directory: ui
-        run: flutter test test/core/router/go_router_config_test.dart
+        run: flutter test
 
       - name: Flutter analyze
         working-directory: ui
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
 
-      - name: Gradle verify develop standard debug
+      - name: Gradle unit tests, lint and debug APK
         run: >-
-          ./gradlew --no-daemon --parallel --build-cache
+          ./gradlew --no-daemon --parallel --build-cache --max-workers=2
+          -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8 --enable-native-access=ALL-UNNAMED"
           :app:testDevelopStandardDebugUnitTest
-          :app:assembleDevelopStandardDebug
           :app:lintDevelopStandardDebug
+          :app:assembleDevelopStandardDebug
           -Ptarget=lib/main_standard.dart
