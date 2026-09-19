@@ -26,7 +26,7 @@ class AgentWebRuntimeTest {
 
     @Test
     fun `Kimi parser accepts only authenticated loopback URLs`() {
-        val token = "abc_DEF-1234567890_abcdefghijkl"
+        val token = "abc_DEF-1234567890_abcdefghijkl" //gitleaks:allow
         assertEquals(
             "http://127.0.0.1:58627/#token=$token",
             AgentWebTranscriptParser.findUrl(
