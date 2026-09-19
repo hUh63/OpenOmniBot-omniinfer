@@ -76,7 +76,7 @@ class TaskRuntimeService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(applicationInfo.icon.takeIf { it != 0 } ?: R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("小万任务执行中")
             .setContentText("正在后台执行用户发起的任务")
             .setContentIntent(openAppPendingIntent)
