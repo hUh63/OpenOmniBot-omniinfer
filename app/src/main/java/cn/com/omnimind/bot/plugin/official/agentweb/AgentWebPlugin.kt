@@ -163,9 +163,20 @@ internal object AgentWebTools {
 
 internal object AgentWebActions {
     const val OPEN_KIMI = AgentWebTools.OPEN_KIMI
+    const val KIMI_STATUS = AgentWebTools.KIMI_STATUS
+    const val STOP_KIMI = AgentWebTools.STOP_KIMI
     const val OPEN_DEEPSEEK = AgentWebTools.OPEN_DEEPSEEK
+    const val DEEPSEEK_STATUS = AgentWebTools.DEEPSEEK_STATUS
+    const val STOP_DEEPSEEK = AgentWebTools.STOP_DEEPSEEK
 
-    val ids = linkedSetOf(OPEN_KIMI, OPEN_DEEPSEEK)
+    val ids = linkedSetOf(
+        OPEN_KIMI,
+        OPEN_DEEPSEEK,
+        KIMI_STATUS,
+        STOP_KIMI,
+        DEEPSEEK_STATUS,
+        STOP_DEEPSEEK,
+    )
 
     fun definitions(): List<OmniPluginActionDefinition> = listOf(
         action(
@@ -175,6 +186,8 @@ internal object AgentWebActions {
             packageId = AgentWebService.KIMI.packageId,
             agentId = "kimi-code-acp",
             quickLaunchOrder = 0,
+            statusAction = KIMI_STATUS,
+            stopAction = STOP_KIMI,
             labelZh = "Kimi Code Web",
             labelEn = "Kimi Code Web",
             shortLabelZh = "Kimi Web",
@@ -189,6 +202,8 @@ internal object AgentWebActions {
             packageId = AgentWebService.DEEPSEEK_HARNESS.packageId,
             agentId = "deepseek-harness-acp",
             quickLaunchOrder = 1,
+            statusAction = DEEPSEEK_STATUS,
+            stopAction = STOP_DEEPSEEK,
             labelZh = "DeepSeek Harness Web",
             labelEn = "DeepSeek Harness Web",
             shortLabelZh = "DSH Web",
@@ -196,6 +211,41 @@ internal object AgentWebActions {
             descriptionZh = "使用统一 Provider 和模型，在系统浏览器中打开本机 Web 界面",
             descriptionEn = "Open the local Web UI with the shared Provider and model",
         ),
+        lifecycleAction(
+            id = KIMI_STATUS,
+            displayName = "Get Kimi Code Web status",
+            description = "Report whether the managed Kimi Code Web process is running.",
+        ),
+        lifecycleAction(
+            id = STOP_KIMI,
+            displayName = "Stop Kimi Code Web",
+            description = "Stop the managed Kimi Code Web process.",
+        ),
+        lifecycleAction(
+            id = DEEPSEEK_STATUS,
+            displayName = "Get DeepSeek Harness Web status",
+            description = "Report whether the managed DeepSeek Harness Web process is running.",
+        ),
+        lifecycleAction(
+            id = STOP_DEEPSEEK,
+            displayName = "Stop DeepSeek Harness Web",
+            description = "Stop the managed DeepSeek Harness Web process.",
+        ),
+    )
+
+    /**
+     * Status/stop stay invocable through the shared action boundary but carry
+     * no placement, so placement-driven surfaces never render them as
+     * standalone tiles; the owning open action links to them instead.
+     */
+    private fun lifecycleAction(
+        id: String,
+        displayName: String,
+        description: String,
+    ) = OmniPluginActionDefinition(
+        id = id,
+        displayName = displayName,
+        description = description,
     )
 
     private fun action(
@@ -205,6 +255,8 @@ internal object AgentWebActions {
         packageId: String,
         agentId: String,
         quickLaunchOrder: Int,
+        statusAction: String,
+        stopAction: String,
         labelZh: String,
         labelEn: String,
         shortLabelZh: String,
@@ -225,6 +277,8 @@ internal object AgentWebActions {
             put("packageId", packageId)
             put("agentId", agentId)
             put("quickLaunchOrder", quickLaunchOrder)
+            put("statusAction", statusAction)
+            put("stopAction", stopAction)
             put("label", localized(labelZh, labelEn))
             put("shortLabel", localized(shortLabelZh, shortLabelEn))
             put("description", localized(descriptionZh, descriptionEn))
@@ -243,15 +297,21 @@ private class AgentWebActionHandler(
     override val actionIds: Set<String> = AgentWebActions.ids
 
     override suspend fun execute(actionId: String, args: JsonObject): JsonObject {
-        val service = when (actionId) {
-            AgentWebActions.OPEN_KIMI -> AgentWebService.KIMI
-            AgentWebActions.OPEN_DEEPSEEK -> AgentWebService.DEEPSEEK_HARNESS
+        return when (actionId) {
+            AgentWebActions.OPEN_KIMI -> controller.open(
+                AgentWebService.KIMI,
+                args.reasoningEffort(),
+            )
+            AgentWebActions.OPEN_DEEPSEEK -> controller.open(
+                AgentWebService.DEEPSEEK_HARNESS,
+                args.reasoningEffort(),
+            )
+            AgentWebActions.KIMI_STATUS -> controller.status(AgentWebService.KIMI)
+            AgentWebActions.STOP_KIMI -> controller.stop(AgentWebService.KIMI)
+            AgentWebActions.DEEPSEEK_STATUS -> controller.status(AgentWebService.DEEPSEEK_HARNESS)
+            AgentWebActions.STOP_DEEPSEEK -> controller.stop(AgentWebService.DEEPSEEK_HARNESS)
             else -> error("Unsupported Agent Web action: $actionId")
-        }
-        return controller.open(
-            service = service,
-            reasoningEffort = args.reasoningEffort(),
-        ).toJson()
+        }.toJson()
     }
 }
 
