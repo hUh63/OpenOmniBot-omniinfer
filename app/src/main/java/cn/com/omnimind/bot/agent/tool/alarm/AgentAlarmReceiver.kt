@@ -142,7 +142,7 @@ class AgentAlarmReceiver : BroadcastReceiver() {
         )
 
         val builder = NotificationCompat.Builder(context, PRE_ALERT_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(message)
             .setSubText("闹钟即将开始")
