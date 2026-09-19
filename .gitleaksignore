@@ -1,3 +1,10 @@
 # Historical false-positive/accepted findings in docs examples.
 cdb18baaccc51dac52cb661e53e9cee1f38ca6f5:docs/reference/openclaw-deploy.md:generic-api-key:450
 a6aebf900488107126b24f1d9eda333cd832efc2:docs/reference/openclaw-deploy.md:generic-api-key:450
+
+# Deliberate fake token in the Kimi loopback-URL parser unit test. The current
+# revision of that line also carries an inline "//gitleaks:allow" comment so the
+# finding does not come back; these entries cover the two historical commits
+# that introduced it.
+51415485ccda23a179989d9f0c45d33a0faa204f:app/src/test/java/cn/com/omnimind/bot/plugin/official/agentweb/AgentWebRuntimeTest.kt:generic-api-key:29
+bd60a2f159dd30588ddfe74251da5624de91a2a2:app/src/test/java/cn/com/omnimind/bot/plugin/official/agentweb/AgentWebRuntimeTest.kt:generic-api-key:29
