@@ -5,6 +5,7 @@ import cn.com.omnimind.baselib.llm.MnnLocalProviderStateStore
 import cn.com.omnimind.baselib.util.OmniLog
 import com.omniinfer.server.OmniInferServer
 import com.tencent.mmkv.MMKV
+import java.util.Locale
 
 object OmniInferLocalRuntime {
     private const val TAG = "OmniInferLocalRuntime"
@@ -35,10 +36,16 @@ object OmniInferLocalRuntime {
     }
 
     fun normalizeBackend(rawBackend: String?): String {
-        return when (rawBackend?.trim()) {
-            BACKEND_OMNIINFER_MNN, "mnn" -> BACKEND_OMNIINFER_MNN
+        // Keep this table aligned with ui/lib/services/inference_backend.dart.
+        // Anything both layers must agree on belongs in exactly one of the two
+        // (Kotlin + Dart), never in a third copy.
+        return when (rawBackend?.trim()?.lowercase(Locale.US)) {
+            BACKEND_OMNIINFER_MNN, "mnn", "mnn-cpu" -> BACKEND_OMNIINFER_MNN
             BACKEND_EXECUTORCH_QNN, "qnn" -> BACKEND_EXECUTORCH_QNN
-            BACKEND_LITERT, "litert-lm", "litertlm" -> BACKEND_LITERT
+            BACKEND_LITERT_NPU, "litert-lm-npu", "litertlm-npu", "litert/npu" ->
+                BACKEND_LITERT_NPU
+            BACKEND_LITERT, "litert-lm", "litertlm", "litert/cpu", "litert-lm-cpu" ->
+                BACKEND_LITERT
             else -> BACKEND_LLAMA_CPP
         }
     }
@@ -127,6 +134,7 @@ object OmniInferLocalRuntime {
             BACKEND_OMNIINFER_MNN -> "mnn"
             BACKEND_EXECUTORCH_QNN -> "executorch-qnn"
             BACKEND_LITERT -> "litert"
+            BACKEND_LITERT_NPU -> "litert-npu"
             else -> BACKEND_LLAMA_CPP
         }
         val port = getPort()
@@ -184,7 +192,7 @@ object OmniInferLocalRuntime {
         when (getSelectedBackend()) {
             BACKEND_OMNIINFER_MNN -> OmniInferMnnModelsManager.handleAppOpen()
             BACKEND_EXECUTORCH_QNN -> OmniInferQnnModelsManager.handleAppOpen()
-            BACKEND_LITERT -> OmniInferLiteRtModelsManager.handleAppOpen()
+            BACKEND_LITERT, BACKEND_LITERT_NPU -> OmniInferLiteRtModelsManager.handleAppOpen()
             else -> OmniInferModelsManager.handleAppOpen()
         }
     }
