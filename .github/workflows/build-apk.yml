@@ -96,17 +96,21 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer
-          name: "OmniInfer 版 · 同步官方 v0.6.3 (v0.6.3-omniinfer)"
+          tag_name: v0.6.3-main-omniinfer
+          name: "OmniInfer 版 · 同步官方 v0.6.3 + main (v0.6.3-main-omniinfer)"
           prerelease: true
           draft: false
           body: |
-            基于本仓 omniinfer 版 v0.6.2.3，同步官方 OmniBot v0.6.3 的改动（tag v0.6.3 / commit 16d22078）：
-            - app/build.gradle.kts：versionCode 15→16、versionName "0.6.2.3"→"0.6.3"
-              （保留本仓特有的 omniinfer edition 配置与 :omniinfer-server / Ktor 依赖）
-            - LocalAcpRuntime.kt、AgentWebRuntimeModels.kt：DSH 思考开关与会话配置恢复；含对应 JVM 测试
-            - scripts/test-agent-runtime.sh、docs/ 下 v0.6.3 发布说明、验收记录与验证脚本
-            - 纯上游增量同步：未改动本仓既有的 omniinfer 集成与本地推理修复
+            基于本仓 omniinfer 版，同步官方 OmniBot v0.6.3 及 v0.6.3 之后的 main 改动（main@92af786b）：
+            - v0.6.3：DSH 思考开关与会话配置恢复（LocalAcpRuntime.kt、AgentWebRuntimeModels.kt + JVM 测试）；
+              app/build.gradle.kts 的 versionCode 15→16、versionName "0.6.3"
+              （本仓特有的 omniinfer edition 与 :omniinfer-server / Ktor 依赖原样保留）
+            - v0.6.3 之后的 main：agent-web 本地 Web 界面运行状态展示与停止入口（AgentWebPlugin.kt、
+              ui/services/agent_web_status_service.dart、home_drawer* 等）、通知栏专用单色图标
+              （ic_notification.xml + 5 处 setSmallIcon 调用点）、预测性返回/输入框动画性能修复、CI 修复、
+              README 与 docs/scripts 更新
+            - 冲突处理：AssistsCoreManager.kt 保留本仓的 dispatchAgentAiConfigChanged、采纳官方图标改动；
+              ci.yml / release.yml 采纳官方 main 版本。本仓 omniinfer 集成与本地推理修复未改动。
             天玑(MT6991) NPU：内置 libLiteRtDispatch_MediaTek.so，q4_ekv1280_mt6991 模型自动走 Backend.NPU。
           files: apk-out/*.apk
         env:
