@@ -4,6 +4,11 @@ import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import com.agentclientprotocol.agent.AgentInfo
 import com.agentclientprotocol.client.Client
+import com.agentclientprotocol.client.ClientSession
+import com.agentclientprotocol.model.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,6 +42,86 @@ class LocalAcpRuntimeConfigTest {
     @Test
     fun `clearing launch arguments and environment does not interrupt the current prompt`() =
         checkConfigEdit(clearOptions = true)
+
+    @Test
+    fun `accepted idle config survives a new runtime before any prompt and stays session scoped`() = runBlocking {
+        val context = acpProfileStoreTestContext(temporaryFolder.root)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val store = AcpAgentProfileStore(context)
+        fun runtime() = LocalAcpRuntime(
+            context, scope, mock(AgentSessionBindingRepository::class.java),
+            AcpAgentProfileStore(context), prepareLaunchEnvironment = { emptyMap() },
+            buildHandoffContext = { _, _ -> null },
+            scheduleToolBridge = mock(AgentScheduleToolBridge::class.java), onMessage = {},
+        )
+        fun options(effort: String) = listOf<SessionConfigOption>(SessionConfigOption.Select(
+            id = SessionConfigId("provider-thinking"), name = "Thinking",
+            category = SessionConfigOptionCategory.THOUGHT_LEVEL,
+            currentValue = SessionConfigValueId(effort),
+            options = SessionConfigSelectOptions.Flat(listOf("off", "high").map {
+                SessionConfigSelectOption(SessionConfigValueId(it), it)
+            }),
+        ))
+        val writes = mutableListOf<String>()
+        fun session(id: String): Pair<ClientSession, MutableStateFlow<List<SessionConfigOption>>> {
+            val session = mock(ClientSession::class.java)
+            val config = MutableStateFlow(options("high"))
+            `when`(session.sessionId).thenReturn(SessionId(id))
+            `when`(session.configOptionsSupported).thenReturn(true)
+            `when`(session.configOptions).thenReturn(config)
+            return session to config
+        }
+        suspend fun configure(session: ClientSession, state: MutableStateFlow<List<SessionConfigOption>>) {
+            `when`(session.setConfigOption(SessionConfigId("provider-thinking"),
+                SessionConfigOptionValue.StringValue("off"))).thenAnswer {
+                writes += session.sessionId.value
+                state.value = options("off")
+                SetSessionConfigOptionResponse(state.value)
+            }
+        }
+        try {
+            val first = runtime()
+            val (original, originalState) = session("selected-session")
+            configure(original, originalState)
+            first.registerForTest(original)
+            first.handleMethod("session/set_config_option", mapOf(
+                "sessionId" to "selected-session", "configId" to "provider-thinking", "value" to "off",
+            ))
+            // Simulate the Harness restoring its last executed (high) value.
+            val reopened = runtime()
+            val saved = store.sessionConfiguration("selected-session")
+            val (rejected, _) = session("selected-session")
+            `when`(rejected.setConfigOption(SessionConfigId("provider-thinking"),
+                SessionConfigOptionValue.StringValue("off")))
+                .thenThrow(IllegalStateException("configuration rejected"))
+            try {
+                reopened.registerForTest(rejected)
+                fail("A rejected restore must not expose the stale session as ready")
+            } catch (error: java.lang.reflect.InvocationTargetException) {
+                assertEquals("configuration rejected", error.cause?.message)
+            }
+            assertFalse((reopened.field("sessions") as Map<*, *>).containsKey("selected-session"))
+            assertEquals(saved, store.sessionConfiguration("selected-session"))
+            val (restored, restoredState) = session("selected-session")
+            configure(restored, restoredState)
+            reopened.registerForTest(restored)
+            assertEquals("off", (restoredState.value.single() as SessionConfigOption.Select).currentValue.value)
+            val (other, otherState) = session("other-session")
+            reopened.registerForTest(other)
+            assertEquals("high", (otherState.value.single() as SessionConfigOption.Select).currentValue.value)
+            assertEquals(listOf("selected-session", "selected-session"), writes)
+            store.unbindSession("selected-session")
+            assertTrue(store.sessionConfiguration("selected-session").isEmpty())
+        } finally { scope.cancel() }
+    }
+
+    private suspend fun LocalAcpRuntime.registerForTest(session: ClientSession) =
+        suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
+            val result = javaClass.getDeclaredMethod("registerSession", ClientSession::class.java,
+                String::class.java, kotlin.coroutines.Continuation::class.java)
+                .apply { isAccessible = true }.invoke(this, session, "/workspace", continuation)
+            if (result === COROUTINE_SUSPENDED) result else Unit
+        }
 
     private fun checkConfigEdit(
         rejectSave: Boolean = false,
