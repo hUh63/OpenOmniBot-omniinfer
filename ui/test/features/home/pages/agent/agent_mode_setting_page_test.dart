@@ -552,6 +552,115 @@ void main() {
     });
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('running Agent Web action shows status and stops in place', (
+    tester,
+  ) async {
+    var statusCode = 'RUNNING';
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pluginPlatformChannel, (call) async {
+          calls.add(call);
+          if (call.method == 'listActions') {
+            return <Map<String, dynamic>>[
+              <String, dynamic>{
+                'id': 'open_kimi_web',
+                'pluginId': 'com.omnimind.agent-web',
+                'displayName': 'Kimi Code Web',
+                'description': 'Open Kimi Code Web',
+                'presentation': <String, dynamic>{
+                  'placement': 'agent_settings',
+                  'packageId': 'kimi',
+                  'statusAction': 'get_kimi_web_status',
+                  'stopAction': 'stop_kimi_web',
+                  'label': <String, String>{
+                    'zh': 'Kimi Code Web',
+                    'en': 'Kimi Code Web',
+                  },
+                  'description': <String, String>{
+                    'zh': '在系统浏览器中打开本机 Web 界面',
+                    'en': 'Open the local Web UI',
+                  },
+                },
+              },
+            ];
+          }
+          if (call.method == 'invokeAction') {
+            final actionId = (call.arguments as Map)['actionId'] as String;
+            if (actionId == 'get_kimi_web_status') {
+              return <String, dynamic>{
+                'success': true,
+                'code': statusCode,
+                'serviceId': 'kimi',
+                'packageId': 'kimi',
+                'running': statusCode != 'NOT_RUNNING',
+              };
+            }
+            if (actionId == 'stop_kimi_web') {
+              statusCode = 'NOT_RUNNING';
+              return <String, dynamic>{
+                'success': true,
+                'code': 'STOPPED',
+                'serviceId': 'kimi',
+                'packageId': 'kimi',
+                'running': false,
+              };
+            }
+          }
+          return null;
+        });
+    tester.view.physicalSize = const Size(1080, 2200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.lightTheme,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: const Locale('zh'),
+        home: const AgentModeSettingPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('运行中'), findsOneWidget);
+    expect(
+      find.byKey(
+        const Key('plugin-action-stop-com.omnimind.agent-web/open_kimi_web'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.byKey(
+        const Key('plugin-action-stop-com.omnimind.agent-web/open_kimi_web'),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final stopInvocation = calls.lastWhere(
+      (call) =>
+          call.method == 'invokeAction' &&
+          (call.arguments as Map)['actionId'] == 'stop_kimi_web',
+    );
+    expect(stopInvocation.arguments, <String, Object?>{
+      'pluginId': 'com.omnimind.agent-web',
+      'actionId': 'stop_kimi_web',
+      'arguments': <String, dynamic>{},
+    });
+    expect(find.text('运行中'), findsNothing);
+    expect(
+      find.byKey(
+        const Key(
+          'plugin-action-button-com.omnimind.agent-web/open_kimi_web',
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 }
 
 Map<String, dynamic> _agent(
