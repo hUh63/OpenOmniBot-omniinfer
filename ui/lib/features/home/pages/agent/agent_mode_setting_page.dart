@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/services/agent_web_action_presenter.dart';
+import 'package:ui/services/agent_web_status_service.dart';
 import 'package:ui/services/omni_plugin_service.dart';
 import 'package:ui/services/scene_model_config_service.dart';
 import 'package:ui/services/storage_service.dart';
@@ -35,6 +36,8 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   String? _busyAgentId;
   String? _busyPluginActionKey;
   List<OmniPluginActionItem> _pluginActions = const <OmniPluginActionItem>[];
+  Map<String, AgentWebStatus> _webActionStatuses =
+      const <String, AgentWebStatus>{};
   int _catalogRequestId = 0;
   late Set<String> _preparingAgentIds;
   StreamSubscription<Set<String>>? _preparationSubscription;
@@ -120,10 +123,24 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
             .where((action) => action.supportsPlacement('agent_settings'))
             .toList(growable: false);
       });
+      unawaited(_refreshWebActionStatuses());
     } catch (_) {
       // Agent configuration remains available if the optional action catalog
       // cannot be read during app startup.
     }
+  }
+
+  /// Probes the managed Web processes linked from the visible plugin actions.
+  /// Each probe failure degrades to [AgentWebStatus.unknown], which renders
+  /// the tile without a status badge.
+  Future<void> _refreshWebActionStatuses() async {
+    final actions = _pluginActions
+        .where(AgentWebStatusService.supportsLifecycle)
+        .toList(growable: false);
+    if (actions.isEmpty) return;
+    final statuses = await AgentWebStatusService.queryAll(actions);
+    if (!mounted) return;
+    setState(() => _webActionStatuses = statuses);
   }
 
   Future<void> _load({bool refresh = false}) async {
@@ -348,6 +365,21 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     setState(() => _busyPluginActionKey = key);
     try {
       await AgentWebActionPresenter.invoke(action, english: _english);
+      await _refreshWebActionStatuses();
+    } finally {
+      if (mounted && _busyPluginActionKey == key) {
+        setState(() => _busyPluginActionKey = null);
+      }
+    }
+  }
+
+  Future<void> _stopPluginAction(OmniPluginActionItem action) async {
+    final key = _pluginActionKey(action);
+    if (_busyPluginActionKey != null) return;
+    setState(() => _busyPluginActionKey = key);
+    try {
+      await AgentWebActionPresenter.stop(action, english: _english);
+      await _refreshWebActionStatuses();
     } finally {
       if (mounted && _busyPluginActionKey == key) {
         setState(() => _busyPluginActionKey = null);
@@ -707,6 +739,8 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     final key = _pluginActionKey(action);
     final busy = _busyPluginActionKey == key;
     final disabled = _busyPluginActionKey != null;
+    final status = _webActionStatuses[key] ?? AgentWebStatus.unknown;
+    final active = status.active;
     final label = action.localizedPresentationValue(
       'label',
       english: _english,
@@ -717,14 +751,31 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       english: _english,
       fallback: action.description,
     );
+    final statusColor = switch (status) {
+      AgentWebStatus.running => const Color(0xFF2EAF67),
+      AgentWebStatus.starting => const Color(0xFFE3A52B),
+      _ => null,
+    };
+    final statusLabel = switch (status) {
+      AgentWebStatus.running => _text('运行中', 'Running'),
+      AgentWebStatus.starting => _text('启动中', 'Starting'),
+      _ => null,
+    };
     return _FlatTile(
       tileKey: Key('plugin-action-$key'),
       leading: Icon(LucideIcons.globe2, size: 18, color: palette.accentPrimary),
       title: label,
+      statusColor: statusColor,
+      statusLabel: statusLabel,
       subtitle: description,
-      actionLabel: _text('打开', 'Open'),
-      actionKey: Key('plugin-action-button-$key'),
-      onAction: disabled ? null : () => _invokePluginAction(action),
+      actionLabel: active ? _text('停止', 'Stop') : _text('打开', 'Open'),
+      actionColor: active ? const Color(0xFFE05252) : null,
+      actionKey: Key(
+        active ? 'plugin-action-stop-$key' : 'plugin-action-button-$key',
+      ),
+      onAction: disabled
+          ? null
+          : () => active ? _stopPluginAction(action) : _invokePluginAction(action),
       busy: busy,
       onTap: disabled ? null : () => _invokePluginAction(action),
     );
@@ -884,6 +935,7 @@ class _FlatTile extends StatelessWidget {
     this.subtitleMonospace = false,
     this.errorText,
     this.actionLabel,
+    this.actionColor,
     this.actionKey,
     this.onAction,
     this.navigationLabel,
@@ -901,6 +953,7 @@ class _FlatTile extends StatelessWidget {
   final bool subtitleMonospace;
   final String? errorText;
   final String? actionLabel;
+  final Color? actionColor;
   final Key? actionKey;
   final VoidCallback? onAction;
   final String? navigationLabel;
@@ -1050,7 +1103,7 @@ class _FlatTile extends StatelessWidget {
                             style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
-                              color: palette.accentPrimary,
+                              color: actionColor ?? palette.accentPrimary,
                               fontFamily: 'PingFang SC',
                             ),
                           ),
