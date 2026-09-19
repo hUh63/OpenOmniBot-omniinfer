@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
@@ -19,6 +20,7 @@ import 'package:ui/models/conversation_model.dart';
 import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/models/scheduled_task.dart';
 import 'package:ui/services/agent_web_action_presenter.dart';
+import 'package:ui/services/agent_web_status_service.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
@@ -29,6 +31,7 @@ import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/cache_util.dart';
+import 'package:ui/utils/popup_menu_anchor_position.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 
@@ -183,6 +186,8 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       ChatConversationRuntimeCoordinator.instance;
   List<OmniPluginActionItem> _webQuickActions = const <OmniPluginActionItem>[];
   String? _busyWebQuickActionKey;
+  Map<String, AgentWebStatus> _webQuickActionStatuses =
+      const <String, AgentWebStatus>{};
 
   @override
   void initState() {
@@ -283,12 +288,32 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
                   : left.displayName.compareTo(right.displayName);
             });
       setState(() => _webQuickActions = quickActions);
+      unawaited(_refreshWebQuickActionStatuses());
     } catch (error) {
       debugPrint('[HomeDrawer] failed to load Web quick actions: $error');
       if (mounted && _webQuickActions.isNotEmpty) {
         setState(() => _webQuickActions = const <OmniPluginActionItem>[]);
       }
     }
+  }
+
+  /// Probes the managed Web processes behind the quick launch chips so a
+  /// running service is visibly marked and offers a stop affordance.
+  Future<void> _refreshWebQuickActionStatuses() async {
+    final actions = _webQuickActions
+        .where(AgentWebStatusService.supportsLifecycle)
+        .toList(growable: false);
+    if (actions.isEmpty) {
+      if (mounted && _webQuickActionStatuses.isNotEmpty) {
+        setState(
+          () => _webQuickActionStatuses = const <String, AgentWebStatus>{},
+        );
+      }
+      return;
+    }
+    final statuses = await AgentWebStatusService.queryAll(actions);
+    if (!mounted) return;
+    setState(() => _webQuickActionStatuses = statuses);
   }
 
   Future<void> _invokeWebQuickAction(OmniPluginActionItem action) async {
@@ -299,6 +324,22 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _maybeCloseDrawer();
     try {
       await AgentWebActionPresenter.invoke(action, english: english);
+      await _refreshWebQuickActionStatuses();
+    } finally {
+      if (mounted && _busyWebQuickActionKey == key) {
+        setState(() => _busyWebQuickActionKey = null);
+      }
+    }
+  }
+
+  Future<void> _stopWebQuickAction(OmniPluginActionItem action) async {
+    if (_busyWebQuickActionKey != null) return;
+    final key = '${action.pluginId}/${action.id}';
+    final english = Localizations.localeOf(context).languageCode == 'en';
+    setState(() => _busyWebQuickActionKey = key);
+    try {
+      await AgentWebActionPresenter.stop(action, english: english);
+      await _refreshWebQuickActionStatuses();
     } finally {
       if (mounted && _busyWebQuickActionKey == key) {
         setState(() => _busyWebQuickActionKey = null);
