@@ -4,6 +4,7 @@ import 'package:ui/constants/storage_keys.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/welcome/state/onboarding_state.dart';
 import 'package:ui/l10n/l10n.dart';
+import 'package:ui/services/inference_backend.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/gradient_button.dart';
@@ -12,7 +13,14 @@ import 'package:ui/widgets/settings_section_title.dart';
 // ---------- SVG icons ----------
 
 const String kOnboardingRecommendedModelId = 'Gemma-4-E2B';
-const String kOnboardingRecommendedBackend = 'llama.cpp';
+
+/// Backend the onboarding flow pre-selects.
+///
+/// Sourced from the shared vocabulary in `services/inference_backend.dart`. This
+/// constant used to be a hard-coded `'litert'`, which forced the local-models page
+/// onto LiteRT and made GGUF imports fail with
+/// "Please select a .litertlm model file".
+const String kOnboardingRecommendedBackend = kBackendLlamaCpp;
 
 const String _kShieldSvg = '''
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
