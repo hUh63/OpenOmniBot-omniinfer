@@ -76,6 +76,7 @@ jobs:
           ./gradlew --no-daemon --build-cache --max-workers=4 \
             assembleProductionOmniinferRelease \
             -Ptarget=lib/main_omniinfer.dart \
+            -Pomniinfer.abis=arm64-v8a \
             -POMNI_RELEASE_STORE_FILE="$RUNNER_TEMP/release.p12" \
             -POMNI_RELEASE_STORE_PWD="${{ secrets.RELEASE_PASSWORD }}" \
             -POMNI_RELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
@@ -87,31 +88,74 @@ jobs:
           find app/build/outputs/apk -name "*.apk" -exec cp {} apk-out/ \;
           ls -la apk-out
 
-      - name: Verify APK contents (MediaTek NPU dispatch + LiteRT)
+      - name: Verify APK contents (arm64-only + ggml variants + NPU dispatch)
         run: |
           APK=$(ls apk-out/*.apk | head -1)
-          unzip -l "$APK" | grep -iE "LiteRtDispatch|liblitertlm|neuron" || true
-          unzip -l "$APK" | grep -qi "LiteRtDispatch_MediaTek.so" && echo "NPU dispatch lib present" || echo "WARN: dispatch lib missing"
+          echo "APK: $APK ($(stat -c%s "$APK") bytes)"
+          unzip -l "$APK" > /tmp/apk_list.txt
+          grep -qi "libLiteRtDispatch_MediaTek.so" /tmp/apk_list.txt \
+            && echo "NPU dispatch lib present" \
+            || { echo "ERROR: LiteRtDispatch_MediaTek.so missing"; exit 1; }
+          VARIANTS=$(grep -o "libggml-cpu-android_[a-z0-9_.]*\.so" /tmp/apk_list.txt | sort -u | wc -l)
+          echo "ggml CPU variants: $VARIANTS"
+          [ "$VARIANTS" -ge 7 ] || { echo "ERROR: expected >=7 CPU variants, got $VARIANTS"; exit 1; }
+          # Release builds pass -Pomniinfer.abis=arm64-v8a: LiteRT's x86_64 slice
+          # must not be shipped (upstream OmniInfer guidance).
+          if grep -q "lib/x86_64/" /tmp/apk_list.txt; then
+            echo "ERROR: x86_64 libs present but arm64-only was requested"; exit 1
+          fi
+          echo "APK shape OK (arm64-v8a only)"
 
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-main-omniinfer
-          name: "OmniInfer 版 · 同步官方 v0.6.3 + main (v0.6.3-main-omniinfer)"
+          tag_name: v0.6.3-omniinfer-v2
+          name: "OmniInfer 版 · 移植官方独立组件能力 (v0.6.3-omniinfer-v2)"
           prerelease: true
           draft: false
           body: |
-            基于本仓 omniinfer 版，同步官方 OmniBot v0.6.3 及 v0.6.3 之后的 main 改动（main@92af786b）：
-            - v0.6.3：DSH 思考开关与会话配置恢复（LocalAcpRuntime.kt、AgentWebRuntimeModels.kt + JVM 测试）；
-              app/build.gradle.kts 的 versionCode 15→16、versionName "0.6.3"
-              （本仓特有的 omniinfer edition 与 :omniinfer-server / Ktor 依赖原样保留）
-            - v0.6.3 之后的 main：agent-web 本地 Web 界面运行状态展示与停止入口（AgentWebPlugin.kt、
-              ui/services/agent_web_status_service.dart、home_drawer* 等）、通知栏专用单色图标
-              （ic_notification.xml + 5 处 setSmallIcon 调用点）、预测性返回/输入框动画性能修复、CI 修复、
-              README 与 docs/scripts 更新
-            - 冲突处理：AssistsCoreManager.kt 保留本仓的 dispatchAgentAiConfigChanged、采纳官方图标改动；
-              ci.yml / release.yml 采纳官方 main 版本。本仓 omniinfer 集成与本地推理修复未改动。
-            天玑(MT6991) NPU：内置 libLiteRtDispatch_MediaTek.so，q4_ekv1280_mt6991 模型自动走 Backend.NPU。
+            在本仓 omniinfer 版（已同步官方 v0.6.3 + main）基础上，按官方 OmniInfer 独立组件的
+            设计做了六项改造。本仓既有的本地推理修复与功能全部保留，未删除任何变体或能力。
+
+            1. native lib 目录可注入（官方 OmniInferEngineLoader.installedNativeLibDir 同款钩子）
+               - OmniInferServer 不再写死 applicationInfo.nativeLibraryDir
+               - 新增 OmniInferNativeLibs：未装引擎时在应用私有目录构造“过滤镜像”
+                 （全量 symlink，排除 CPU 变体），并先用 nativeProbeLibDir 以 ggml 完全相同
+                 的 dlopen 路径验证该目录可用，不可用则回退原目录
+               - 由此删除运行时选档/黑名单/ARMED 状态机/同进程探针（-213 行 C++）：
+                 已注册的 ggml backend 本就无法安全卸载，过滤必须发生在注册之前
+               - 默认排除 armv9（SVE2）档，全部 7 个变体仍留在 APK 内，可配置
+
+            2. 引擎包机制（可下载 runtime）
+               - OmniInferEngineManifest / OmniInferEngineLoader / OmniInferEngineDownloader
+                 字段名、校验规则、目录布局与官方一致；逐库 size+sha256 校验、拒绝未列出的 .so、
+                 拒绝解压路径逃逸、校验后原子改名、coreLibs 按序 System.load
+               - 新增 Gradle 任务 bundleEnginePackage：解析 ELF DT_NEEDED 自动推出 coreLibs 顺序，
+                 产出 omniinfer-engine-<ver>-arm64-v8a.zip + .zip.sha256，并回读成品逐条校验
+
+            3. omniinfer.packaging.native_bundled 打包开关（false → lite AAR，坐标自动变 omniinfer-lite）
+
+            4. BackendSelectors 收敛到一处
+               - Kotlin：新增 BackendSelectors.kt（官方规范名 llama.cpp-cpu / llama.cpp-htp /
+                 litert-lm-cpu / litert-lm-gpu / mnn-*，旧写法 auto、llama.cpp、litert/gpu 等仍作别名），
+                 OmniInferServer 内 8 段重复实现删除；35 项映射回归自测全通过
+               - Dart：新增 ui/services/inference_backend.dart，替换原先散在 4 个文件里的重复常量与
+                 归一化函数（这正是引导页把后端写成 litert、导致 GGUF 导入报
+                 “Please select a .litertlm model file” 的根因）
+
+            5. 打包/依赖经验落地
+               - 发布构建改为仅 arm64-v8a（-Pomniinfer.abis=arm64-v8a），剔除 LiteRT 传递来的
+                 x86_64 无用切片（约 32MB）；本地/模拟器构建仍可保留 x86_64
+               - 新增 docs/reference/omniinfer-android-integration.md：两种打包模式、优先用 Maven
+                 坐标而非 flat AAR（否则需手补 Ktor 3.1.3 + kotlinx）、引擎包契约、目录注入原理、
+                 选择器与 CMake 参数
+
+            6. 对照确认 Android CMake 参数与官方一致（GGML_NATIVE=OFF、GGML_LLAMAFILE=OFF、
+               GGML_BACKEND_DL=ON、GGML_CPU_ALL_VARIANTS=ON、LLAMA_BUILD_COMMON=ON、
+               BUILD_SHARED_LIBS=ON；minSdk 26、abiFilters arm64-v8a），无需改动
+
+            构建断言：arm64-v8a only、>=7 个 ggml CPU 变体、含 libLiteRtDispatch_MediaTek.so。
+            天玑(MT6991) NPU：q4_ekv1280_mt6991 模型自动走 Backend.NPU。
           files: apk-out/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
