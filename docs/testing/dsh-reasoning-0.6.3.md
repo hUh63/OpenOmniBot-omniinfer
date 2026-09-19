@@ -33,3 +33,7 @@ Device: OnePlus PJE110, serial b49f281b. Existing DSH 0.1.2-rc.1 with Pi 0.84.4.
 No claim of all Provider/Harness coverage, production WSS, automatic remote catch-up, or original native Codex desktop GUI acceptance.
 
 Final-generation evidence: on the final 0.6.3/code 16 APK, `OOB_DSH_OFF_063_E` (turn 5) has text only after idle-Off/restart; `OOB_DSH_HIGH_063_F` (turn 6) has nonempty reasoning after re-enabling High. Both have exactly one user and one assistant record. See `artifacts/dsh-reasoning-0.6.3/phone-final.json`.
+
+## Published release verification
+
+GitHub Release v0.6.3 and the website stable update route are live. CI run 34869067139 completed successfully. Both actual APK downloads have SHA256 `918727e61fc0683bda641aa1d1eedaf3389249407072b003fe08dab7700feca1`; Android package metadata is 0.6.3/code 16 and release signature verification passed. See `artifacts/dsh-reasoning-0.6.3/release-verification.json`. The physical phone retains the tested debug build and user data because the production signing certificate differs.
