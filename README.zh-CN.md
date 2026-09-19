@@ -15,15 +15,9 @@
 
 <div align="center">
   <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/omnimind-ai/OmniBot">
-  <a href="https://github.com/omnimind-ai/OpenOmniBot/releases/latest"><img alt="GitHub Release" src="https://badgen.net/github/release/omnimind-ai/OpenOmniBot/stable"></a>
+  <a href="https://github.com/omnimind-ai/OmniBot/releases/latest"><img alt="GitHub Release" src="https://badgen.net/github/release/omnimind-ai/OmniBot/stable"></a>
   <br>
-  <a href="https://trendshift.io/repositories/26966" target="_blank"><img src="https://trendshift.io/api/badge/repositories/26966" alt="omnimind-ai%2FOpenOmniBot | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-  <br>
-  <a href="https://omnimind.com.cn"><img src="https://img.shields.io/badge/About_us-万象智维-purple.svg?color=%234b0c77" alt="万象智维"></a>
-  <a href="https://linux.do"><img src="https://img.shields.io/badge/Linux_Do-社区-yellow.svg?color=%23ac3712" alt="LinuxDo社区"></a>
-  <a href="#community">
-    <img src="https://img.shields.io/badge/WeChat-微信群-lightgreen" alt="微信群"/>
-  </a>
+  <a href="https://trendshift.io/repositories/26966?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26966" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26966" alt="omnimind-ai%2FOmniBot | Trendshift" width="250" height="55"/></a>
 </div>
 
 <p align="center">
@@ -38,9 +32,10 @@
 |
 </p>
 
-> OpenOmniBot 直接运行在 Android 设备上，将聊天、Agent 工具、本地工作区与系统级集成整合在一个应用中。
+> OmniBot 直接运行在 Android 设备上，将聊天、Agent 工具、本地工作区与系统级集成整合在一个应用中。
+> 🎉我们的iOS&macOS版本：https://github.com/omnimind-ai/ViaVera
 
-OpenOmniBot 是一个基于 Android 原生 Kotlin 与 Flutter 构建的端侧 AI Agent。与传统 AI Chat 不同，它关注的是 **从理解 -> 决策 -> 执行 -> 反馈的完整闭环**。
+OmniBot 是一个基于 Android 原生 Kotlin 与 Flutter 构建的端侧 AI Agent。与传统 AI Chat 不同，它关注的是 **从理解 -> 决策 -> 执行 -> 反馈的完整闭环**。
 
 <h2 id="core-capabilities">核心能力</h2>
 
@@ -130,8 +125,8 @@ npx @thuocean/codex-bridge
 
 ### 环境要求
 
-- Flutter SDK `3.9.2+`
-- JDK `11+`
+- Flutter SDK `3.47.2+`
+- JDK `17+`
 - Node.js `20.19+` 或 `22.12+`、pnpm `10.28.0`（用于 WebUI 开发）
 
 ### 获取代码
