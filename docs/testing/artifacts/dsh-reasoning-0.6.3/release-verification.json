@@ -1,0 +1,14 @@
+{
+  "release": "v0.6.3",
+  "versionName": "0.6.3",
+  "versionCode": 16,
+  "commit": "16d22078c3378e147411944f2e22905c8a4236a6",
+  "workflow": "https://github.com/omnimind-ai/OmniBot/actions/runs/34869067139",
+  "workflowConclusion": "success",
+  "githubAndWebsiteDownloadedSha256": "918727e61fc0683bda641aa1d1eedaf3389249407072b003fe08dab7700feca1",
+  "apkSignatureVerified": true,
+  "releaseCertificateSha256": "b80537134e8e10dc536e29713857024029545e98e0d3c8c27cb98a7d13938bf2",
+  "workerLatestVersion": "0.6.3",
+  "workerTrack": "stable",
+  "installedPhysicalBuild": "0.6.3/code16 debug; production certificate differs; existing phone data retained"
+}
