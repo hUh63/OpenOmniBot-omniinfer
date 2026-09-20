@@ -601,7 +601,14 @@ jstring NativeProbeLibDir(JNIEnv* env, jobject, jstring dir) {
       const std::string path = d + "/" + name;
       void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
       if (!handle) {
-        failed.push_back(name + ": " + (dlerror() ? dlerror() : "dlopen failed"));
+        // dlerror() clears the error state once it has been read, so asking it
+        // twice in one expression yields NULL the second time and hands a null
+        // pointer to std::string::append() -> strlen(NULL) -> SIGSEGV. That made
+        // a refused directory (the exact case this probe exists to detect) crash
+        // the process instead of returning an empty result for the caller to
+        // fall back on. Read it once.
+        const char* reason = dlerror();
+        failed.push_back(name + ": " + (reason ? reason : "dlopen failed"));
         continue;
       }
       auto* score = reinterpret_cast<int (*)(void)>(dlsym(handle, "ggml_backend_score"));
