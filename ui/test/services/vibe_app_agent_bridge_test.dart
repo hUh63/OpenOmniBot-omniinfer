@@ -158,6 +158,11 @@ AgentStreamEvent _event({
 ConversationModel _conversation(int id) {
   return ConversationModel(
     id: id,
+    // Set explicitly rather than relying on the constructor default:
+    // ConversationModel defaults `mode` to `normal` on some lineage branches
+    // and to `agent` on others, while VibeAppAgentBridge only restores
+    // conversations whose mode is `normal`.
+    mode: ConversationMode.normal,
     title: 'Vibe App',
     status: 0,
     messageCount: 0,
