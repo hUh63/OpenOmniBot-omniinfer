@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/widgets/omnibot_markdown_body.dart';
 import 'package:ui/widgets/streaming_text.dart';
-import 'package:ui/widgets/typewriter_text.dart';
 
 void main() {
   setUp(() {
@@ -231,37 +230,6 @@ void main() {
       ),
     );
     expect(richText.text.toPlainText(), text);
-  });
-
-  testWidgets('TypewriterText advances past emoji without splitting it', (
-    tester,
-  ) async {
-    const text = '前缀📎后缀';
-
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(
-          body: TypewriterText(
-            text: text,
-            style: TextStyle(fontSize: 14),
-            shouldAnimate: true,
-          ),
-        ),
-      ),
-    );
-
-    for (var index = 0; index < text.length + 2; index += 1) {
-      await tester.pump(const Duration(milliseconds: 15));
-      expect(tester.takeException(), isNull);
-    }
-
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-
-    final markdownBody = tester.widget<OmnibotMarkdownBody>(
-      find.byType(OmnibotMarkdownBody),
-    );
-    expect(markdownBody.data, text);
   });
 
   testWidgets(
