@@ -109,29 +109,32 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v3
+          tag_name: v0.6.3-omniinfer-v4
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 跨血统残留清理 (v0.6.3-omniinfer-v3)"
+          name: "OmniInfer 版 · 修复本地模型加载崩溃 (v0.6.3-omniinfer-v4)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v3)：跨血统残留清理。只动 Flutter 层（ui/lib、ui/test）——原生 / omniinfer 集成、
-            gradle、打包配置一律未动；运行时行为与 v2 等价，仅代码库更干净。
+            本轮 (v4)：修复“加载本地模型必然 SIGSEGV”的原生崩溃。
 
-            - 退役 legacy agent-stream 传输：原生 AgentRuntimeManager 已写明 AgentStreamEvent bridge
-              被移除、taskId/runId 由 ACP 的 turnId 取代，故删除 ui/lib/services/vibe_app_agent_bridge.dart
-              及其测试，并把 assists_core_service.dart 回退到本分支原版（-459 行）
-            - 退役休眠的字体特效链（main 与本分支都没有入口，属上游半成品）：删除
-              app_font_effect_service.dart / app_font_effect_scope.dart，companion 设置页改用字面量字重，
-              storage_service 移除对应的 pref 读写
-            - 清理 68 个不可达文件（60 个 ui/lib + 6 个孤儿测试 + 2 个字体特效文件）：Dart 无反射 /
-              按名加载，import 图之外的代码不会进包；删除后可达文件数不变。streaming_text_test.dart
-              保留（其覆盖的 StreamingText 仍在使用），仅摘掉其中 TypewriterText 的 import 与那段测试
-            - 构建断言不变：arm64-v8a only、>=7 个 ggml CPU 变体、含 libLiteRtDispatch_MediaTek.so
-            - ci.yml 在该提交上全绿：gitleaks / Flutter test / Flutter analyze / Gradle 单测 + lint + debug APK
+            - NativeProbeLibDir() 用 `name + ": " + (dlerror() ? dlerror() : "dlopen failed")`
+              报告 dlopen 失败；dlerror() 读到即清空错误状态，第二次调用返回 NULL，于是
+              std::string::append(nullptr) → strlen(NULL) → SIGSEGV（fault addr 0x0）。
+              改为只取一次 dlerror()。
+            - 崩溃栈：OmniInferServer.loadModel → loadModelInternal → OmniInferBridge.probeLibDir
+              → libomniinfer-jni.so → std::string::append(char const*) → __strlen_aarch64
+              （实测机型 OnePlus PLC110 / Android 16 / arm64）。
+            - 影响面：探测目录被链接器拒绝时（正是该探测存在的意义）会整进程崩溃，而不是按设计
+              回退到 applicationInfo.nativeLibraryDir —— v3 在该机型上只要加载本地模型就会死。
+            - 修复后此类设备走回退分支，等价于失去 CPU 变体过滤；新版本会打印探测失败原因
+              （NativeProbeLibDir 的 failed 数组 / "Linker refused ..."），便于进一步定位。
+            - 本版起 release tag 指向实际构建提交（补上了 target_commitish）。
+
+            自 v3 起即已具备（本次全部保留）：跨血统残留清理 —— 退役 legacy agent-stream 传输、
+            退役休眠的字体特效链、清理 68 个不可达文件（详见 v0.6.3-omniinfer-v3 的说明）。
 
             以下能力自 v2 起即已具备，本次全部保留：
 
