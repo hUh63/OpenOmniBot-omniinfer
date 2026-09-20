@@ -110,6 +110,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.6.3-omniinfer-v3
+          # Without this the tag lands on the default branch's HEAD (which is how
+          # v1/v2/v3 all ended up pointing at the same old commit) instead of the
+          # commit this build actually checked out. Mirrors release.yml:302.
+          target_commitish: ${{ github.sha }}
           name: "OmniInfer 版 · 跨血统残留清理 (v0.6.3-omniinfer-v3)"
           prerelease: true
           draft: false
