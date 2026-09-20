@@ -109,29 +109,31 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v4
+          tag_name: v0.6.3-omniinfer-v5
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 修复本地模型加载崩溃 (v0.6.3-omniinfer-v4)"
+          name: "OmniInfer 版 · 修复停止服务 ANR 与并发加载竞态 (v0.6.3-omniinfer-v5)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v4)：修复“加载本地模型必然 SIGSEGV”的原生崩溃。
+            本轮 (v5)：修复“点关闭局域网必 ANR”与并发加载竞态。
 
-            - NativeProbeLibDir() 用 `name + ": " + (dlerror() ? dlerror() : "dlopen failed")`
-              报告 dlopen 失败；dlerror() 读到即清空错误状态，第二次调用返回 NULL，于是
-              std::string::append(nullptr) → strlen(NULL) → SIGSEGV（fault addr 0x0）。
-              改为只取一次 dlerror()。
-            - 崩溃栈：OmniInferServer.loadModel → loadModelInternal → OmniInferBridge.probeLibDir
-              → libomniinfer-jni.so → std::string::append(char const*) → __strlen_aarch64
-              （实测机型 OnePlus PLC110 / Android 16 / arm64）。
-            - 影响面：探测目录被链接器拒绝时（正是该探测存在的意义）会整进程崩溃，而不是按设计
-              回退到 applicationInfo.nativeLibraryDir —— v3 在该机型上只要加载本地模型就会死。
-            - 修复后此类设备走回退分支，等价于失去 CPU 变体过滤；新版本会打印探测失败原因
-              （NativeProbeLibDir 的 failed 数组 / "Linker refused ..."），便于进一步定位。
-            - 本版起 release tag 指向实际构建提交（补上了 target_commitish）。
+            - 停止路径原本阻塞主线程：四个 stopApiService 的 MethodChannel 分支裸跑在 UI 线程
+              （相邻的 startApiService 却切了 Dispatchers.IO），一路进到 nativeFree 里无超时的
+              drain，等一个仍在生成中的请求 → 输入分发超时 5s → ANR。现在：
+              · 四个 stop 分支改到 Dispatchers.IO，结果回投主线程
+              · 卸载前先 gracefulStop（只置 atomic flag，立即返回），让在飞的生成在下一个 token 退出
+              · nativeFree 改为有界等待（2s）+ 超时转交 reaper 线程回收：既不阻塞调用者，也不泄漏
+            - currentHandle 原本是无同步的 check-then-act：NativeInit 每次调用都给新 session，而
+              NativeGenerate 的串行化只按 session 生效，于是并发加载会各建一份引擎（双倍 CPU /
+              内存），且输的那份永远不会被释放。现在 loadModelInternal 由同一把锁串行化，
+              currentHandle 加 @Volatile，卸载路径共用该锁。
+
+            自 v4 起即已具备（本次全部保留）：修复 NativeProbeLibDir 把 NULL 喂给 std::string 导致
+            加载本地模型必然 SIGSEGV（实测机型 OnePlus PLC110 / Android 16）；本版起 release tag
+            指向实际构建提交。
 
             自 v3 起即已具备（本次全部保留）：跨血统残留清理 —— 退役 legacy agent-stream 传输、
             退役休眠的字体特效链、清理 68 个不可达文件（详见 v0.6.3-omniinfer-v3 的说明）。
