@@ -16,6 +16,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -542,6 +543,27 @@ void NativeGracefulStop(JNIEnv*, jobject, jlong handle) {
   }
 }
 
+// How long NativeFree waits for an in-flight generate() before it hands the
+// session to a reaper thread. This call is reachable from the UI (the model
+// config page's "stop service" action funnels into OmniInferServer.stop()), and a
+// running generation can take arbitrarily long, so blocking here is exactly what
+// turned a wedged request into an ANR. A wedged generation must never be able to
+// hold the caller.
+constexpr auto kFreeDrainTimeout = std::chrono::seconds(2);
+
+// Waits for the session's in-flight generate() to return and only then destroys
+// the session, off the calling thread. Reached only when the bounded drain
+// expires, so it does not leak: it reclaims the session as soon as it is idle.
+void DestroySessionWhenIdle(Session* session, int64_t handle) {
+  std::thread([session, handle]() {
+    std::lock_guard<std::timed_mutex> lock(session->mtx);
+    delete session;
+    LogPrint(ANDROID_LOG_INFO,
+             "NativeFree: session " + std::to_string(handle) +
+             " destroyed by reaper once the in-flight generate() returned");
+  }).detach();
+}
+
 void NativeFree(JNIEnv*, jobject, jlong handle) {
   Session* session = nullptr;
   {
@@ -551,9 +573,26 @@ void NativeFree(JNIEnv*, jobject, jlong handle) {
     session = it->second;
     g_sessions.erase(it);
   }
-  { std::lock_guard<std::timed_mutex> lock(session->mtx); }  // drain any in-flight generate()
-  delete session;
-  LogPrint(ANDROID_LOG_INFO, "NativeFree: session " + std::to_string(handle) + " destroyed");
+
+  // The session is unreachable through g_sessions from here on, so NativeCancel
+  // and NativeGracefulStop -- which look it up by handle -- can no longer reach
+  // it. Signal the in-flight generate() to stop at its next token instead; that
+  // is what normally makes the bounded drain below return immediately.
+  session->cancelled.store(true);
+  session->graceful_stop.store(false);  // hard stop, the session is going away
+
+  if (session->mtx.try_lock_for(kFreeDrainTimeout)) {
+    session->mtx.unlock();
+    delete session;
+    LogPrint(ANDROID_LOG_INFO, "NativeFree: session " + std::to_string(handle) + " destroyed");
+    return;
+  }
+
+  LogPrint(ANDROID_LOG_WARN,
+           "NativeFree: session " + std::to_string(handle) +
+           " still generating after " + std::to_string(kFreeDrainTimeout.count()) +
+           "s; destroying it on a reaper thread instead of blocking the caller");
+  DestroySessionWhenIdle(session, handle);
 }
 
 jstring NativeCollectDiagnosticsJson(JNIEnv* env, jobject, jlong handle) {

@@ -31,6 +31,7 @@ object OmniInferServer {
 
     private var appContext: Context? = null
     private var serverPort: Int = 9099
+    @Volatile
     var currentHandle: Long = 0L
         private set
     private var currentBackend: String = ""
@@ -153,7 +154,36 @@ object OmniInferServer {
         )
     }
 
+    /**
+     * Serialised entry point for every load. NativeInit() hands out a fresh
+     * session per call and NativeGenerate only serialises per session, so two
+     * loads running at once would each build their own engine (double the CPU and
+     * RAM) and whichever one lost the [currentHandle] race would be leaked --
+     * NativeFree is the only thing that frees a session, and it is only ever
+     * called for [currentHandle]. A second caller therefore waits here and then
+     * observes the first load's result.
+     */
     private fun loadModelInternal(
+        modelPath: String,
+        backendSelector: String,
+        port: Int,
+        nThreads: Int?,
+        nCtx: Int?,
+        extraConfig: Map<String, String>,
+        preferCatalogDefaults: Boolean,
+    ): Boolean = synchronized(loadLock) {
+        loadModelInternalLocked(
+            modelPath = modelPath,
+            backendSelector = backendSelector,
+            port = port,
+            nThreads = nThreads,
+            nCtx = nCtx,
+            extraConfig = extraConfig,
+            preferCatalogDefaults = preferCatalogDefaults,
+        )
+    }
+
+    private fun loadModelInternalLocked(
         modelPath: String,
         backendSelector: String,
         port: Int,
@@ -189,9 +219,9 @@ object OmniInferServer {
             serverRunning = false
         }
 
-        // Unload previous model if different.
+        // Unload previous model if different. Already holds loadLock.
         if (currentHandle != 0L && currentLoadKey != loadKey) {
-            unloadModel()
+            unloadModelLocked()
         }
 
         if (currentHandle != 0L) {
@@ -259,15 +289,32 @@ object OmniInferServer {
         return true
     }
 
+    /** Serialises the load/unload transition; see [loadModelInternal]. */
+    private val loadLock = Any()
+
     fun unloadModel() {
-        if (currentHandle != 0L) {
-            OmniInferBridge.free(currentHandle)
-            currentHandle = 0L
-            currentBackend = ""
-            currentModelPath = ""
-            currentLoadKey = ""
-            Log.i(TAG, "Model unloaded")
-        }
+        synchronized(loadLock) { unloadModelLocked() }
+    }
+
+    /**
+     * Must be called with [loadLock] held.
+     *
+     * Asks the engine to wind down before freeing it. [OmniInferBridge.gracefulStop]
+     * only flips an atomic flag and returns immediately, so a generation that is
+     * still running stops at its next token rather than being waited for inside
+     * [OmniInferBridge.free] -- that wait is what froze the UI thread when the user
+     * tapped "stop service" while a request was in flight.
+     */
+    private fun unloadModelLocked() {
+        val handle = currentHandle
+        if (handle == 0L) return
+        OmniInferBridge.gracefulStop(handle)
+        OmniInferBridge.free(handle)
+        currentHandle = 0L
+        currentBackend = ""
+        currentModelPath = ""
+        currentLoadKey = ""
+        Log.i(TAG, "Model unloaded")
     }
 
     fun stop() {

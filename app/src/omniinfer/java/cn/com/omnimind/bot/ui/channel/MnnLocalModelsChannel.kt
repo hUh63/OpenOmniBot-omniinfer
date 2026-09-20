@@ -355,7 +355,14 @@ class MnnLocalModelsChannel {
                 }
             }
 
-            "stopApiService" -> result.success(OmniInferModelsManager.stopApiService())
+            "stopApiService" -> scope.launch(Dispatchers.IO) {
+                // Off the main thread: stopping unloads the engine, and that can
+                // wait on a generation that is still running. Running it inline on
+                // the MethodChannel thread (the UI thread) is what produced
+                // "Input dispatching timed out" in the ANR report.
+                val config = OmniInferModelsManager.stopApiService()
+                mainHandler.post { result.success(config) }
+            }
 
             "startDownload" -> {
                 val modelId = call.argument<String>("modelId")
@@ -442,7 +449,14 @@ class MnnLocalModelsChannel {
                 }
             }
 
-            "stopApiService" -> result.success(OmniInferMnnModelsManager.stopApiService())
+            "stopApiService" -> scope.launch(Dispatchers.IO) {
+                // Off the main thread: stopping unloads the engine, and that can
+                // wait on a generation that is still running. Running it inline on
+                // the MethodChannel thread (the UI thread) is what produced
+                // "Input dispatching timed out" in the ANR report.
+                val config = OmniInferMnnModelsManager.stopApiService()
+                mainHandler.post { result.success(config) }
+            }
 
             "startDownload" -> {
                 val modelId = call.argument<String>("modelId")
@@ -529,7 +543,14 @@ class MnnLocalModelsChannel {
                 }
             }
 
-            "stopApiService" -> result.success(OmniInferQnnModelsManager.stopApiService())
+            "stopApiService" -> scope.launch(Dispatchers.IO) {
+                // Off the main thread: stopping unloads the engine, and that can
+                // wait on a generation that is still running. Running it inline on
+                // the MethodChannel thread (the UI thread) is what produced
+                // "Input dispatching timed out" in the ANR report.
+                val config = OmniInferQnnModelsManager.stopApiService()
+                mainHandler.post { result.success(config) }
+            }
 
             "startDownload" -> {
                 val modelId = call.argument<String>("modelId")
@@ -615,7 +636,14 @@ class MnnLocalModelsChannel {
                 }
             }
 
-            "stopApiService" -> result.success(OmniInferLiteRtModelsManager.stopApiService())
+            "stopApiService" -> scope.launch(Dispatchers.IO) {
+                // Off the main thread: stopping unloads the engine, and that can
+                // wait on a generation that is still running. Running it inline on
+                // the MethodChannel thread (the UI thread) is what produced
+                // "Input dispatching timed out" in the ANR report.
+                val config = OmniInferLiteRtModelsManager.stopApiService()
+                mainHandler.post { result.success(config) }
+            }
 
             "startDownload" -> {
                 val modelId = call.argument<String>("modelId")
