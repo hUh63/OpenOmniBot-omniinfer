@@ -172,17 +172,6 @@ class StorageService {
   static const String kRecentConversationsOnlyEnabledKey =
       'recent_conversations_only_enabled';
 
-  static const String kEnhancedFontEffectsEnabledKey =
-      'enhanced_font_effects_enabled';
-
-  static bool isEnhancedFontEffectsEnabled() {
-    return getBool(kEnhancedFontEffectsEnabledKey, defaultValue: false) ?? false;
-  }
-
-  static Future<bool> setEnhancedFontEffectsEnabled(bool enabled) {
-    return setBool(kEnhancedFontEffectsEnabledKey, enabled);
-  }
-
   static const String _kManualModelContextThresholdsKey =
       'manual_model_context_thresholds';
 

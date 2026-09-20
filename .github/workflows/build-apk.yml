@@ -109,11 +109,28 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v2
-          name: "OmniInfer 版 · 移植官方独立组件能力 (v0.6.3-omniinfer-v2)"
+          tag_name: v0.6.3-omniinfer-v3
+          name: "OmniInfer 版 · 跨血统残留清理 (v0.6.3-omniinfer-v3)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v3)：跨血统残留清理。只动 Flutter 层（ui/lib、ui/test）——原生 / omniinfer 集成、
+            gradle、打包配置一律未动；运行时行为与 v2 等价，仅代码库更干净。
+
+            - 退役 legacy agent-stream 传输：原生 AgentRuntimeManager 已写明 AgentStreamEvent bridge
+              被移除、taskId/runId 由 ACP 的 turnId 取代，故删除 ui/lib/services/vibe_app_agent_bridge.dart
+              及其测试，并把 assists_core_service.dart 回退到本分支原版（-459 行）
+            - 退役休眠的字体特效链（main 与本分支都没有入口，属上游半成品）：删除
+              app_font_effect_service.dart / app_font_effect_scope.dart，companion 设置页改用字面量字重，
+              storage_service 移除对应的 pref 读写
+            - 清理 68 个不可达文件（60 个 ui/lib + 6 个孤儿测试 + 2 个字体特效文件）：Dart 无反射 /
+              按名加载，import 图之外的代码不会进包；删除后可达文件数不变。streaming_text_test.dart
+              保留（其覆盖的 StreamingText 仍在使用），仅摘掉其中 TypewriterText 的 import 与那段测试
+            - 构建断言不变：arm64-v8a only、>=7 个 ggml CPU 变体、含 libLiteRtDispatch_MediaTek.so
+            - ci.yml 在该提交上全绿：gitleaks / Flutter test / Flutter analyze / Gradle 单测 + lint + debug APK
+
+            以下能力自 v2 起即已具备，本次全部保留：
+
             在本仓 omniinfer 版（已同步官方 v0.6.3 + main）基础上，按官方 OmniInfer 独立组件的
             设计做了六项改造。本仓既有的本地推理修复与功能全部保留，未删除任何变体或能力。
 
