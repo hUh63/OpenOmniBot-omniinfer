@@ -10,14 +10,20 @@
 </p>
 
 <h3 align="center">
-你的端侧 AI 助手
+把多种 AI Agent 装进口袋
 </h3>
 
 <div align="center">
   <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/omnimind-ai/OmniBot">
-  <a href="https://github.com/omnimind-ai/OmniBot/releases/latest"><img alt="GitHub Release" src="https://badgen.net/github/release/omnimind-ai/OmniBot/stable"></a>
+  <a href="https://github.com/omnimind-ai/OpenOmniBot/releases/latest"><img alt="GitHub Release" src="https://badgen.net/github/release/omnimind-ai/OpenOmniBot/stable"></a>
   <br>
-  <a href="https://trendshift.io/repositories/26966?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26966" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26966" alt="omnimind-ai%2FOmniBot | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/26966" target="_blank"><img src="https://trendshift.io/api/badge/repositories/26966" alt="omnimind-ai%2FOpenOmniBot | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+  <br>
+  <a href="https://omnimind.com.cn"><img src="https://img.shields.io/badge/About_us-万象智维-purple.svg?color=%234b0c77" alt="万象智维"></a>
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/Linux_Do-社区-yellow.svg?color=%23ac3712" alt="LinuxDo社区"></a>
+  <a href="#community">
+    <img src="https://img.shields.io/badge/WeChat-微信群-lightgreen" alt="微信群"/>
+  </a>
 </div>
 
 <p align="center">
@@ -32,17 +38,19 @@
 |
 </p>
 
-> OmniBot 直接运行在 Android 设备上，将聊天、Agent 工具、本地工作区与系统级集成整合在一个应用中。
-> 🎉我们的iOS&macOS版本：https://github.com/omnimind-ai/ViaVera
+> 在 Android 上使用 Kimi Code / DeepSeek Harness WebUI，切换不同 Agent Harness，让多个智能体并行完成任务。
 
-OmniBot 是一个基于 Android 原生 Kotlin 与 Flutter 构建的端侧 AI Agent。与传统 AI Chat 不同，它关注的是 **从理解 -> 决策 -> 执行 -> 反馈的完整闭环**。
+OmniBot：原生android AI工作站，把 AI 对话、Agent 运行环境、本地工作区与 Android 系统工具整合在一个应用中。无需电脑，开箱即用，选择你喜欢的 Agent，分派任务、调用工具、汇总结果。
 
 <h2 id="core-capabilities">核心能力</h2>
 
-- **工具生态扩展**：Skills、Alpine 环境、浏览器、MCP、安卓系统级工具等。
-- **系统级能力**：支持定时任务、闹钟提醒、日历创建/查询/修改、音频播放控制。
-- **记忆系统**：支持短期与长期记忆嵌入。
-- **生产力工具**：支持读写文件、浏览工作区、调用浏览器、调用终端。
+- **自由切换 Harness**：在统一聊天入口选择小万、Codex、Claude Code、OpenCode、Kimi Code 、 DeepSeek Harness 或任何满足acp协议的agent，按任务选择合适的 Agent 执行环境。
+- **工具与技能扩展**：接入 Skills、MCP、浏览器、终端与本地工作区，让 Agent 读写文件、执行命令并调用 Android 系统工具。
+- **系统集成与记忆**：支持定时任务、闹钟提醒、日历管理、音频播放控制，以及短期与长期记忆。
+- **多智能体并行**：明确要求分派或并行后，将相互独立的子任务交给上下文隔离的 subagent 并发执行，再汇总结果。
+<!-- - **连接电脑上的 Codex**：通过 [codex-bridge](tools/codex-bridge/README.md) 从手机连接电脑端 Codex。 -->
+- **GUI agent**：基于无障碍服务和vlm操作实现跨应用的视觉操控，手动录制轨迹，一键重放执行。
+- **自由选择喜好的前端**：集成 Kimi Code Web 与 DeepSeek Harness Web，在手机上使用各自的 Web 交互界面，并通过 MCP/plugin 工具启动、查询状态和停止服务。
 
 <p align="center">
   <img src="docs/tutorial/example.png" alt="示例" />
@@ -125,8 +133,8 @@ npx @thuocean/codex-bridge
 
 ### 环境要求
 
-- Flutter SDK `3.47.2+`
-- JDK `17+`
+- Flutter SDK `3.9.2+`
+- JDK `11+`
 - Node.js `20.19+` 或 `22.12+`、pnpm `10.28.0`（用于 WebUI 开发）
 
 ### 获取代码
@@ -227,7 +235,7 @@ OpenOmniBot/
 
 <h2 id="community">其他</h2>
 
-感谢 [LINUX.DO](linux.do) 等社区开发者对 OpenOmniBot 的支持。
+感谢 [LINUX.DO](https://linux.do) 等社区开发者对 OpenOmniBot 的支持。
 
 特别感谢这些优秀的开源项目：
 

@@ -25,28 +25,15 @@ class AgentWebPluginTest {
         val actions = AgentWebActions.definitions()
 
         assertEquals(AgentWebActions.ids, actions.mapTo(linkedSetOf()) { it.id })
-        val openActions = actions.filter {
-            it.id == AgentWebActions.OPEN_KIMI || it.id == AgentWebActions.OPEN_DEEPSEEK
-        }
-        val lifecycleActions = actions - openActions.toSet()
-        assertEquals(2, openActions.size)
-        assertEquals(4, lifecycleActions.size)
-        assertTrue(openActions.all { it.presentation["placement"].toString() == "\"agent_settings\"" })
+        assertTrue(actions.all { it.presentation["placement"].toString() == "\"agent_settings\"" })
         assertTrue(
-            openActions.all {
+            actions.all {
                 it.presentation["placements"].toString()
                     .contains("\"home_drawer_quick_launch\"")
             },
         )
-        assertTrue(openActions.all { it.presentation["agentId"] != null })
-        assertTrue(openActions.all { it.presentation["shortLabel"] != null })
-        // The open actions link their lifecycle siblings so UI surfaces can
-        // query status and stop without hardcoding action ids.
-        assertTrue(openActions.all { it.presentation["statusAction"] != null })
-        assertTrue(openActions.all { it.presentation["stopAction"] != null })
-        // Lifecycle actions stay invocable but never render as standalone tiles.
-        assertTrue(lifecycleActions.all { it.presentation["placement"] == null })
-        assertTrue(lifecycleActions.all { it.presentation["placements"] == null })
+        assertTrue(actions.all { it.presentation["agentId"] != null })
+        assertTrue(actions.all { it.presentation["shortLabel"] != null })
         assertTrue(actions.all { it.ownerPluginId == null })
         assertFalse(actions.toString().contains("--no-open"))
         assertFalse(actions.toString().contains("token="))

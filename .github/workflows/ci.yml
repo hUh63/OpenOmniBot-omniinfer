@@ -87,10 +87,6 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          # The legacy "tools" package was removed from Google's SDK
-          # repository; only platform-tools is needed from the defaults.
-          packages: platform-tools
 
       - name: Cache Android SDK platform
         id: cache-android-platform
@@ -141,8 +137,7 @@ jobs:
 
       - name: Gradle unit tests, lint and debug APK
         run: >-
-          ./gradlew --no-daemon --parallel --build-cache --max-workers=2
-          -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8 --enable-native-access=ALL-UNNAMED"
+          ./gradlew --no-daemon --parallel --build-cache
           :app:testDevelopStandardDebugUnitTest
           :app:lintDevelopStandardDebug
           :app:assembleDevelopStandardDebug

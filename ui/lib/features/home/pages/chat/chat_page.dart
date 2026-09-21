@@ -460,7 +460,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   String get _activeAcpAgentDisplayName {
     final activeAgentId = _activeAcpAgentId?.trim() ?? '';
     if (activeAgentId == _kRemoteCodexModeAgentId) {
-      return 'Agent Remote';
+      return LegacyTextLocalizer.isEnglish ? 'Remote Codex' : '远程 Codex';
     }
     for (final profile in _agentCatalog?.agents ?? const <AcpAgentProfile>[]) {
       if (profile.id == activeAgentId) {
@@ -514,6 +514,11 @@ abstract class _ChatPageStateBase extends State<ChatPage>
           status: profile.status,
         ),
     ];
+    options.add(ChatAcpAgentModeOption(
+      id: _kRemoteCodexModeAgentId,
+      name: LegacyTextLocalizer.isEnglish ? 'Remote Codex' : '远程 Codex',
+      status: 'connect',
+    ));
     return options;
   }
 
@@ -1423,6 +1428,11 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   }
 
   @override
+  int conversationHistoryRevision(int conversationId, ConversationMode mode) =>
+      _runtimeCoordinator.runtimeFor(conversationId: conversationId,
+        mode: _modeKey(_pageModeForConversationMode(mode)))?.historyRevision ?? 0;
+
+  @override
   void onConversationLoaded(
     ConversationMode mode,
     int conversationId,
@@ -1846,7 +1856,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
 
   Future<void> _openRemoteCodexWorkspacePicker();
 
-  Future<void> _prepareRemoteCodexSessionTarget(
+  Future<bool> _prepareRemoteCodexSessionTarget(
     ConversationThreadTarget target,
   );
 

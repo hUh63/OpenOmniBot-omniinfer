@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.net.Uri
 import cn.com.omnimind.bot.activity.MainActivity
+import cn.com.omnimind.bot.activity.PluginAppActivity
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import com.caverock.androidsvg.SVG
 import java.io.File
@@ -83,7 +84,7 @@ class SandboxPluginShortcutManager(context: Context) {
             dashboardRoute
         }
         val title = dashboard?.getValue("title") as? String ?: state.descriptor.name
-        val intent = Intent(appContext, MainActivity::class.java).apply {
+        val intent = Intent(appContext, if (isVibeApp) PluginAppActivity::class.java else MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or

@@ -1,0 +1,87 @@
+name: Verify OmniInfer Edition (compile only)
+
+# ci.yml only builds the `standard` edition, which does NOT compile
+# app/src/omniinfer/**, the :omniinfer-server module or the omniinfer Dart entrypoint.
+# build-apk.yml does compile them, but it also publishes a release. This workflow is the
+# release-free gate: run it to prove the omniinfer flavour still compiles after a sync.
+#
+# Dispatch only, and it builds the debug variant on purpose: no keystore secrets needed,
+# while all Kotlin sources (main + omniinfer flavour + :omniinfer-server), the Dart
+# entrypoint and the CMake/native payload are still compiled.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-omniinfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Flutter 3.47.2
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10.28.0'
+          run_install: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: webchat/pnpm-lock.yaml
+
+      - name: Install NDK 28.2.13676358
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
+
+      - name: Fetch framework sources
+        run: |
+          FB=third_party/omniinfer/framework
+          mkdir -p $FB
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/b10919" -o /tmp/llama.tgz
+          tar xzf /tmp/llama.tgz -C /tmp
+          rm -rf $FB/llama.cpp
+          mv /tmp/llama.cpp-b10919 $FB/llama.cpp
+          curl -sSL "https://codeload.github.com/alibaba/mnn/tar.gz/a03b005cf6f888ebf092e4753840f935827f9c36" -o /tmp/mnn.tgz
+          tar xzf /tmp/mnn.tgz -C /tmp
+          rm -rf $FB/mnn
+          mv /tmp/MNN-a03b005cf6f888ebf092e4753840f935827f9c36 $FB/mnn
+          ls $FB/llama.cpp/CMakeLists.txt $FB/mnn/CMakeLists.txt
+
+      - name: Flutter pub get
+        working-directory: ui
+        run: flutter pub get --enforce-lockfile
+
+      - name: Gradle assembleProductionOmniinferDebug (compile gate)
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --build-cache --max-workers=4 \
+            assembleProductionOmniinferDebug \
+            -Ptarget=lib/main_omniinfer.dart \
+            -Pomniinfer.abis=arm64-v8a
+
+      - name: Report APK
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          [ -n "$APK" ] || { echo "ERROR: no APK produced"; exit 1; }
+          echo "OK: $APK ($(stat -c%s "$APK") bytes)"

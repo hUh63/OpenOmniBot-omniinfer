@@ -38,6 +38,8 @@ class AgentToolRegistry(
         val toolType: String,
         val serverName: String? = null,
         val remoteTool: RemoteMcpToolDescriptor? = null,
+        /** Opt-in for independent read operations; unclassified tools remain serial. */
+        val parallelSafe: Boolean = false,
     )
 
     private val tag = "AgentToolRegistry"
@@ -102,7 +104,8 @@ class AgentToolRegistry(
         }
         runtimeDefinitions.addAll(AgentToolDefinitions.memoryTools(locale))
         runtimeDefinitions.addAll(AgentToolDefinitions.subagentTools(locale))
-        if (pluginToolDefinitions.isNotEmpty() || capabilityToolDefinitions.isNotEmpty()) {
+        val allCapabilityDefinitions = cn.com.omnimind.bot.agent.tool.BuiltInAgentCapabilityModule.definitions + capabilityToolDefinitions
+        if (pluginToolDefinitions.isNotEmpty() || allCapabilityDefinitions.isNotEmpty()) {
             val occupiedNames = runtimeDefinitions.mapNotNullTo(linkedSetOf()) { definition ->
                 (definition["function"] as? JsonObject)
                     ?.get("name")
@@ -126,13 +129,14 @@ class AgentToolRegistry(
                             }
                             put("description", JsonPrimitive(pluginTool.description))
                             put("parameters", pluginTool.parameters)
+                            put("parallelSafe", JsonPrimitive(pluginTool.parallelSafe))
                         })
                     },
                     locale,
                     terminalDistribution
                 )
             }
-            capabilityToolDefinitions.forEach { capabilityTool ->
+            allCapabilityDefinitions.forEach { capabilityTool ->
                 require(capabilityTool.name !in occupiedNames) {
                     "Capability tool conflicts with an existing tool: ${capabilityTool.name}"
                 }
@@ -149,6 +153,7 @@ class AgentToolRegistry(
                             }
                             put("description", JsonPrimitive(capabilityTool.description))
                             put("parameters", capabilityTool.parameters)
+                            put("parallelSafe", JsonPrimitive(capabilityTool.parallelSafe))
                         })
                     },
                     locale,
@@ -203,6 +208,7 @@ class AgentToolRegistry(
             displayName = displayName,
             toolType = toolType,
             serverName = serverName,
+            parallelSafe = function["parallelSafe"]?.jsonPrimitive?.booleanOrNull == true,
         )
         ChatCompletionTool(
             function = ChatCompletionFunction(

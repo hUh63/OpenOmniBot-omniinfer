@@ -4,20 +4,21 @@
   </picture>
 </p>
 
-<p align="center">
-  <a href="README.md"><b>English</b></a> |
-  <a href="README.zh-CN.md"><b>简体中文</b></a>
-</p>
-
 <h3 align="center">
-Your On-Device AI Assistant
+Multiple AI Agents, Right in Your Pocket
 </h3>
 
 <div align="center">
   <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/omnimind-ai/OmniBot">
-  <a href="https://github.com/omnimind-ai/OmniBot/releases/latest"><img alt="GitHub Release" src="https://badgen.net/github/release/omnimind-ai/OmniBot/stable"></a>
+  <a href="https://github.com/omnimind-ai/OpenOmniBot/releases/latest"><img alt="GitHub Release" src="https://badgen.net/github/release/omnimind-ai/OpenOmniBot/stable"></a>
   <br>
-  <a href="https://trendshift.io/repositories/26966?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26966" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26966" alt="omnimind-ai%2FOmniBot | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/26966" target="_blank"><img src="https://trendshift.io/api/badge/repositories/26966" alt="omnimind-ai%2FOpenOmniBot | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+  <br>
+  <a href="https://omnimind.com.cn"><img src="https://img.shields.io/badge/About_us-万象智维-purple.svg?color=%234b0c77" alt="OmniMind"></a>
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/Linux_Do-Community-yellow.svg?color=%23ac3712" alt="Linux Do Community"></a>
+  <a href="#community">
+    <img src="https://img.shields.io/badge/WeChat-Group-lightgreen" alt="WeChat Group"/>
+  </a>
 </div>
 
 <p align="center">
@@ -30,19 +31,40 @@ Your On-Device AI Assistant
 |
 <a href="https://github.com/omnimind-ai/OpenOmniBot/issues"><b>Issues</b></a>
 |
+<a href="README.md"><b>English</b></a> 
+|
+<a href="README.zh-CN.md"><b>简体中文</b></a>
+|
 </p>
 
-> OmniBot runs directly on your Android device and combines chat, agent tools, local workspaces, and system integrations in one app.
-> 🎉 Our iOS & macOS version: [ViaVera](https://github.com/omnimind-ai/ViaVera)
+> Use Kimi Code / DeepSeek Harness WebUI on Android, switch between Agent Harnesses, and run multiple agents in parallel.
 
-OmniBot is an on-device AI agent built with native Android Kotlin and Flutter. Instead of stopping at chat, it focuses on the full loop of **understand -> decide -> execute -> reflect**.
+OpenOmniBot brings AI chat, agent runtimes, local workspaces, and Android system tools into one app. Choose an agent, delegate tasks, use tools, and collect results from your phone.
 
 <h2 id="core-capabilities">Core Capabilities</h2>
 
-- **Extensible tool ecosystem**: Skills, Alpine environment, browser access, MCP, and Android system-level tools.
-- **System-level actions**: Supports scheduled tasks, alarms, calendar creation/query/update, and audio playback control.
-- **Memory system**: Short-term and long-term memory with embedding support.
-- **Productivity tools**: Read and write files, browse the workspace, use the browser, and access the terminal.
+- **Kimi / DeepSeek WebUI integration**: Use Kimi Code Web and DeepSeek Harness Web on your phone. MCP/plugin tools launch the local services, check their status, and stop them.
+- **Switch between Harnesses**: Choose Xiaowan, Codex, Claude Code, OpenCode, Kimi Code, or DeepSeek Harness from a shared chat interface to suit the task.
+- **Multiple agents in parallel**: Explicitly request delegation or parallel work to run independent subtasks in subagents with isolated contexts, then combine their results.
+- **Tools and skills**: Extend agents with Skills, MCP, browser access, a terminal, local workspaces, and Android system tools.
+- **System integration and memory**: Scheduled tasks, alarms, calendar management, audio playback control, and short-term and long-term memory.
+- **Connect to Codex on your computer**: Access your computer's Codex from your phone through [codex-bridge](tools/codex-bridge/README.md).
+
+### Kimi / DeepSeek WebUI: an agent workspace on your phone
+
+Install the corresponding runtime components and configure a compatible Provider and model, then ask the assistant to “Open Kimi Code WebUI” or “Open DeepSeek Harness WebUI.” The built-in plugin starts the local Web service, opens its interface, and provides status and stop tools. Model connections use the Provider configured in the app.
+
+### Switch Harnesses to suit the task
+
+A Harness is the runtime in which an agent executes tasks. Use the Agent selector in chat to choose Xiaowan, Codex, Claude Code, OpenCode, Kimi Code, or DeepSeek Harness. Install the relevant components and configure a model first; available models and tools depend on the selected Harness and Provider.
+
+### Run agents in parallel, then bring the results together
+
+For example, ask an agent that supports subtask delegation:
+
+> Delegate three tasks in parallel: analyze the project structure, review test coverage, and identify documentation gaps. Combine the findings and recommend next steps.
+
+Subtasks run independently with isolated contexts, optional roles and concurrency settings, and aggregated results. This suits work that can be split into independent parts, such as code exploration, research organization, and option comparisons. Scheduling capabilities depend on the selected Harness.
 
 <p align="center">
   <img src="docs/tutorial/example.png" alt="Example" />
@@ -125,8 +147,8 @@ Choose the LAN address and token mode in the terminal setup UI, then scan the pr
 
 ### Requirements
 
-- Flutter SDK `3.47.2+`
-- JDK `17+`
+- Flutter SDK `3.9.2+`
+- JDK `11+`
 - Node.js `20.19+` or `22.12+` and pnpm `10.28.0` (for WebUI development)
 
 ### Get the code
@@ -195,26 +217,11 @@ and receive the Gelab route from the update Worker. The upstream Gelab key stays
 in the Worker. Debug APK builds use the OpenAI-compatible LLM API configured by
 `LLMTHU_API_BASE`, `LLMTHU_API_KEY`, and `LLMTHU_MODEL` for normal LLM requests,
 context compaction, and `scene.vlm.operation.primary`.
-For local acceptance testing, Release builds can explicitly enable
-`-POOB_BUNDLE_LLMTHU_PROVIDER=1` to bundle the same `LLMTHU_*` configuration
-for use out of the box. Regular Release and CI builds do not bundle this
-configuration by default.
 
 ```bash
 cd ..
 
 ./gradlew :app:installDevelopStandardDebug -Ptarget=lib/main_standard.dart
-```
-
-For acceptance testing on a physical device, use the repository's LLMTHU
-installation script. It enables the LLMTHU provider by default and reads the
-API key from `LLMTHU_API_KEY` in the current shell. If the key is missing, the
-script fails immediately instead of producing an unusable test APK. Regular
-Release and CI builds still do not automatically bundle the key.
-
-```bash
-export LLMTHU_API_KEY='your-api-key'
-./scripts/install_release_llmthu_device.sh
 ```
 
 <h2 id="architecture">Architecture Overview</h2>
@@ -230,9 +237,9 @@ OpenOmniBot/
 └── ReTerminal/core/            # Embedded terminal experience modules
 ```
 
-<h2 id="community">More</h2>
+<h2 id="community">Community</h2>
 
-Thanks to developers from [LINUX.DO](https://linux.do) and other communities for supporting OpenOmniBot.
+Thanks to the community （ including linux.do ）developers supporting OpenOmniBot.
 
 Special thanks to these open-source projects:
 
@@ -243,8 +250,7 @@ Special thanks to these open-source projects:
   <tr>
     <td align="center">
       <img src="https://omni.1775885.xyz/community/wechat-qr" alt="WeChat Group" width="220"/><br/>
-      <b>WeChat Group</b><br/>
-      <a href="https://discord.gg/WnBvBXgykD">Join the Discord community</a>
     </td>
   </tr>
 </table>
+Join Discord: https://discord.gg/WnBvBXgykD

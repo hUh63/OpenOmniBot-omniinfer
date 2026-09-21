@@ -612,7 +612,7 @@ class AgentMusicPlaybackService : Service() {
         )
 
         val builder = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(snapshot.title ?: currentTitle)
             .setContentText(buildNotificationSubtitle(snapshot))
             .setContentIntent(openAppIntent)

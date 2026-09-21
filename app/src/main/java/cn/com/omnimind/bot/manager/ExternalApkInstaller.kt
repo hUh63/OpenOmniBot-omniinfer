@@ -352,7 +352,7 @@ object ExternalApkInstaller {
 
         private fun baseBuilder(): NotificationCompat.Builder {
             return NotificationCompat.Builder(context, DOWNLOAD_NOTIFICATION_CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
+                .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentTitle("$displayName 版本更新")
                 .setOnlyAlertOnce(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
