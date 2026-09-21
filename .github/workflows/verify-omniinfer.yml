@@ -75,17 +75,13 @@ jobs:
           GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
         run: |
           chmod +x ./gradlew
-          # See build-apk.yml: upstream's catalog asks for
-          # runtime-components/omniflow-gui-runtime-2.2.12.zip, which upstream never
-          # ships, so :app:syncPluginAssets fails on the missing input. Point upstream's
-          # own override hook at the archive we commit; the sha is injected into the
-          # packaged catalog so the runtime still verifies what it gets.
+          # See build-apk.yml: plugins/catalog.v1.json asks for
+          # runtime-components/omniflow-gui-runtime-2.2.12.zip and :app:syncPluginAssets reads
+          # artifacts/<that name> as its baseline input; the archive is committed in this repo.
           ./gradlew --no-daemon --build-cache --max-workers=4 \
             assembleProductionOmniinferDebug \
             -Ptarget=lib/main_omniinfer.dart \
-            -Pomniinfer.abis=arm64-v8a \
-            -POOB_OMNIFLOW_COMPONENT_ARCHIVE=artifacts/omniflow-gui-runtime-2.1.8.zip \
-            -POOB_OMNIFLOW_COMPONENT_ARCHIVE_SHA256=12439b1ad47e665002d8824be3f0125ee17f9f575be2d656f8e0c87c7a24836f
+            -Pomniinfer.abis=arm64-v8a
 
       - name: Report APK
         run: |

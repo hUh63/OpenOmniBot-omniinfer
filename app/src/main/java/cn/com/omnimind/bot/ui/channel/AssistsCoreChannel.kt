@@ -40,12 +40,6 @@ class AssistsCoreChannel {
                 return@setMethodCallHandler
             }
             when (call.method) {
-                "openLocalModelService" -> {
-                    App.instance.startActivity(android.content.Intent(App.instance,
-                        cn.com.omnimind.bot.localmodel.LocalModelActivity::class.java)
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    result.success(null)
-                }
                 "agentSkillList" -> {
                     assistsCoreManager!!.agentSkillList(call, result)
                 }

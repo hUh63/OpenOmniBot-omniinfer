@@ -3041,37 +3041,6 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                   const EdgeInsets.fromLTRB(18, 12, 18, 24),
                 ),
                 children: [
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton(
-                      key: const ValueKey('install-omniinfer'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: _secondaryTextColor,
-                        textStyle: const TextStyle(fontSize: 12),
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        minimumSize: const Size(0, 32),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      onPressed: () async {
-                        try {
-                          await const MethodChannel(
-                            'cn.com.omnimind.bot/AssistCoreEvent',
-                          ).invokeMethod<void>('openLocalModelService');
-                        } on PlatformException catch (error) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(error.message ?? '无法打开本地模型服务'),
-                              ),
-                            );
-                          }
-                        }
-                      },
-                      child: Text(
-                        _headerText('使用本地模型服务', 'Use local model service'),
-                      ),
-                    ),
-                  ),
                   SettingsSectionTitle(
                     label: context.l10n.modelProviderConfigTitle,
                     subtitle: context.l10n.modelProviderConfigDesc,

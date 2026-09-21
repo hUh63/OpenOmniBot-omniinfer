@@ -133,37 +133,6 @@ void main() {
     ModelsDevCatalogService.resetForTesting();
   });
 
-  testWidgets(
-    'small local model entry opens native on-demand service without an Agent turn',
-    (tester) async {
-      var opens = 0;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(assistCoreChannel, (call) async {
-            if (call.method == 'openLocalModelService') opens++;
-            if (call.method == 'listModelProviderProfiles')
-              return profilePayload();
-            return null;
-          });
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.lightTheme,
-          home: const ModelProviderSettingPage(),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final entry = find.byKey(const ValueKey('install-omniinfer'));
-      expect(tester.widget(entry), isA<TextButton>());
-      expect(tester.getSize(entry).height, lessThanOrEqualTo(36));
-      await tester.tap(entry);
-      await tester.pumpAndSettle();
-      expect(opens, 1);
-      expect(find.byType(ModelProviderSettingPage), findsOneWidget);
-      await tester.tap(entry);
-      await tester.pumpAndSettle();
-      expect(opens, 2);
-    },
-  );
-
   for (final fieldLabel in ['API Key', 'Base URL']) {
     testWidgets(
       'refresh persists the $fieldLabel draft and reopening queries again',
