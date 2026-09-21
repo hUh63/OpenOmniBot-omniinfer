@@ -73,10 +73,20 @@ jobs:
           printf '%s' "${{ secrets.RELEASE_KEYSTORE }}" | base64 --decode > "$RUNNER_TEMP/release.p12"
           chmod 600 "$RUNNER_TEMP/release.p12"
           chmod +x ./gradlew
+          # Upstream v0.6.3.1 points plugins/catalog.v1.json at
+          # runtime-components/omniflow-gui-runtime-2.2.12.zip but never ships that
+          # archive (it has no history in the repo, and scripts/build-omniflow-component.py
+          # needs the sibling OmniFlow-exp / OmniTransfer working trees, so it cannot be
+          # rebuilt here). :app:syncPluginAssets then fails on a missing input. Use
+          # upstream's own override hook to hand it the 2.1.8 archive we do commit;
+          # Gradle injects this sha into the packaged catalog, so the runtime still
+          # verifies the bundled component. Drop both flags once a 2.2.12 archive exists.
           ./gradlew --no-daemon --build-cache --max-workers=4 \
             assembleProductionOmniinferRelease \
             -Ptarget=lib/main_omniinfer.dart \
             -Pomniinfer.abis=arm64-v8a \
+            -POOB_OMNIFLOW_COMPONENT_ARCHIVE=artifacts/omniflow-gui-runtime-2.1.8.zip \
+            -POOB_OMNIFLOW_COMPONENT_ARCHIVE_SHA256=12439b1ad47e665002d8824be3f0125ee17f9f575be2d656f8e0c87c7a24836f \
             -POMNI_RELEASE_STORE_FILE="$RUNNER_TEMP/release.p12" \
             -POMNI_RELEASE_STORE_PWD="${{ secrets.RELEASE_PASSWORD }}" \
             -POMNI_RELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
