@@ -135,22 +135,6 @@ class SandboxPluginPool(
         )
     }
 
-    fun dashboard(pluginId: String): Map<String, Any> {
-        val directory = requirePluginDirectory(pluginId)
-        val manifest = readManifest(directory)
-        val frontend = manifest.frontend
-            ?: throw IllegalArgumentException("Plugin $pluginId does not provide a dashboard")
-        val entry = safeChild(directory, frontend.entry)
-        val icon = safeChild(directory, frontend.icon)
-        require(entry.isFile) { "Plugin $pluginId dashboard entry is missing" }
-        return mapOf(
-            "title" to manifest.name,
-            "entryPath" to entry.canonicalPath,
-            "iconPath" to icon.canonicalPath,
-            "rootPath" to directory.canonicalPath,
-        )
-    }
-
     internal suspend fun executeDashboardTool(
         pluginId: String,
         toolName: String,
