@@ -81,6 +81,8 @@
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <application
+        android:appComponentFactory=".localmodel.InferenceComponentFactory"
+        tools:replace="android:appComponentFactory"
         android:name=".App"
         android:allowBackup="true"
         android:enableOnBackInvokedCallback="true"
@@ -92,7 +94,8 @@
         android:label="@string/omni_app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.OmnibotApp">
-        <!-- 本地推理服务（:omniinfer-server 模块提供） -->
+        <!-- 启动页 Activity -->
+        <activity android:name=".localmodel.LocalModelActivity" android:exported="false" />
         <service android:name="com.omniinfer.server.OmniInferService"
             android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
