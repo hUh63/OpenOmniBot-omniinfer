@@ -79,7 +79,7 @@ class OmniInferService : Service() {
     }
 
     /**
-     * Guard for the `/v1/*` routes. Returns true when the request may proceed; otherwise it
+     * Guard for the `/v1/…` routes. Returns true when the request may proceed; otherwise it
      * answers 401 with an OpenAI-shaped error and returns false, so the handler just bails out.
      */
     private suspend fun ApplicationCall.authorizeLocalApi(): Boolean {

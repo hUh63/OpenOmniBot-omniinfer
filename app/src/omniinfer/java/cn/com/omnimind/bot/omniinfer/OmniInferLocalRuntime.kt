@@ -88,7 +88,7 @@ object OmniInferLocalRuntime {
         syncProviderState()
     }
 
-    /** Whether `/v1/*` requires the API key. */
+    /** Whether the `v1` endpoints require the API key. */
     fun isAuthEnabled(): Boolean = mmkv.decodeBool(KEY_AUTH_ENABLED, false)
 
     fun setAuthEnabled(enabled: Boolean) {

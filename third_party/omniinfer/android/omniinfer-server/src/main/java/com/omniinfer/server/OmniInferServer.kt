@@ -68,7 +68,7 @@ object OmniInferServer {
 
     /**
      * Optional API-key guard for the local HTTP API. When [enabled] and [token] is not blank,
-     * every `/v1/*` request must carry `Authorization: Bearer <token>` (or an `x-api-key`
+     * every `/v1/…` request must carry `Authorization: Bearer <token>` (or an `x-api-key`
      * header); `/health` stays open so probes can still tell the server is up.
      */
     fun configureApiAuth(enabled: Boolean, token: String) {
