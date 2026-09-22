@@ -57,6 +57,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       TextEditingController();
   final TextEditingController _marketSearchController = TextEditingController();
   final TextEditingController _portController = TextEditingController();
+  final TextEditingController _apiTokenController = TextEditingController();
   final FocusNode _portFocusNode = FocusNode();
 
   StreamSubscription<MnnLocalEvent>? _eventSubscription;
@@ -75,6 +76,9 @@ class _LocalModelsPageState extends State<LocalModelsPage>
   _PortTarget _selectedPortTarget = _PortTarget.local;
   double _tabSwitcherDragDelta = 0;
 
+  bool _authEnabled = false;
+  bool _savingApiAuth = false;
+
   bool _importing = false;
   double _importProgress = 0.0;
   String _importModelId = '';
@@ -91,6 +95,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     _portFocusNode.addListener(_handlePortFocusChanged);
     _eventSubscription = MnnLocalModelsService.eventStream.listen(_handleEvent);
     _bootstrap(preferredBackend: widget.initialBackend);
+    _loadApiAuth();
     _startPolling();
   }
 
@@ -108,6 +113,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     _installedSearchController.dispose();
     _marketSearchController.dispose();
     _portController.dispose();
+    _apiTokenController.dispose();
     super.dispose();
   }
 
@@ -511,6 +517,110 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       showToast(context.l10n.localModelsActiveModelUpdated);
     } catch (_) {
       showToast(context.l10n.localModelsSetActiveFailed, type: ToastType.error);
+    }
+  }
+
+  Future<void> _loadApiAuth({bool silent = true}) async {
+    try {
+      final data = await MnnLocalModelsService.getApiAuth();
+      if (!mounted) return;
+      final enabled = data['authEnabled'] == true;
+      final token = (data['apiToken'] ?? '').toString();
+      setState(() {
+        _authEnabled = enabled;
+        if (_apiTokenController.text != token) {
+          _apiTokenController.text = token;
+        }
+      });
+    } catch (_) {
+      if (!silent && mounted) {
+        showToast(
+          context.trLegacy('读取 API Token 失败'),
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
+  void _applyApiAuthPayload(Map<String, dynamic> data, {bool updateField = true}) {
+    final enabled = data['authEnabled'] == true;
+    final token = (data['apiToken'] ?? '').toString();
+    setState(() {
+      _authEnabled = enabled;
+      if (updateField && _apiTokenController.text != token) {
+        _apiTokenController.text = token;
+      }
+    });
+  }
+
+  Future<void> _toggleApiAuth(bool value) async {
+    if (_savingApiAuth) return;
+    setState(() => _savingApiAuth = true);
+    try {
+      final data = await MnnLocalModelsService.saveApiAuth(authEnabled: value);
+      if (!mounted) return;
+      _applyApiAuthPayload(data);
+      showToast(
+        value
+            ? context.trLegacy('已启用 API Token')
+            : context.trLegacy('已关闭 API Token'),
+      );
+    } catch (_) {
+      if (mounted) {
+        showToast(context.trLegacy('保存失败'), type: ToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _savingApiAuth = false);
+    }
+  }
+
+  Future<void> _saveApiToken() async {
+    if (_savingApiAuth) return;
+    final text = _apiTokenController.text.trim();
+    setState(() => _savingApiAuth = true);
+    try {
+      final data = await MnnLocalModelsService.saveApiAuth(apiToken: text);
+      if (!mounted) return;
+      _applyApiAuthPayload(data);
+      showToast(context.trLegacy('Token 已保存'));
+    } catch (_) {
+      if (mounted) {
+        showToast(context.trLegacy('保存失败'), type: ToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _savingApiAuth = false);
+    }
+  }
+
+  Future<void> _regenerateApiToken() async {
+    if (_savingApiAuth) return;
+    setState(() => _savingApiAuth = true);
+    try {
+      final data = await MnnLocalModelsService.saveApiAuth(
+        refreshApiToken: true,
+      );
+      if (!mounted) return;
+      final token = (data['apiToken'] ?? '').toString();
+      setState(() {
+        _authEnabled = data['authEnabled'] == true;
+        _apiTokenController.text = token;
+      });
+      showToast(context.trLegacy('已生成新的 Token'));
+    } catch (_) {
+      if (mounted) {
+        showToast(context.trLegacy('生成失败'), type: ToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _savingApiAuth = false);
+    }
+  }
+
+  Future<void> _copyApiToken() async {
+    final token = _apiTokenController.text.trim();
+    if (token.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: token));
+    if (mounted) {
+      showToast(context.trLegacy('已复制 Token'));
     }
   }
 
@@ -1505,6 +1615,103 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     );
   }
 
+  Widget _buildApiAuthCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _cardColor,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _borderColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      context.trLegacy('启用 API Token'),
+                      style: TextStyle(
+                        color: _primaryTextColor,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: AppTextStyles.fontFamily,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      context.trLegacy('关闭后本机与局域网的 /v1 接口都无需令牌'),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _secondaryTextColor,
+                        fontFamily: AppTextStyles.fontFamily,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Switch.adaptive(
+                value: _authEnabled,
+                onChanged: _savingApiAuth ? null : _toggleApiAuth,
+              ),
+            ],
+          ),
+          if (_authEnabled) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _apiTokenController,
+                    style: TextStyle(
+                      color: _primaryTextColor,
+                      fontFamily: AppTextStyles.fontFamily,
+                    ),
+                    onSubmitted: (_) => _saveApiToken(),
+                    onTapOutside: (_) => _saveApiToken(),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: context.trLegacy('输入自定义 Token'),
+                      hintStyle: TextStyle(
+                        color: _tertiaryTextColor,
+                        fontFamily: AppTextStyles.fontFamily,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                IconButton(
+                  onPressed: _savingApiAuth ? null : _regenerateApiToken,
+                  tooltip: context.trLegacy('生成新 Token'),
+                  icon: const Icon(Icons.autorenew_rounded),
+                ),
+                IconButton(
+                  onPressed: _savingApiAuth ? null : _copyApiToken,
+                  tooltip: context.trLegacy('复制'),
+                  icon: const Icon(Icons.copy_rounded),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              context.trLegacy('Provider 的 API Key 需要填同一个 Token（App 内已自动注入）'),
+              style: TextStyle(
+                fontSize: 12,
+                color: _tertiaryTextColor,
+                fontFamily: AppTextStyles.fontFamily,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildServiceTab() {
     if (_loadingConfig && _config == null) {
       return const Center(child: CircularProgressIndicator());
@@ -1608,6 +1815,12 @@ class _LocalModelsPageState extends State<LocalModelsPage>
                   '${_backendLabel(config.loadedBackend)} / ${_displayModelName(config.loadedModelId)}',
             ),
           ],
+          const SizedBox(height: 24),
+          SettingsSectionTitle(
+            label: context.trLegacy('API 访问令牌'),
+            subtitle: context.trLegacy('保护本机与局域网的 /v1 接口'),
+          ),
+          _buildApiAuthCard(),
           const SizedBox(height: 24),
           SettingsSectionTitle(
             label: context.l10n.localModelsAutoPreheatSection,

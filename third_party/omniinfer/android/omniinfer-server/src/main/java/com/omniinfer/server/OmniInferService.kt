@@ -78,6 +78,28 @@ class OmniInferService : Service() {
         }
     }
 
+    /**
+     * Guard for the `/v1/*` routes. Returns true when the request may proceed; otherwise it
+     * answers 401 with an OpenAI-shaped error and returns false, so the handler just bails out.
+     */
+    private suspend fun ApplicationCall.authorizeLocalApi(): Boolean {
+        if (!OmniInferServer.isApiAuthRequired()) return true
+        val raw = request.headers[HttpHeaders.Authorization]?.trim().orEmpty()
+        val bearer = if (raw.length > 6 && raw.regionMatches(0, "bearer", 0, 6, ignoreCase = true)) {
+            raw.substring(6).trim()
+        } else {
+            raw
+        }
+        val apiKey = request.headers["x-api-key"]?.trim().orEmpty()
+        if (OmniInferServer.matchesApiToken(bearer.ifEmpty { apiKey })) return true
+        respondText(
+            buildJsonObject { put("error", "invalid api key") }.toString(),
+            ContentType.Application.Json,
+            HttpStatusCode.Unauthorized,
+        )
+        return false
+    }
+
     private fun startServer(port: Int) {
         try {
             // CoroutineExceptionHandler prevents Ktor's async BindException from
@@ -94,6 +116,7 @@ class OmniInferService : Service() {
                         }
 
                         get("/v1/models") {
+                            if (!call.authorizeLocalApi()) return@get
                             val models = OmniInferServer.getLoadedModels()
                             val json = buildJsonObject {
                                 put("object", "list")
@@ -110,6 +133,7 @@ class OmniInferService : Service() {
                         }
 
                         post("/v1/chat/completions") {
+                            if (!call.authorizeLocalApi()) return@post
                             try {
                                 handleChatCompletion(call)
                             } catch (e: Exception) {
@@ -123,6 +147,7 @@ class OmniInferService : Service() {
                         }
 
                         post("/v1/cancel") {
+                            if (!call.authorizeLocalApi()) return@post
                             val handle = OmniInferServer.currentHandle
                             if (handle != 0L) {
                                 OmniInferBridge.gracefulStop(handle)

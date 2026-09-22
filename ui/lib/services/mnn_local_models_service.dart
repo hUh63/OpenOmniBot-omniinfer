@@ -333,6 +333,33 @@ class MnnLocalModelsService {
     return MnnLocalConfig.fromMap(result);
   }
 
+  static Future<Map<String, dynamic>> getApiAuth() async {
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'getApiAuth',
+    );
+    return (result ?? const {}).map(
+      (key, value) => MapEntry(key.toString(), value),
+    );
+  }
+
+  static Future<Map<String, dynamic>> saveApiAuth({
+    bool? authEnabled,
+    String? apiToken,
+    bool refreshApiToken = false,
+  }) async {
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'saveApiAuth',
+      <String, dynamic>{
+        if (authEnabled != null) 'authEnabled': authEnabled,
+        if (apiToken != null) 'apiToken': apiToken,
+        if (refreshApiToken) 'refreshApiToken': true,
+      },
+    );
+    return (result ?? const {}).map(
+      (key, value) => MapEntry(key.toString(), value),
+    );
+  }
+
   static Future<MnnLocalConfig> saveConfig({
     bool? autoStartOnAppOpen,
     int? apiPort,

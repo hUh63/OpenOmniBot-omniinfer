@@ -17,6 +17,9 @@ object OmniInferLocalRuntime {
 
     private const val MMKV_ID = "omniinfer_config"
     private const val KEY_API_PORT = "apiPort"
+    private const val KEY_API_TOKEN = "apiToken"
+    private const val KEY_AUTH_ENABLED = "authEnabled"
+    private const val LEGACY_LAN_TOKEN_KEY = "omniinfer_lan_proxy_token"
     private const val KEY_SELECTED_BACKEND = "omniinfer_selected_backend"
     private const val KEY_LOADED_BACKEND = "omniinfer_loaded_backend"
     private const val KEY_LOADED_MODEL_ID = "omniinfer_loaded_model_id"
@@ -28,6 +31,7 @@ object OmniInferLocalRuntime {
     fun setContext(context: Context) {
         val applicationContext = context.applicationContext
         appContext = applicationContext
+        applyApiAuth()
         syncProviderState()
     }
 
@@ -73,6 +77,76 @@ object OmniInferLocalRuntime {
             mmkv.encode(KEY_API_PORT, port)
             syncProviderState()
         }
+    }
+
+    /** API key guarding the local server (and the LAN proxy). Blank means "no key". */
+    fun getApiToken(): String = mmkv.decodeString(KEY_API_TOKEN, "").orEmpty().trim()
+
+    fun setApiToken(value: String) {
+        mmkv.encode(KEY_API_TOKEN, value.trim())
+        applyApiAuth()
+        syncProviderState()
+    }
+
+    /** Whether `/v1/*` requires the API key. */
+    fun isAuthEnabled(): Boolean = mmkv.decodeBool(KEY_AUTH_ENABLED, false)
+
+    fun setAuthEnabled(enabled: Boolean) {
+        // Turning the guard on without a token would silently disable it; mint one instead.
+        if (enabled && getApiToken().isEmpty()) {
+            mmkv.encode(KEY_API_TOKEN, generateApiToken())
+        }
+        mmkv.encode(KEY_AUTH_ENABLED, enabled)
+        applyApiAuth()
+        syncProviderState()
+    }
+
+    /** UI snapshot of the API-key settings (used by the local-model page). */
+    fun apiAuthState(): Map<String, Any?> = mapOf(
+        "authEnabled" to isAuthEnabled(),
+        "apiToken" to getApiToken(),
+        "apiPort" to getPort(),
+        "baseUrl" to getBaseUrl(),
+        "lanToken" to ensureApiToken(),
+    )
+
+    fun saveApiAuth(args: Map<*, *>): Map<String, Any?> {
+        args["authEnabled"]?.let { setAuthEnabled(it == true) }
+        args["apiToken"]?.let { setApiToken(it.toString()) }
+        if (args["refreshApiToken"] == true) refreshApiToken()
+        return apiAuthState()
+    }
+
+    /** Generates (or regenerates) the shared API token. */
+    fun refreshApiToken(): String {
+        val token = generateApiToken()
+        mmkv.encode(KEY_API_TOKEN, token)
+        applyApiAuth()
+        syncProviderState()
+        return token
+    }
+
+    /** Shared token, created on demand; adopts the legacy LAN-proxy token if one exists. */
+    fun ensureApiToken(): String {
+        val existing = getApiToken()
+        if (existing.isNotEmpty()) return existing
+        val legacy = mmkv.decodeString(LEGACY_LAN_TOKEN_KEY, "").orEmpty().trim()
+        val token = legacy.ifEmpty { generateApiToken() }
+        mmkv.encode(KEY_API_TOKEN, token)
+        return token
+    }
+
+    /** Pushes the current setting into the engine (safe to call before the server starts). */
+    fun applyApiAuth() {
+        OmniInferServer.configureApiAuth(isAuthEnabled(), getApiToken())
+    }
+
+    private fun generateApiToken(): String {
+        val bytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(bytes)
+        return android.util.Base64.encodeToString(
+            bytes, android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE
+        )
     }
 
     fun setLanProxyPort(port: Int): Map<String, Any?> {
@@ -138,6 +212,7 @@ object OmniInferLocalRuntime {
             else -> BACKEND_LLAMA_CPP
         }
         val port = getPort()
+        applyApiAuth()
         OmniLog.i(
             TAG,
             "[loadModel] >> OmniInferServer.loadModel(" +
@@ -184,7 +259,8 @@ object OmniInferLocalRuntime {
 
     fun refreshLanProxyToken(): Map<String, Any?> {
         val context = appContext ?: return getLanProxyState()
-        return OmniInferLanProxyManager.refreshToken(context).toMap()
+        refreshApiToken()
+        return OmniInferLanProxyManager.rotateToken(context, getPort()).toMap()
     }
 
     fun handleAppOpen(context: Context) {
@@ -219,7 +295,7 @@ object OmniInferLocalRuntime {
         }
         MnnLocalProviderStateStore.update(
             port = getPort(),
-            apiKey = "",
+            apiKey = if (isAuthEnabled()) getApiToken() else "",
             ready = ready,
         )
     }

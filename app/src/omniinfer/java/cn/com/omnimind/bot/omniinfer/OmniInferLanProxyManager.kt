@@ -136,9 +136,18 @@ object OmniInferLanProxyManager {
         }
     }
 
+    /** Regenerates the shared API token and restarts the proxy when it is running. */
     fun refreshToken(context: Context): OmniInferLanProxyState {
-        mmkv.encode(KEY_TOKEN, generateToken())
-        val target = activeTargetPort.takeIf { it > 0 } ?: OmniInferLocalRuntime.getPort()
+        OmniInferLocalRuntime.refreshApiToken()
+        return rotateToken(context)
+    }
+
+    /** Re-reads the shared token without regenerating it. */
+    fun rotateToken(
+        context: Context,
+        targetPort: Int = OmniInferLocalRuntime.getPort(),
+    ): OmniInferLanProxyState {
+        val target = activeTargetPort.takeIf { it > 0 } ?: targetPort
         return if (running) {
             start(context, target, activePort.takeIf { it > 0 })
         } else {
@@ -237,8 +246,13 @@ object OmniInferLanProxyManager {
     }
 
     private fun isAuthorized(call: ApplicationCall): Boolean {
+        if (!OmniInferLocalRuntime.isAuthEnabled()) return true
         val raw = call.request.headers[HttpHeaders.Authorization]?.trim().orEmpty()
-        val token = raw.removePrefix("Bearer").trim()
+        val token = if (raw.length > 6 && raw.regionMatches(0, "bearer", 0, 6, ignoreCase = true)) {
+            raw.substring(6).trim()
+        } else {
+            raw
+        }
         return token.isNotEmpty() && timingSafeEquals(token, ensureToken())
     }
 
@@ -259,13 +273,7 @@ object OmniInferLanProxyManager {
         }
     }
 
-    private fun ensureToken(): String {
-        val stored = mmkv.decodeString(KEY_TOKEN, "").orEmpty()
-        if (stored.isNotBlank()) return stored
-        val token = generateToken()
-        mmkv.encode(KEY_TOKEN, token)
-        return token
-    }
+    private fun ensureToken(): String = OmniInferLocalRuntime.ensureApiToken()
 
     private fun generateToken(): String {
         val bytes = ByteArray(32)

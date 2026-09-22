@@ -39,6 +39,8 @@ object OmniInferServer {
     private var serverRunning = false
     private var currentLoadKey: String = ""
     @Volatile private var lastError: String = ""
+    @Volatile private var authEnabled: Boolean = false
+    @Volatile private var authToken: String = ""
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -62,6 +64,30 @@ object OmniInferServer {
         OmniInferService.notifChannelName = channelName
         OmniInferService.notifSmallIcon = smallIcon
         OmniInferService.notifTextFormat = textFormat
+    }
+
+    /**
+     * Optional API-key guard for the local HTTP API. When [enabled] and [token] is not blank,
+     * every `/v1/*` request must carry `Authorization: Bearer <token>` (or an `x-api-key`
+     * header); `/health` stays open so probes can still tell the server is up.
+     */
+    fun configureApiAuth(enabled: Boolean, token: String) {
+        authEnabled = enabled
+        authToken = token.trim()
+        Log.i(TAG, "API auth " + if (isApiAuthRequired()) "enabled" else "disabled")
+    }
+
+    internal fun isApiAuthRequired(): Boolean = authEnabled && authToken.isNotEmpty()
+
+    /** Length-checked, byte-or comparison so a wrong token cannot be probed byte by byte. */
+    internal fun matchesApiToken(candidate: String): Boolean {
+        val expected = authToken
+        if (candidate.isEmpty() || expected.isEmpty()) return false
+        var diff = candidate.length xor expected.length
+        for (i in candidate.indices) {
+            diff = diff or (candidate[i].code xor expected[i % expected.length].code)
+        }
+        return diff == 0
     }
 
     fun getPort(): Int = serverPort

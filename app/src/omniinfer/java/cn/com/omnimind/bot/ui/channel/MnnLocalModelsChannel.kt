@@ -152,6 +152,17 @@ class MnnLocalModelsChannel {
 
     private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "getApiAuth" -> {
+                result.success(OmniInferLocalRuntime.apiAuthState())
+                return
+            }
+
+            "saveApiAuth" -> {
+                val args = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any?>()
+                result.success(OmniInferLocalRuntime.saveApiAuth(args))
+                return
+            }
+
             "getBackend" -> {
                 result.success(getSelectedBackend())
                 return

@@ -47,6 +47,23 @@ object DownloadableInferenceRuntime {
     /** The engine object name, shared by the downloaded payload and the bundled module. */
     const val SERVER = "com.omniinfer.server.OmniInferServer"
 
+    private const val CONFIG_MMKV_ID = "omniinfer_config"
+    private const val KEY_API_PORT = "apiPort"
+    private const val KEY_API_TOKEN = "apiToken"
+    private const val KEY_AUTH_ENABLED = "authEnabled"
+
+    /**
+     * The app's local-model page keeps the port and API key in the shared `omniinfer_config`
+     * MMKV store. Read them here too, so this entry point and that page configure one engine
+     * identically instead of disagreeing about the port.
+     */
+    private fun configMmkv() = com.tencent.mmkv.MMKV.mmkvWithID(CONFIG_MMKV_ID)
+
+    /** Configured local API port, falling back to 9099 (the MMKV default is 0 = unset). */
+    fun configuredPort(): Int =
+        runCatching { configMmkv().decodeInt(KEY_API_PORT, 0) }.getOrDefault(0)
+            .takeIf { it > 0 } ?: 9099
+
     /**
      * True when this APK already carries the engine (the omniinfer flavour bundles
      * `:omniinfer-server`). Nothing needs downloading then, and the class comes from the app
@@ -149,6 +166,17 @@ object DownloadableInferenceRuntime {
                 val bundled = cl.loadClass(SERVER)
                 sdk = bundled.getField("INSTANCE").get(null)
                 bundled.getMethod("init", Context::class.java).invoke(sdk, context.applicationContext)
+                // Same port and API key as the app's local-model page.
+                val config = runCatching { configMmkv() }.getOrNull()
+                runCatching {
+                    bundled.getMethod(
+                        "configureApiAuth", Boolean::class.javaPrimitiveType, String::class.java
+                    ).invoke(
+                        sdk,
+                        config?.decodeBool(KEY_AUTH_ENABLED, false) ?: false,
+                        config?.decodeString(KEY_API_TOKEN, "").orEmpty(),
+                    )
+                }
             } else {
                 val resources = context.createConfigurationContext(Configuration(context.resources.configuration)).resources
                 val resourceLoader = ResourcesLoader()
@@ -176,7 +204,7 @@ object DownloadableInferenceRuntime {
         val ready = instance.javaClass.getMethod("isReady").invoke(instance) as Boolean
         if (!ready) {
             val portInUse = runCatching {
-                java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", 9099), 300) }
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", configuredPort()), 300) }
             }.isSuccess
             check(!portInUse) { "9099 端口已被其他服务使用，请先停止旧的本地模型宿主" }
         }
@@ -194,7 +222,7 @@ object DownloadableInferenceRuntime {
             liteRt = spec.file.endsWith(".litertlm"),
             previous = preferences.getString(selectionKey, null),
             load = { candidate ->
-                load.invoke(instance, model(context, spec).path, candidate, 9099, 4, spec.contextSize,
+                load.invoke(instance, model(context, spec).path, candidate, configuredPort(), 4, spec.contextSize,
                     emptyMap<String, String>()) as Boolean
             },
             reset = { instance.javaClass.getMethod("stop").invoke(instance) },
@@ -202,7 +230,10 @@ object DownloadableInferenceRuntime {
             remember = { preferences.edit().putString(selectionKey, it).apply() },
         )
         android.util.Log.i("LocalModelRuntime", "Startup backend selected: $backend")
-        return "本地模型已就绪，计算后端已自动适配。\nhttp://127.0.0.1:9099/v1\n模型：${instance.javaClass.getMethod("getLoadedModels").invoke(instance)}\n请在 Provider 中使用 Chat Completions，API Key 留空。"
+        val authEnabled = isBundled() &&
+            runCatching { configMmkv().decodeBool(KEY_AUTH_ENABLED, false) }.getOrDefault(false)
+        val keyHint = if (authEnabled) "API Key 填本机 API Token。" else "API Key 留空。"
+        return "本地模型已就绪，计算后端已自动适配。\nhttp://127.0.0.1:${configuredPort()}/v1\n模型：${instance.javaClass.getMethod("getLoadedModels").invoke(instance)}\n请在 Provider 中使用 Chat Completions，$keyHint"
     }
     fun stop() { sdk?.let { it.javaClass.getMethod("stop").invoke(it) } }
 }
