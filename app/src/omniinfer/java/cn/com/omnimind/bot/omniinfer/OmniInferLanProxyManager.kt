@@ -1,7 +1,6 @@
 package cn.com.omnimind.bot.omniinfer
 
 import android.content.Context
-import android.util.Base64
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.mcp.McpNetworkUtils
 import com.tencent.mmkv.MMKV
@@ -29,7 +28,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import java.security.MessageDigest
-import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
 data class OmniInferLanProxyState(
@@ -55,7 +53,6 @@ data class OmniInferLanProxyState(
 object OmniInferLanProxyManager {
     private const val TAG = "OmniInferLanProxy"
     private const val MMKV_ID = "omniinfer_config"
-    private const val KEY_TOKEN = "omniinfer_lan_proxy_token"
     private const val KEY_PORT = "omniinfer_lan_proxy_port"
     private const val KEY_LAST_ERROR = "omniinfer_lan_proxy_last_error"
     private const val DEFAULT_PROXY_PORT = 9100
@@ -274,12 +271,6 @@ object OmniInferLanProxyManager {
     }
 
     private fun ensureToken(): String = OmniInferLocalRuntime.ensureApiToken()
-
-    private fun generateToken(): String {
-        val bytes = ByteArray(32)
-        SecureRandom().nextBytes(bytes)
-        return Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)
-    }
 
     private fun clearError() {
         mmkv.encode(KEY_LAST_ERROR, "")

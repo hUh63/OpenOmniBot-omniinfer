@@ -19,7 +19,6 @@ object OmniInferLocalRuntime {
     private const val KEY_API_PORT = "apiPort"
     private const val KEY_API_TOKEN = "apiToken"
     private const val KEY_AUTH_ENABLED = "authEnabled"
-    private const val LEGACY_LAN_TOKEN_KEY = "omniinfer_lan_proxy_token"
     private const val KEY_SELECTED_BACKEND = "omniinfer_selected_backend"
     private const val KEY_LOADED_BACKEND = "omniinfer_loaded_backend"
     private const val KEY_LOADED_MODEL_ID = "omniinfer_loaded_model_id"
@@ -126,12 +125,11 @@ object OmniInferLocalRuntime {
         return token
     }
 
-    /** Shared token, created on demand; adopts the legacy LAN-proxy token if one exists. */
+    /** Shared token, created on demand (the LAN proxy uses the same one). */
     fun ensureApiToken(): String {
         val existing = getApiToken()
         if (existing.isNotEmpty()) return existing
-        val legacy = mmkv.decodeString(LEGACY_LAN_TOKEN_KEY, "").orEmpty().trim()
-        val token = legacy.ifEmpty { generateApiToken() }
+        val token = generateApiToken()
         mmkv.encode(KEY_API_TOKEN, token)
         return token
     }
