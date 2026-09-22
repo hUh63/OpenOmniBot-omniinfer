@@ -21,8 +21,14 @@ class LocalModelActivity : Activity() {
             val p = (24 * resources.displayMetrics.density).toInt(); setPadding(p, p, p, p)
         }
         layout.addView(TextView(this).apply { text = "使用本地模型服务"; textSize = 20f })
+        val bundled = DownloadableInferenceRuntime.isBundled()
         status = TextView(this).apply {
-            text = "可选实验功能 · 不启用不会下载或运行。\n点击下方按钮后下载约 27 MB 推理组件与所选模型；之后复用。\n计算后端自动适配，无需手动选择。Android 11+ ARM64。"; textSize = 14f
+            text = if (bundled) {
+                "本版内置推理组件 · 无需下载组件。\n点击下方按钮后下载所选模型并启动服务；之后复用。\n计算后端自动适配，无需手动选择。Android 11+ ARM64。"
+            } else {
+                "可选实验功能 · 不启用不会下载或运行。\n点击下方按钮后下载约 27 MB 推理组件与所选模型；之后复用。\n计算后端自动适配，无需手动选择。Android 11+ ARM64。"
+            }
+            textSize = 14f
             setPadding(0, 24, 0, 24); setTextIsSelectable(true)
         }
         layout.addView(status)
@@ -33,7 +39,7 @@ class LocalModelActivity : Activity() {
                 .coerceIn(0, DownloadableInferenceRuntime.models.lastIndex))
         }
         layout.addView(models)
-        start = Button(this).apply { text = "下载并启动"; setOnClickListener {
+        start = Button(this).apply { text = if (bundled) "启动服务" else "下载并启动"; setOnClickListener {
             val index = models.selectedItemPosition
             val spec = DownloadableInferenceRuntime.models[index]
             getPreferences(MODE_PRIVATE).edit().putInt("modelIndex", index).apply()
@@ -46,6 +52,11 @@ class LocalModelActivity : Activity() {
             DownloadableInferenceRuntime.stop(); "服务已停止，下载文件已保留。"
         } } }
         layout.addView(start); layout.addView(stop)
+        layout.addView(Button(this).apply { text = "模型市场与高级设置"; setOnClickListener {
+            cn.com.omnimind.bot.util.TaskCompletionNavigator.navigateToMainRoute(
+                this@LocalModelActivity, "/home/local_models", false)
+            finish()
+        } })
         layout.addView(Button(this).apply { text = "返回"; setOnClickListener { finish() } })
         setContentView(layout)
     }

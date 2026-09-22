@@ -8,18 +8,15 @@ import cn.com.omnimind.bot.App
 /**
  * Android owns service attachment and lifecycle; only class resolution is customized.
  *
- * The `com.omniinfer.server.OmniInferService` class name is shared by two packs: the optional
- * downloadable component and the `:omniinfer-server` module that the omniinfer build flavour
- * bundles inside the APK. Route through the downloaded DexClassLoader only when that component
- * is actually installed; otherwise let the ordinary app classloader resolve the bundled class
- * (classLoader() would otherwise abort on a missing payload and take the bundled service down).
+ * `com.omniinfer.server.OmniInferService` is served by one engine with two possible homes: the
+ * optional downloadable payload, or the `:omniinfer-server` module that the omniinfer flavour
+ * bundles inside the APK. Ask [DownloadableInferenceRuntime] which loader owns the name; when it
+ * answers null (no bundled engine, nothing downloaded) keep the ordinary app class loader.
  */
 class InferenceComponentFactory : CoreComponentFactory() {
     override fun instantiateService(cl: ClassLoader, className: String, intent: Intent?): Service {
-        val resolved = if (className == DownloadableInferenceRuntime.SERVICE &&
-            DownloadableInferenceRuntime.isInstalled(App.instance)
-        ) {
-            DownloadableInferenceRuntime.classLoader(App.instance)
+        val resolved = if (className == DownloadableInferenceRuntime.SERVICE) {
+            DownloadableInferenceRuntime.serviceClassLoader(App.instance) ?: cl
         } else {
             cl
         }

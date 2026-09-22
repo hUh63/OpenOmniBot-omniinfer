@@ -44,12 +44,36 @@ object DownloadableInferenceRuntime {
     fun root(context: Context) = File(context.filesDir, "omniinfer-runtime/0.2.4").apply { mkdirs() }
     fun model(context: Context, spec: ModelSpec) = File(root(context), spec.file)
 
+    /** The engine object name, shared by the downloaded payload and the bundled module. */
+    const val SERVER = "com.omniinfer.server.OmniInferServer"
+
+    /**
+     * True when this APK already carries the engine (the omniinfer flavour bundles
+     * `:omniinfer-server`). Nothing needs downloading then, and the class comes from the app
+     * class loader instead of a DexClassLoader.
+     */
+    fun isBundled(): Boolean = runCatching {
+        Class.forName(SERVER, false, DownloadableInferenceRuntime::class.java.classLoader)
+    }.isSuccess
+
     /**
      * Presence probe used by [InferenceComponentFactory] to decide who owns the shared
-     * `com.omniinfer.server.OmniInferService` class name. `fetch` only renames the payload
-     * into place after its SHA-256 matches [PAYLOAD_SHA], so existence implies verified.
+     * `com.omniinfer.server.OmniInferService` class name. Either the engine is bundled in this
+     * APK, or the downloaded payload is in place (`fetch` only renames it after its SHA-256
+     * matches [PAYLOAD_SHA], so existence implies verified).
      */
-    fun isInstalled(context: Context): Boolean = File(root(context), "runtime.apk").isFile
+    fun isInstalled(context: Context): Boolean =
+        isBundled() || File(root(context), "runtime.apk").isFile
+
+    /**
+     * Class loader able to resolve [SERVICE]/[SERVER]: the app class loader when the engine is
+     * bundled, the installed payload's DexClassLoader otherwise, null when neither applies.
+     */
+    fun serviceClassLoader(context: Context): ClassLoader? = when {
+        isBundled() -> DownloadableInferenceRuntime::class.java.classLoader
+        isInstalled(context) -> classLoader(context)
+        else -> null
+    }
     fun digest(file: File): String {
         val sha = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input -> val bytes = ByteArray(1024 * 1024); while (true) {
@@ -88,10 +112,13 @@ object DownloadableInferenceRuntime {
         require(Build.VERSION.SDK_INT >= 30 && Build.SUPPORTED_ABIS.contains("arm64-v8a")) {
             "此实验组件需要 Android 11+ ARM64"
         }
-        fetch(PAYLOAD_URL, File(root(context), "runtime.apk"), PAYLOAD_SHA, status)
+        if (!isBundled()) {
+            fetch(PAYLOAD_URL, File(root(context), "runtime.apk"), PAYLOAD_SHA, status)
+        }
         fetch(spec.url, model(context, spec), spec.sha, status)
     }
     @Synchronized fun classLoader(context: Context): ClassLoader {
+        if (isBundled()) return DownloadableInferenceRuntime::class.java.classLoader
         loader?.let { return it }
         require(Build.VERSION.SDK_INT >= 30)
         val apk = File(root(context), "runtime.apk")
@@ -115,26 +142,35 @@ object DownloadableInferenceRuntime {
     fun start(context: Context, spec: ModelSpec): String {
         val cl = classLoader(context)
         if (sdk == null) {
-            val resources = context.createConfigurationContext(Configuration(context.resources.configuration)).resources
-            val resourceLoader = ResourcesLoader()
-            ParcelFileDescriptor.open(File(root(context), "runtime.apk"), ParcelFileDescriptor.MODE_READ_ONLY).use {
-                resourceLoader.addProvider(ResourcesProvider.loadFromApk(it))
-            }
-            val attach = FutureTask { resources.addLoaders(resourceLoader) }
-            Handler(Looper.getMainLooper()).post(attach)
-            attach.get()
-            runtimeContext = object : ContextWrapper(context.applicationContext) {
-                override fun getApplicationContext(): Context = this
-                override fun getClassLoader(): ClassLoader = cl
-                override fun getResources(): Resources = resources
-                override fun getAssets() = resources.assets
-                override fun getApplicationInfo(): ApplicationInfo = ApplicationInfo(baseContext.applicationInfo).apply {
-                    nativeLibraryDir = File(root(baseContext), "lib").path
+            if (isBundled()) {
+                // The engine module ships inside this APK: nothing to unpack, no resource loader
+                // and no nativeLibraryDir override - the packaged libraries are already in the
+                // installed APK. Talk to the bundled object directly.
+                val bundled = cl.loadClass(SERVER)
+                sdk = bundled.getField("INSTANCE").get(null)
+                bundled.getMethod("init", Context::class.java).invoke(sdk, context.applicationContext)
+            } else {
+                val resources = context.createConfigurationContext(Configuration(context.resources.configuration)).resources
+                val resourceLoader = ResourcesLoader()
+                ParcelFileDescriptor.open(File(root(context), "runtime.apk"), ParcelFileDescriptor.MODE_READ_ONLY).use {
+                    resourceLoader.addProvider(ResourcesProvider.loadFromApk(it))
                 }
+                val attach = FutureTask { resources.addLoaders(resourceLoader) }
+                Handler(Looper.getMainLooper()).post(attach)
+                attach.get()
+                runtimeContext = object : ContextWrapper(context.applicationContext) {
+                    override fun getApplicationContext(): Context = this
+                    override fun getClassLoader(): ClassLoader = cl
+                    override fun getResources(): Resources = resources
+                    override fun getAssets() = resources.assets
+                    override fun getApplicationInfo(): ApplicationInfo = ApplicationInfo(baseContext.applicationInfo).apply {
+                        nativeLibraryDir = File(root(baseContext), "lib").path
+                    }
+                }
+                val downloaded = cl.loadClass(SERVER)
+                sdk = downloaded.getField("INSTANCE").get(null)
+                downloaded.getMethod("init", Context::class.java).invoke(sdk, runtimeContext)
             }
-            val type = cl.loadClass("com.omniinfer.server.OmniInferServer")
-            sdk = type.getField("INSTANCE").get(null)
-            type.getMethod("init", Context::class.java).invoke(sdk, runtimeContext)
         }
         val instance = requireNotNull(sdk)
         val ready = instance.javaClass.getMethod("isReady").invoke(instance) as Boolean
