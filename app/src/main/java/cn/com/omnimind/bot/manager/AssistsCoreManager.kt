@@ -24,6 +24,8 @@ import cn.com.omnimind.baselib.llm.DeepSeekProvider
 import cn.com.omnimind.baselib.llm.ModelProviderConfig
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.ReasoningEffort
+import cn.com.omnimind.baselib.llm.LocalModelProviderBridge
+import cn.com.omnimind.baselib.llm.MnnLocalProviderStateStore
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelSceneRegistry
 import cn.com.omnimind.baselib.llm.ProviderModelOption
@@ -130,12 +132,26 @@ internal fun resolveDirectAgentModelOverride(
     if (providerProfile == null || !providerProfile.isConfigured()) {
         return null
     }
+    // The built-in local engine may require an API key (the local-model page can turn /v1
+    // auth on). That key deliberately lives in MnnLocalProviderStateStore rather than in the
+    // user's provider profile, so inject it here - without this every local request would 401
+    // and only work again once the switch was turned off.
+    val effectiveProfile = if (
+        LocalModelProviderBridge.isBuiltinLocalProvider(providerProfileId, providerProfile.baseUrl)
+    ) {
+        MnnLocalProviderStateStore.getProfile().apiKey
+            .takeIf { it.isNotEmpty() }
+            ?.let { providerProfile.copy(apiKey = it) }
+            ?: providerProfile
+    } else {
+        providerProfile
+    }
     val contextLimit = when (val rawContextLimit = raw["contextLimit"]) {
         is Number -> rawContextLimit.toInt()
         else -> rawContextLimit?.toString()?.trim()?.toIntOrNull()
     }?.takeIf { it > 0 }
     return AgentModelOverride.fromProviderProfile(
-        profile = providerProfile,
+        profile = effectiveProfile,
         modelId = modelId,
         contextLimit = contextLimit,
     )
