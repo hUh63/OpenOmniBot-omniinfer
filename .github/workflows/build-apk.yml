@@ -113,16 +113,46 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v5
+          tag_name: v0.6.3-omniinfer-v6
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 修复停止服务 ANR 与并发加载竞态 (v0.6.3-omniinfer-v5)"
+          name: "OmniInfer 版 · 以上游 v0.6.3.1 为基线 + 单入口本地推理 + 端口/Token (v0.6.3-omniinfer-v6)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v5)：修复“点关闭局域网必 ANR”与并发加载竞态。
+            本轮 (v6)：以上游 v0.6.3.1 为基线重新整合；本地推理收敛成一套；补上 OmniFlow 组件与
+            本地服务的端口 / Token 能力。
+
+            【整合】
+            - 整仓以官方 v0.6.3.1 为基线重做整合（544 项差异：193 项 clean-take、324 项新增、
+              12 项删除、7 项冲突）。冲突按“缺的补上、冲突取优”处理：5 项自动三方合并，
+              AgentToolRegistry（remoteTool + parallelSafe 并存）与 settings_page（陪伴权限 + 通知
+              访问并存）各保留双方，SandboxPluginShortcutManager 取上游。本仓独有能力
+              （omniinfer flavor、:omniinfer-server、Dart 本地模型页）全部在位。
+            - OmniFlow 组件换成 catalog 真正要求的 omniflow-gui-runtime-2.2.12.zip（sha256
+              4601ebea…，取自上游实际用于构建 v0.6.3.1 的 codex/current-version-checkpoint-20260920
+              分支）。v5 用 2.1.8 兜底是因为当时没找到该包；2.1.8 不含 host.json，本属不匹配。
+              三个 workflow 里的 OOB_OMNIFLOW_COMPONENT_ARCHIVE 覆盖参数随之撤除。
+
+            【本地推理：一套入口、一套引擎】
+            - 官方那条链路（模型配置页“使用本地模型服务” → LocalModelActivity →
+              InferenceComponentFactory）成为唯一入口；DownloadableInferenceRuntime 增加运行时判定，
+              omniinfer 版直接驱动 APK 内置的 com.omniinfer.server.OmniInferServer（不下载组件、
+              不走 DexClassLoader），standard 版保持原有下载路径不变。
+            - LocalModelActivity 增加“模型市场与高级设置”入口进入 Flutter 本地模型页，模型市场、
+              局域网代理、多后端能力全部保留；设置页里重复的入口已移除。
+            - 顺带修掉：LocalModelActivity 曾写死 9099，现在与本地模型页读同一份配置。
+
+            【本地 API：端口 + Token】
+            - 端口可自定义（本机端口 / 局域网端口），两个入口共用同一份配置。
+            - 新增 API Token：开关控制是否要求鉴权，值可自定义、可一键生成/复制；打开开关而 token
+              为空时自动生成。校验作用于 /v1 接口（Authorization: Bearer 或 x-api-key），
+              /health 保持免鉴权。局域网代理共用同一个 token。App 内置 Provider 的 apiKey 自动
+              同步，无需手工配置。
+
+            v5（上一版）：修复“点关闭局域网必 ANR”与并发加载竞态。
 
             - 停止路径原本阻塞主线程：四个 stopApiService 的 MethodChannel 分支裸跑在 UI 线程
               （相邻的 startApiService 却切了 Dispatchers.IO），一路进到 nativeFree 里无超时的
