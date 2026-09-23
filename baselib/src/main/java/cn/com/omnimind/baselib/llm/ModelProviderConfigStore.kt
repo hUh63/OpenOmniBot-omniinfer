@@ -122,7 +122,28 @@ object ModelProviderConfigStore {
         val revision: Long? = null,
     )
 
-    fun listProfiles(): List<ModelProviderProfile> {
+    fun listProfiles(): List<ModelProviderProfile> =
+        listProfilesRaw().map(::withLocalApiKey)
+
+    /**
+     * The bundled local engine may require an API key; that key deliberately lives in
+     * MnnLocalProviderStateStore rather than in the user's provider profile. Inject it on every
+     * read so the agent path, the scene path (summaries, memory rollups), the agent config file
+     * snapshot and the settings UI all agree with the page that set it. Only an enabled,
+     * non-blank key is injected, so switching auth off restores the raw profile untouched.
+     */
+    private fun withLocalApiKey(profile: ModelProviderProfile): ModelProviderProfile {
+        if (!MnnLocalProviderStateStore.isEnabled()) return profile
+        val state = runCatching { MnnLocalProviderStateStore.getProfile() }.getOrNull() ?: return profile
+        val key = state.apiKey.trim()
+        if (key.isEmpty()) return profile
+        val builtinBase = normalizeBaseUrl(state.baseUrl)
+        val isLocal = MnnLocalProviderStateStore.isBuiltinProfileId(profile.id) ||
+            (builtinBase != null && normalizeBaseUrl(profile.baseUrl) == builtinBase)
+        return if (isLocal && profile.apiKey != key) profile.copy(apiKey = key) else profile
+    }
+
+    private fun listProfilesRaw(): List<ModelProviderProfile> {
         ModelProviderMigration.ensureMigrated()
         val mmkv = MMKV.defaultMMKV()
         val deletedOfficialProfileIds = readDeletedOfficialProfileIds(mmkv)
