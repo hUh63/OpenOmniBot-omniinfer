@@ -113,16 +113,26 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6
+          tag_name: v0.6.3-omniinfer-v6.1
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 以上游 v0.6.3.1 为基线 + 单入口本地推理 + 端口/Token (v0.6.3-omniinfer-v6)"
+          name: "OmniInfer 版 · 修复开了 API Token 后连不上本地模型 (v0.6.3-omniinfer-v6.1)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6)：以上游 v0.6.3.1 为基线重新整合；本地推理收敛成一套；补上 OmniFlow 组件与
+            本轮 (v6.1)：修掉“开了 API Token 就连不上本地模型”。
+
+            - 根因：token 只写进了 MnnLocalProviderStateStore，而请求路径的 apiKey 取自 Provider
+              配置（空），于是开启校验后 App 内所有请求 401，只有把开关关掉才通。现在
+              ModelProviderConfigStore.listProfiles() 会对内置/回环 provider 注入该 key —— Agent
+              聊天、场景请求（对话总结、记忆汇总）、agent 配置快照与设置页全部一致；仅在“开关开
+              且 key 非空”时注入，关掉开关即恢复原样，不会往 Provider 配置里写脏数据。
+            - 顺带：开着 token 时“对话归纳”一直显示“总结中”、页面点不动，走的是同一条
+              getProfile 路径（scene.compactor.context.chat），一并修复。
+
+            v6（上一版）：以上游 v0.6.3.1 为基线重新整合；本地推理收敛成一套；补上 OmniFlow 组件与
             本地服务的端口 / Token 能力。
 
             【整合】
