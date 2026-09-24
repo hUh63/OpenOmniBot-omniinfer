@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/bot_status.dart'
     show ShimmeringStatusText;
+import 'package:ui/services/mnn_local_models_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 
@@ -58,11 +59,26 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
   Timer? _elapsedTimer;
   int _elapsedSeconds = 0;
 
+  /// Local-model requests waiting behind the newest one. Subscribed here rather than threaded
+  /// through every caller: only the header needs it, and the event channel is silent when the
+  /// local server is not bundled.
+  StreamSubscription<MnnLocalEvent>? _inferenceQueueSubscription;
+  int _queuedAhead = 0;
+
   @override
   void initState() {
     super.initState();
     _elapsedSeconds = _resolveElapsedSeconds();
     _syncTimer();
+    _inferenceQueueSubscription = MnnLocalModelsService.inferenceQueueStream.listen(
+      (event) {
+        final queued = MnnLocalModelsService.queuedFromEvent(event);
+        if (!mounted || queued == _queuedAhead) return;
+        setState(() => _queuedAhead = queued);
+      },
+      // A flavour without the bundled server never registers the channel.
+      onError: (_) {},
+    );
   }
 
   @override
@@ -78,6 +94,7 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
 
   @override
   void dispose() {
+    _inferenceQueueSubscription?.cancel();
     _elapsedTimer?.cancel();
     super.dispose();
   }
@@ -115,9 +132,13 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
     final label = running
         ? (widget.activeToolLabel?.trim().isNotEmpty == true
               ? '${widget.activeToolLabel} · ${_elapsedSeconds}s'
-              : (isEnglish
-                    ? 'Processing ${_elapsedSeconds}s'
-                    : '正在处理 ${_elapsedSeconds}s'))
+              : (_queuedAhead > 0
+                    ? (isEnglish
+                          ? 'Queued (${_queuedAhead} ahead) · ${_elapsedSeconds}s'
+                          : '排队中（前面 $_queuedAhead 个）· ${_elapsedSeconds}s')
+                    : (isEnglish
+                          ? 'Processing ${_elapsedSeconds}s'
+                          : '正在处理 ${_elapsedSeconds}s')))
         : _finishedLabel(isEnglish);
     final labelColor = running
         ? palette.textTertiary

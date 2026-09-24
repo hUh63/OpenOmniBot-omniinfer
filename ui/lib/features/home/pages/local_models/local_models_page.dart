@@ -188,10 +188,11 @@ class _LocalModelsPageState extends State<LocalModelsPage>
         marketQuery: _marketSearchController.text.trim(),
         marketCategory: 'llm',
       );
+      final allInstalled = await MnnLocalModelsService.listAllInstalledModels();
       if (!mounted) return;
       setState(() {
         _config = overview.config;
-        _installedModels = overview.installedModels;
+        _installedModels = allInstalled;
         _marketModels = overview.market.models;
         _loadingConfig = false;
         _loadingInstalled = false;
@@ -305,7 +306,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       setState(() => _loadingInstalled = true);
     }
     try {
-      final models = await MnnLocalModelsService.listInstalledModels();
+      final models = await MnnLocalModelsService.listAllInstalledModels();
       if (!mounted) return;
       setState(() {
         _installedModels = models;
@@ -2162,6 +2163,16 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     return model.id.contains(pinId) || model.name.contains(pinId);
   }
 
+  /// A market entry is already on disk when one of the (cross-backend) installed models
+  /// matches it by id or name.
+  bool _isInstalledModel(MnnLocalModel model) {
+    return _installedModels.any(
+      (installed) =>
+          installed.id == model.id ||
+          (installed.name.isNotEmpty && installed.name == model.name),
+    );
+  }
+
   Widget _buildMarketCard(MnnLocalModel model) {
     final download = model.download;
     final isCompleted = download?.isCompleted == true;
@@ -2246,6 +2257,8 @@ class _LocalModelsPageState extends State<LocalModelsPage>
               _buildTag(model.category.toUpperCase()),
               if (model.source.isNotEmpty) _buildTag(model.source),
               if (model.vendor.isNotEmpty) _buildTag(model.vendor),
+              if (_isInstalledModel(model))
+                _buildAccentTag(context.l10n.localModelsInstalled),
               if (model.hasUpdate) _buildTag(context.l10n.localModelsHasUpdate),
               for (final tag in model.tags.take(4)) _buildTag(tag),
             ],

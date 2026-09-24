@@ -123,24 +123,40 @@ object ModelProviderConfigStore {
     )
 
     fun listProfiles(): List<ModelProviderProfile> =
-        listProfilesRaw().map(::withLocalApiKey)
+        listProfilesRaw()
+            .filter(::isLocalProfileReadable)
+            .map(::withLocalProviderState)
+
+    /** Hide the bundled-local provider from builds that cannot offer one (the standard flavour). */
+    private fun isLocalProfileReadable(profile: ModelProviderProfile): Boolean {
+        if (MnnLocalProviderStateStore.isEnabled()) return true
+        return !MnnLocalProviderStateStore.isBuiltinProfileId(profile.id)
+    }
 
     /**
-     * The bundled local engine may require an API key; that key deliberately lives in
-     * MnnLocalProviderStateStore rather than in the user's provider profile. Inject it on every
-     * read so the agent path, the scene path (summaries, memory rollups), the agent config file
-     * snapshot and the settings UI all agree with the page that set it. Only an enabled,
-     * non-blank key is injected, so switching auth off restores the raw profile untouched.
+     * The bundled local engine's profile is stored like any other, but its base URL, port,
+     * readiness and (when auth is on) API key live in MnnLocalProviderStateStore. Mirror that
+     * state on every read so the provider list, the agent path, the scene path (summaries,
+     * memory rollups) and the agent config snapshot all agree with the local-model page.
+     * A blank stored key is never injected, so switching auth off restores the raw profile.
      */
-    private fun withLocalApiKey(profile: ModelProviderProfile): ModelProviderProfile {
+    private fun withLocalProviderState(profile: ModelProviderProfile): ModelProviderProfile {
         if (!MnnLocalProviderStateStore.isEnabled()) return profile
         val state = runCatching { MnnLocalProviderStateStore.getProfile() }.getOrNull() ?: return profile
-        val key = state.apiKey.trim()
-        if (key.isEmpty()) return profile
+        val isBuiltin = MnnLocalProviderStateStore.isBuiltinProfileId(profile.id)
         val builtinBase = normalizeBaseUrl(state.baseUrl)
-        val isLocal = MnnLocalProviderStateStore.isBuiltinProfileId(profile.id) ||
+        val isLocal = isBuiltin ||
             (builtinBase != null && normalizeBaseUrl(profile.baseUrl) == builtinBase)
-        return if (isLocal && profile.apiKey != key) profile.copy(apiKey = key) else profile
+        if (!isLocal) return profile
+        val key = state.apiKey.trim()
+        return profile.copy(
+            name = if (isBuiltin) state.name else profile.name,
+            baseUrl = if (isBuiltin) state.baseUrl else profile.baseUrl,
+            apiKey = key.ifEmpty { profile.apiKey },
+            ready = state.ready,
+            statusText = state.statusText,
+            readOnly = if (isBuiltin) true else profile.readOnly,
+        )
     }
 
     private fun listProfilesRaw(): List<ModelProviderProfile> {

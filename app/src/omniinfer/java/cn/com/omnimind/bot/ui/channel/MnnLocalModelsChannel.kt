@@ -10,6 +10,7 @@ import cn.com.omnimind.bot.omniinfer.OmniInferLiteRtModelsManager
 import cn.com.omnimind.bot.omniinfer.OmniInferMnnModelsManager
 import cn.com.omnimind.bot.omniinfer.OmniInferModelsManager
 import cn.com.omnimind.bot.omniinfer.OmniInferQnnModelsManager
+import com.omniinfer.server.OmniInferServer
 import com.tencent.mmkv.MMKV
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -121,10 +122,21 @@ class MnnLocalModelsChannel {
                 OmniInferMnnModelsManager.setEventDispatcher(dispatcher)
                 OmniInferQnnModelsManager.setEventDispatcher(dispatcher)
                 OmniInferLiteRtModelsManager.setEventDispatcher(dispatcher)
+                // Surfaces "排队中" while a second local request waits for the inference slot.
+                OmniInferServer.queueObserver = { active, queued ->
+                    dispatcher(
+                        mapOf(
+                            "type" to "inferenceQueue",
+                            "active" to active,
+                            "queued" to queued,
+                        ),
+                    )
+                }
             }
 
             override fun onCancel(arguments: Any?) {
                 eventSink = null
+                OmniInferServer.queueObserver = null
                 OmniInferModelsManager.setEventDispatcher(null)
                 OmniInferMnnModelsManager.setEventDispatcher(null)
                 OmniInferQnnModelsManager.setEventDispatcher(null)
@@ -134,6 +146,7 @@ class MnnLocalModelsChannel {
     }
 
     fun clear() {
+        OmniInferServer.queueObserver = null
         OmniInferModelsManager.setEventDispatcher(null)
         OmniInferMnnModelsManager.setEventDispatcher(null)
         OmniInferQnnModelsManager.setEventDispatcher(null)
@@ -150,8 +163,33 @@ class MnnLocalModelsChannel {
         // when the channel is re-established via setChannel().
     }
 
+    /**
+     * Installed models across every backend. The per-backend calls only see their own directory
+     * (models/llama, models/mnn, models/qnn, models/litert), so a model downloaded for one
+     * backend vanished from the page as soon as another backend was selected.
+     */
+    private fun listAllInstalledModels(): List<Map<String, Any?>> {
+        val merged = LinkedHashMap<String, Map<String, Any?>>()
+        listOf(
+            OmniInferModelsManager.listInstalledModels(),
+            OmniInferMnnModelsManager.listInstalledModels(),
+            OmniInferQnnModelsManager.listInstalledModels(),
+            OmniInferLiteRtModelsManager.listInstalledModels(),
+        ).forEach { models ->
+            models.forEach { model ->
+                val id = model["id"]?.toString()?.trim().orEmpty()
+                if (id.isNotEmpty()) merged.putIfAbsent(id, model)
+            }
+        }
+        return merged.values.toList()
+    }
+
     private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "listAllInstalledModels" -> runSuspend(result) {
+                listAllInstalledModels()
+            }
+
             "getApiAuth" -> {
                 result.success(OmniInferLocalRuntime.apiAuthState())
                 return

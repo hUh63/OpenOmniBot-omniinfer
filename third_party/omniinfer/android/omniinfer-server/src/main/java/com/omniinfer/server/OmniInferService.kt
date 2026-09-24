@@ -26,6 +26,11 @@ import kotlin.coroutines.CoroutineContext
 // request overlaps (active>1) with a previous one, or a previous one never ended.
 private val chatReqSeq = java.util.concurrent.atomic.AtomicLong(0)
 private val activeChatReq = java.util.concurrent.atomic.AtomicInteger(0)
+// Requests waiting for the one inference slot. The native bridge already serialises
+// execution, but a second request then blocks invisibly inside the native mutex; the gate
+// makes the wait observable so /health can report it and the UI can say "排队中".
+private val queuedChatReq = java.util.concurrent.atomic.AtomicInteger(0)
+private val chatGate = kotlinx.coroutines.sync.Semaphore(1)
 
 class OmniInferService : Service() {
     companion object {
@@ -112,7 +117,14 @@ class OmniInferService : Service() {
                 module {
                     routing {
                         get("/health") {
-                            call.respondText("{\"status\":\"ok\"}", ContentType.Application.Json)
+                            // Stays unauthenticated: health probes and the in-app queue
+                            // indicator both read it, sometimes before a token is set.
+                            val json = buildJsonObject {
+                                put("status", "ok")
+                                put("active", activeChatReq.get())
+                                put("queued", queuedChatReq.get())
+                            }
+                            call.respondText(json.toString(), ContentType.Application.Json)
                         }
 
                         get("/v1/models") {
@@ -172,15 +184,30 @@ class OmniInferService : Service() {
 
     private suspend fun handleChatCompletion(call: ApplicationCall) {
         val reqId = chatReqSeq.incrementAndGet()
-        val active = activeChatReq.incrementAndGet()
+        val waiting = queuedChatReq.incrementAndGet()
+        if (waiting > 1) {
+            Log.i(TAG, "chatreq#$reqId QUEUED ahead=${waiting - 1}")
+        }
+        notifyQueueChanged()
         val startedAt = System.currentTimeMillis()
+        chatGate.acquire()
+        queuedChatReq.decrementAndGet()
+        val active = activeChatReq.incrementAndGet()
         Log.i(TAG, "chatreq#$reqId START active=$active")
+        notifyQueueChanged()
         try {
             handleChatCompletionBody(call, reqId)
         } finally {
             Log.i(TAG, "chatreq#$reqId END active=${activeChatReq.decrementAndGet()} " +
                 "elapsed_ms=${System.currentTimeMillis() - startedAt}")
+            chatGate.release()
+            notifyQueueChanged()
         }
+    }
+
+    /** Publishes (active, queued) so the host app can surface "排队中" in its UI. */
+    private fun notifyQueueChanged() {
+        OmniInferServer.onQueueChanged(activeChatReq.get(), queuedChatReq.get())
     }
 
     private suspend fun handleChatCompletionBody(call: ApplicationCall, reqId: Long) {

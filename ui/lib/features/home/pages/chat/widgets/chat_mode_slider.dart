@@ -32,7 +32,22 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
     if (index >= 0) {
       return index;
     }
+    // openclaw shares the workspace slot (see _isVisibleModeSelected); without this the
+    // highlight capsule rested on the first tab while neither icon looked selected.
+    if (widget.activeMode == ChatSurfaceMode.openclaw) {
+      return kVisibleChatSurfaceModes.indexOf(ChatSurfaceMode.workspace);
+    }
     return 0;
+  }
+
+  /// openclaw is rendered by the workspace tab, so both that tab's icon and the highlight
+  /// capsule must treat it as selected.
+  bool _isVisibleModeSelected(ChatSurfaceMode mode) {
+    if (widget.activeMode == mode) {
+      return true;
+    }
+    return mode == ChatSurfaceMode.workspace &&
+        widget.activeMode == ChatSurfaceMode.openclaw;
   }
 
   void _handleDragEnd({double velocity = 0}) {
@@ -115,7 +130,7 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
               children: [
                 Expanded(
                   child: _buildModeIcon(
-                    isSelected: widget.activeMode == ChatSurfaceMode.normal,
+                    isSelected: _isVisibleModeSelected(ChatSurfaceMode.normal),
                     child: widget.primaryAgentId?.trim().isNotEmpty == true
                         ? AgentBrandIcon(
                             key: const ValueKey(
@@ -136,7 +151,7 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
                 ),
                 Expanded(
                   child: _buildModeIcon(
-                    isSelected: widget.activeMode == ChatSurfaceMode.workspace,
+                    isSelected: _isVisibleModeSelected(ChatSurfaceMode.workspace),
                     child: SvgPicture.asset(
                       _workspaceIconAsset,
                       key: const ValueKey('chat-mode-slider-workspace-icon'),

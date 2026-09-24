@@ -8,7 +8,9 @@ data class OfficialProviderDefinition(
     val protocolType: String,
     val wireApi: String,
     val officialProfileFactory: () -> ModelProviderProfile,
-    val officialBaseUrlMatcher: (String?) -> Boolean
+    val officialBaseUrlMatcher: (String?) -> Boolean,
+    /** False when this build cannot offer the provider (e.g. no bundled local engine). */
+    val isAvailable: () -> Boolean = { true }
 ) {
     fun officialProfile(): ModelProviderProfile = officialProfileFactory()
 
@@ -66,25 +68,39 @@ object OfficialProviderRegistry {
             wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
             officialProfileFactory = BailianProvider::officialProfile,
             officialBaseUrlMatcher = BailianProvider::isOfficialBaseUrl
+        ),
+        // The bundled local engine appears as an ordinary provider whose base URL, port and API
+        // key follow whatever the local-model page configured. Only builds that carry the engine
+        // (the omniinfer flavour) offer it.
+        OfficialProviderDefinition(
+            key = MnnLocalProviderStateStore.BUILTIN_SOURCE_TYPE,
+            profileId = MnnLocalProviderStateStore.BUILTIN_PROFILE_ID,
+            displayName = MnnLocalProviderStateStore.BUILTIN_PROFILE_NAME,
+            baseUrl = "",
+            protocolType = "openai_compatible",
+            wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
+            officialProfileFactory = MnnLocalProviderStateStore::getProfile,
+            officialBaseUrlMatcher = { value -> MnnLocalProviderStateStore.isBuiltinProfileId(value) },
+            isAvailable = MnnLocalProviderStateStore::isEnabled
         )
     )
 
-    fun definitions(): List<OfficialProviderDefinition> = providers
+    fun definitions(): List<OfficialProviderDefinition> = providers.filter { it.isAvailable() }
 
-    fun officialProfiles(): List<ModelProviderProfile> = providers.map { it.officialProfile() }
+    fun officialProfiles(): List<ModelProviderProfile> = definitions().map { it.officialProfile() }
 
     fun findByKey(value: String?): OfficialProviderDefinition? {
         val normalized = value?.trim()?.lowercase().orEmpty()
-        return providers.firstOrNull { it.key == normalized }
+        return definitions().firstOrNull { it.key == normalized }
     }
 
     fun findByProfileId(value: String?): OfficialProviderDefinition? {
         val normalized = value?.trim().orEmpty()
-        return providers.firstOrNull { it.profileId == normalized }
+        return definitions().firstOrNull { it.profileId == normalized }
     }
 
     fun findByBaseUrl(value: String?): OfficialProviderDefinition? {
-        return providers.firstOrNull { it.matchesBaseUrl(value) }
+        return definitions().firstOrNull { it.matchesBaseUrl(value) }
     }
 
     fun normalizeSourceType(

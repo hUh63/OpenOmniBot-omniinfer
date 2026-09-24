@@ -274,6 +274,19 @@ class MnnLocalModelsService {
   static Stream<MnnLocalEvent> get eventStream =>
       _events.receiveBroadcastStream().map(MnnLocalEvent.fromDynamic);
 
+  /// Local-server inference slots: `active` is running, `queued` waits for the single slot.
+  /// Emitted whenever the queue changes, so the chat UI can say "排队中" instead of looking
+  /// frozen while a second request waits behind a long prefill.
+  static Stream<MnnLocalEvent> get inferenceQueueStream =>
+      eventStream.where((event) => event.type == 'inferenceQueue');
+
+  /// How many requests are ahead of the newest one (0 when nothing waits).
+  static int queuedFromEvent(MnnLocalEvent event) {
+    final value = event.payload['queued'];
+    final parsed = value is int ? value : int.tryParse('$value');
+    return (parsed ?? 0).clamp(0, 1 << 20);
+  }
+
   static Future<MnnLocalOverviewPayload> getOverview({
     String installedQuery = '',
     String marketQuery = '',
@@ -295,6 +308,16 @@ class MnnLocalModelsService {
     final result = await _channel.invokeMethod<List<dynamic>>(
       'listInstalledModels',
       {'query': query, 'category': category},
+    );
+    return (result ?? const [])
+        .map((item) => MnnLocalModel.fromMap(item as Map?))
+        .toList();
+  }
+
+  /// Installed models from every backend, not just the currently selected one.
+  static Future<List<MnnLocalModel>> listAllInstalledModels() async {
+    final result = await _channel.invokeMethod<List<dynamic>>(
+      'listAllInstalledModels',
     );
     return (result ?? const [])
         .map((item) => MnnLocalModel.fromMap(item as Map?))

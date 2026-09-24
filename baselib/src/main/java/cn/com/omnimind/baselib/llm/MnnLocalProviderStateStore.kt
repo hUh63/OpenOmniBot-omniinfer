@@ -5,7 +5,8 @@ import com.tencent.mmkv.MMKV
 object MnnLocalProviderStateStore {
     const val BUILTIN_PROFILE_ID = "omniinfer-local"
     const val LEGACY_BUILTIN_PROFILE_ID = "mnn-local"
-    const val BUILTIN_PROFILE_NAME = "OmniInfer"
+    const val BUILTIN_PROFILE_NAME = "本地模型服务"
+    const val BUILTIN_SOURCE_TYPE = "omniinfer"
 
     private const val KEY_PORT = "mnn_local_provider_port"
     private const val KEY_API_KEY = "mnn_local_provider_api_key"

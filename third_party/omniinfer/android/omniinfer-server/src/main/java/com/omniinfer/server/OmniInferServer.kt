@@ -90,6 +90,18 @@ object OmniInferServer {
         return diff == 0
     }
 
+    /**
+     * Notified with (active, queued) chat requests whenever the local inference queue changes.
+     * The server module cannot depend on the app module, so the host app subscribes here to
+     * surface "排队中" in its UI.
+     */
+    @Volatile
+    var queueObserver: ((active: Int, queued: Int) -> Unit)? = null
+
+    internal fun onQueueChanged(active: Int, queued: Int) {
+        queueObserver?.invoke(active, queued)
+    }
+
     fun getPort(): Int = serverPort
 
     fun isReady(): Boolean = currentHandle != 0L && serverRunning

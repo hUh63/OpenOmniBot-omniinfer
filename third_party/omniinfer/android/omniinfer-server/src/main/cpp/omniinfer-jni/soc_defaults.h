@@ -39,6 +39,7 @@ static constexpr SocThreadDefault kSocThreadDefaults[] = {
     {"sm8650", 6},  // 8 Gen 3: 1×X4 + 3×A720 + 2×A720 (+ 2×A520 efficiency)
     {"sm8550", 5},  // 8 Gen 2: 1×X3 + 2×A715 + 2×A710 (+ 3×A510 efficiency; 6+ threads regress 30-40%)
     // MediaTek Dimensity
+    {"mt6991", 6},  // 9400/9400+: 1×X925 + 3×X4 + 4×A725 (all big; 6 balances decode vs prefill)
     {"mt6878", 4},  // 7300/7400: 4×A78 + 4×A55 (A55 drags decode, 4 big cores optimal)
 };
 
