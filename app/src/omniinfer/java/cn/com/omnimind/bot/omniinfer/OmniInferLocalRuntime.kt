@@ -27,6 +27,10 @@ object OmniInferLocalRuntime {
     private var appContext: Context? = null
     private val mmkv: MMKV by lazy { MMKV.mmkvWithID(MMKV_ID) }
 
+    // Last values pushed to the on-disk agent file; seeded so the first sync always publishes.
+    private var syncedProviderPort: Int = -1
+    private var syncedProviderApiKey: String = "\u0000"
+
     fun setContext(context: Context) {
         val applicationContext = context.applicationContext
         appContext = applicationContext
@@ -291,11 +295,23 @@ object OmniInferLocalRuntime {
         if (!ready) {
             clearLoadedState()
         }
+        val port = getPort()
+        val apiKey = if (isAuthEnabled()) getApiToken() else ""
         MnnLocalProviderStateStore.update(
-            port = getPort(),
-            apiKey = if (isAuthEnabled()) getApiToken() else "",
+            port = port,
+            apiKey = apiKey,
             ready = ready,
         )
+        // ACP agents and the agent config file read their provider from disk, so a change to the
+        // key or port must be pushed out. Without this they keep sending requests keyless and
+        // every one of them 401s once auth is on.
+        if (port != syncedProviderPort || apiKey != syncedProviderApiKey) {
+            syncedProviderPort = port
+            syncedProviderApiKey = apiKey
+            appContext?.let {
+                OmniInferBuiltinProviderRefresher.refreshAsync(it, "provider_state")
+            }
+        }
     }
 
     private fun clearLoadedState() {
