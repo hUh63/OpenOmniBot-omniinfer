@@ -113,15 +113,27 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.1
+          tag_name: v0.6.3-omniinfer-v6.2
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 修复开了 API Token 后连不上本地模型 (v0.6.3-omniinfer-v6.1)"
+          name: "OmniInfer 版 · 内置「本地模型服务」Provider + 本地模型页统一 + 排队提示 (v0.6.3-omniinfer-v6.2)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.2)：Provider 自动配置、本地模型页统一、排队可见、MT6991 线程。
+
+            - Provider 列表新增内置「本地模型服务」：baseUrl / 端口 / apiKey / 就绪状态
+              跟随本地运行时自动同步，无需手工配置；未打包本地服务的 flavor 自动隐藏，
+              provider 体系其余部分不动。
+            - 本地模型页统一：已安装列表跨全部后端（llama / MNN / QNN / LiteRT）汇总展示并
+              标注后端，模型市场对已在磁盘上的条目打「已安装」标记。
+            - 本地服务对 /v1 聊天请求显式串行，在 /health 上暴露 active / queued 计数；
+              聊天运行头在请求等待唯一推理位时显示「排队中（前面 N 个）」。
+            - MT6991（天玑 9400 / 9400+）默认线程数由 4 提升到 6。
+            - 聊天模式滑块：openclaw 归入工作区标签，高亮胶囊与所选模式图标不再错位。
+
             本轮 (v6.1)：修掉“开了 API Token 就连不上本地模型”。
 
             - 根因：token 只写进了 MnnLocalProviderStateStore，而请求路径的 apiKey 取自 Provider
