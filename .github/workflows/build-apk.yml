@@ -113,15 +113,24 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.2
+          tag_name: v0.6.3-omniinfer-v6.3
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 内置「本地模型服务」Provider + 本地模型页统一 + 排队提示 (v0.6.3-omniinfer-v6.2)"
+          name: "OmniInfer 版 · 同步上游 v0.6.3.3 启动页动画与版本号 (v0.6.3-omniinfer-v6.3)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.3)：同步上游 v0.6.3.1 → v0.6.3.3（新启动页动画 + 版本号）。
+
+            - 取上游的新启动页动画：animator（双眼眨眼 / logo 运动）、drawable（splash
+              背景与动态 logo，含 dark）、values-v31 / values-night-v31 themes、values/dimens，
+              共 13 个文件逐字节取上游；另含 docs/design 与 scripts/generate_splash_animation.py。
+            - versionCode 17 → 18、versionName 0.6.3.1 → 0.6.3.3；app/build.gradle.kts 里的
+              omniinfer 定制（omniinfer flavor、:omniinfer-server 依赖、OmniFlow 组件处理）
+              原样保留，本次只动这两行。
+
             本轮 (v6.2)：Provider 自动配置、本地模型页统一、排队可见、MT6991 线程。
 
             - Provider 列表新增内置「本地模型服务」：baseUrl / 端口 / apiKey / 就绪状态
