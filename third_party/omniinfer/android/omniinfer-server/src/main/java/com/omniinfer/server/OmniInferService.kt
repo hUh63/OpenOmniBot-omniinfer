@@ -190,8 +190,14 @@ class OmniInferService : Service() {
         }
         notifyQueueChanged()
         val startedAt = System.currentTimeMillis()
-        chatGate.acquire()
-        queuedChatReq.decrementAndGet()
+        try {
+            chatGate.acquire()
+        } finally {
+            // A request cancelled while it waits (client disconnect, page exit, timeout) must
+            // still leave the queue; otherwise the counter only ever grows and /health reports
+            // phantom "排队中" entries.
+            queuedChatReq.decrementAndGet()
+        }
         val active = activeChatReq.incrementAndGet()
         Log.i(TAG, "chatreq#$reqId START active=$active")
         notifyQueueChanged()

@@ -113,15 +113,26 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.3
+          tag_name: v0.6.3-omniinfer-v6.3.1
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 同步上游 v0.6.3.3 启动页动画与版本号 (v0.6.3-omniinfer-v6.3)"
+          name: "OmniInfer 版 · 修复排队计数取消泄漏 (v0.6.3-omniinfer-v6.3.1)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.3.1)：修掉本地服务排队计数在「等待中被取消」时的泄漏。
+
+            - 根因：handleChatCompletion 里 queuedChatReq 先 +1，再 chatGate.acquire()。
+              若请求还在排队时客户端断开（HTTP 超时 / 离开页面 / 切换模型），Ktor 取消该
+              handler，acquire() 抛 CancellationException，而后面的 decrement 永不执行 ——
+              计数只增不减。
+            - 影响：此后 /health 的 queued 一直偏大，聊天头会一直显示「排队中（前面 N 个）」，
+              即使实际没有请求在排队。
+            - 修复：把 decrement 放进 try/finally 包住 acquire()，取消路径也会正确回退计数；
+              正常路径行为不变。
+
             本轮 (v6.3)：同步上游 v0.6.3.1 → v0.6.3.3（新启动页动画 + 版本号）。
 
             - 取上游的新启动页动画：animator（双眼眨眼 / logo 运动）、drawable（splash
