@@ -205,7 +205,10 @@ object OmniInferLanProxyManager {
             call.receiveText()
         }
         val requestBuilder = Request.Builder()
-            .url("http://127.0.0.1:$targetPort$path")
+            .url(
+                "http://127.0.0.1:$targetPort$path" +
+                    call.request.queryString().let { q -> if (q.isEmpty()) "" else "?$q" }
+            )
             .method(
                 call.request.httpMethod.value,
                 bodyText?.toRequestBody(
@@ -213,7 +216,14 @@ object OmniInferLanProxyManager {
                 )
             )
 
+        // Forward auth as well: the proxy checks the token itself, but the upstream service
+        // (OmniInferService) enforces it too, so dropping Authorization made every proxied
+        // request 401 as soon as a token was configured.
         call.request.headers[HttpHeaders.Accept]?.let { requestBuilder.header(HttpHeaders.Accept, it) }
+        call.request.headers[HttpHeaders.Authorization]?.let {
+            requestBuilder.header(HttpHeaders.Authorization, it)
+        }
+        call.request.headers["x-api-key"]?.let { requestBuilder.header("x-api-key", it) }
 
         val response = httpClient.newCall(requestBuilder.build()).execute()
         response.use { upstream ->

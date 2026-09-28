@@ -393,9 +393,18 @@ object OmniInferQnnModelsManager {
             throw RuntimeException("Download failed: HTTP ${response.code} for $url")
         }
 
+        // A server that ignores Range answers 200 with the whole file. Appending that to the
+        // existing .part would silently corrupt it, so fall back to a full rewrite (and undo
+        // the resume byte accounting done above).
+        val resumed = startByte > 0 && response.code == 206
+        if (startByte > 0 && !resumed) {
+            state.savedSize -= startByte
+            state.progress = if (state.totalSize > 0) state.savedSize.toDouble() / state.totalSize else 0.0
+        }
+
         val body = response.body ?: throw RuntimeException("Empty response body for $url")
-        val outputStream = if (startByte > 0) {
-            // Append mode for resume
+        val outputStream = if (resumed) {
+            // Append mode only for a genuine partial response
             java.io.FileOutputStream(partFile, true)
         } else {
             java.io.FileOutputStream(partFile)

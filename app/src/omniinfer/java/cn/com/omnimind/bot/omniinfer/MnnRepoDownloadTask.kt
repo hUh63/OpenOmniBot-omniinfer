@@ -49,6 +49,9 @@ class MnnRepoDownloadTask(
     private val cancelled = AtomicBoolean(false)
     private var activeCall: Call? = null
 
+    /** True once [cancel] ran; [execute] then returns normally instead of throwing. */
+    val isCancelled: Boolean get() = cancelled.get()
+
     @Volatile
     var info = MnnDownloadInfo(downloadState = MnnDownloadState.PREPARING)
         private set

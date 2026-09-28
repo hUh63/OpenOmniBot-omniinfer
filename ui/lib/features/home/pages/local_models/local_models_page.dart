@@ -2142,7 +2142,14 @@ class _LocalModelsPageState extends State<LocalModelsPage>
               if (!model.readOnly)
                 OutlinedButton.icon(
                   onPressed: () async {
-                    await MnnLocalModelsService.deleteModel(model.id);
+                    try {
+                      await MnnLocalModelsService.deleteModel(model.id);
+                    } catch (e) {
+                      debugPrint(
+                        '[LocalModels] delete model=${model.id} failed: $e',
+                      );
+                    }
+                    if (!mounted) return;
                     _refreshInstalled(silent: true);
                     _refreshMarket(silent: true);
                   },
@@ -2439,7 +2446,14 @@ class _LocalModelsPageState extends State<LocalModelsPage>
               if (isCompleted)
                 FilledButton.icon(
                   onPressed: () async {
-                    await MnnLocalModelsService.deleteModel(model.id);
+                    try {
+                      await MnnLocalModelsService.deleteModel(model.id);
+                    } catch (e) {
+                      debugPrint(
+                        '[LocalModels] delete model=${model.id} failed: $e',
+                      );
+                    }
+                    if (!mounted) return;
                     _refreshMarket(silent: true);
                     _refreshInstalled(silent: true);
                   },

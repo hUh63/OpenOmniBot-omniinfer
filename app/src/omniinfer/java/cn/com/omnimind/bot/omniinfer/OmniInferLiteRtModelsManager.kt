@@ -50,6 +50,8 @@ object OmniInferLiteRtModelsManager {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    fun activeDownloadCount(): Int = activeDownloads.size
+
     /**
      * Resolve which LiteRT-LM backend string to hand to the runtime.
      *

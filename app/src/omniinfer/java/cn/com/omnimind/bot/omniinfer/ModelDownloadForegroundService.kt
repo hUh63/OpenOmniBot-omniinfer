@@ -159,10 +159,14 @@ class ModelDownloadForegroundService : Service() {
             }
         }
 
-        /** Convenience: stop only if there are no active downloads across both managers. */
+        /** Convenience: stop only if there are no active downloads across all backends. */
         fun stopIfIdle(context: Context) {
+            // Every backend counts: a QNN/LiteRT download must not lose the foreground
+            // service just because an llama/MNN download happened to finish first.
             val totalActive = OmniInferModelsManager.activeDownloadCount() +
-                OmniInferMnnModelsManager.activeDownloadCount()
+                OmniInferMnnModelsManager.activeDownloadCount() +
+                OmniInferQnnModelsManager.activeDownloadCount() +
+                OmniInferLiteRtModelsManager.activeDownloadCount()
             if (totalActive == 0) {
                 stop(context)
             } else {

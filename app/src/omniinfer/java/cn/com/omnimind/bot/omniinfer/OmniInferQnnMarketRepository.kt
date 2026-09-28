@@ -45,16 +45,15 @@ object OmniInferQnnMarketRepository {
     }
 
     fun getDeviceSoc(): String {
-        val soc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Build.SOC_MODEL.trim()
-        } else {
-            ""
-        }
+        // Build.SOC_MODEL only exists on API 31+; minSdk is 29, so the field must be
+        // guarded on *every* access -- including the log line, which used to throw
+        // NoSuchFieldError on Android 10/11 and crash the QNN market page.
+        val soc = runCatching { Build.SOC_MODEL.trim() }.getOrDefault("")
         OmniLog.i(
             TAG,
-            "[getDeviceSoc] Build.SOC_MODEL='${Build.SOC_MODEL}', " +
+            "[getDeviceSoc] Build.SOC_MODEL='$soc', " +
                 "Build.HARDWARE='${Build.HARDWARE}', Build.BOARD='${Build.BOARD}', " +
-                "Build.DEVICE='${Build.DEVICE}', normalized='$soc'",
+                "Build.DEVICE='${Build.DEVICE}'",
         )
         return soc
     }

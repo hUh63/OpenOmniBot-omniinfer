@@ -271,8 +271,28 @@ class MnnLocalModelsService {
     'cn.com.omnimind.bot/MnnLocalModelsEvents',
   );
 
-  static Stream<MnnLocalEvent> get eventStream =>
-      _events.receiveBroadcastStream().map(MnnLocalEvent.fromDynamic);
+  /// One native subscription for the whole app. `receiveBroadcastStream()` installs the
+  /// channel's message handler under a fixed channel name, so a second call silently
+  /// orphans the first listener and cancelling either one clears the handler for everyone.
+  /// Wire the native channel exactly once and fan out through this controller instead.
+  static final StreamController<MnnLocalEvent> _eventController =
+      StreamController<MnnLocalEvent>.broadcast();
+  static bool _nativeEventsWired = false;
+
+  static Stream<MnnLocalEvent> get eventStream {
+    _ensureNativeEvents();
+    return _eventController.stream;
+  }
+
+  static void _ensureNativeEvents() {
+    if (_nativeEventsWired) return;
+    _nativeEventsWired = true;
+    _events.receiveBroadcastStream().listen(
+      (dynamic event) => _eventController.add(MnnLocalEvent.fromDynamic(event)),
+      // A flavour without the bundled server never registers the channel.
+      onError: (Object _) {},
+    );
+  }
 
   /// Local-server inference slots: `active` is running, `queued` waits for the single slot.
   /// Emitted whenever the queue changes, so the chat UI can say "排队中" instead of looking

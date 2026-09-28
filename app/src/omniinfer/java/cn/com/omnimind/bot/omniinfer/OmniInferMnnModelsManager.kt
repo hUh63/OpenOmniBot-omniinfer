@@ -303,12 +303,19 @@ object OmniInferMnnModelsManager {
                     emitDownloadUpdate(resolved.modelId, info)
                 }
                 activeDownloads.remove(resolved.downloadId)
-                emitDownloadUpdate(resolved.modelId, task.info)
-                emitEvent("downloads_changed", emptyMap())
-                ModelDownloadForegroundService.stopIfIdle(context)
-                OmniInferBuiltinProviderRefresher.refreshAsync(
-                    context, "mnn_download_finished:${resolved.modelId}"
-                )
+                if (task.isCancelled) {
+                    // A cancelled task returns normally, so without this the stale
+                    // DOWNLOADING snapshot would overwrite the PAUSED state that
+                    // pauseDownload already emitted. Only refresh the list.
+                    emitEvent("downloads_changed", emptyMap())
+                } else {
+                    emitDownloadUpdate(resolved.modelId, task.info)
+                    emitEvent("downloads_changed", emptyMap())
+                    ModelDownloadForegroundService.stopIfIdle(context)
+                    OmniInferBuiltinProviderRefresher.refreshAsync(
+                        context, "mnn_download_finished:${resolved.modelId}"
+                    )
+                }
             } catch (_: Exception) {
                 activeDownloads.remove(resolved.downloadId)
                 emitDownloadUpdate(resolved.modelId, task.info)

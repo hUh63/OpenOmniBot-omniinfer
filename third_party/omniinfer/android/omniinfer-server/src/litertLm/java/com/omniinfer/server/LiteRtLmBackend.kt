@@ -43,6 +43,7 @@ internal class LiteRtLmBackend private constructor(
     private val engineInitMs: Double,
 ) : LiteRtLmSession {
     private val lock = Any()
+    @Volatile
     private var activeConversation: Conversation? = null
     private var lastDiagnostics: Map<String, String> = baseDiagnostics()
 
@@ -134,9 +135,11 @@ internal class LiteRtLmBackend private constructor(
     }
 
     override fun cancel() {
-        synchronized(lock) {
-            runCatching { activeConversation?.cancelProcess() }
-        }
+        // Do NOT take [lock]: generate() holds it for the whole run, so waiting here would
+        // block until generation ends and turn cancel into a no-op. cancelProcess is safe to
+        // call off-lock; only the @Volatile reference is read.
+        val conversation = activeConversation
+        runCatching { conversation?.cancelProcess() }
     }
 
     override fun reset() {

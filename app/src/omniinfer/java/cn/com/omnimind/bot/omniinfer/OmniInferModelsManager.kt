@@ -461,7 +461,9 @@ object OmniInferModelsManager {
         if (getActiveModelId() == modelId) {
             mmkv.encode(KEY_ACTIVE_MODEL_ID, "")
         }
-        activeDownloads.remove(modelId)
+        // Cancel an in-flight download too: dropping the map entry alone would leave the
+        // task writing to .part files that were just deleted (and holding their disk space).
+        activeDownloads.remove(modelId)?.cancel()
         emitConfigChanged()
         appContext?.let {
             OmniInferBuiltinProviderRefresher.refreshAsync(it, "llama_delete:$modelId")
