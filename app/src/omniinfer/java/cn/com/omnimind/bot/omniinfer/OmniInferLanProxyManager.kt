@@ -205,10 +205,7 @@ object OmniInferLanProxyManager {
             call.receiveText()
         }
         val requestBuilder = Request.Builder()
-            .url(
-                "http://127.0.0.1:$targetPort$path" +
-                    call.request.queryString().let { q -> if (q.isEmpty()) "" else "?$q" }
-            )
+            .url("http://127.0.0.1:$targetPort$path")
             .method(
                 call.request.httpMethod.value,
                 bodyText?.toRequestBody(
