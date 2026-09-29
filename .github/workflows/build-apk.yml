@@ -113,15 +113,33 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.3.1
+          tag_name: v0.6.3-omniinfer-v6.4
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 修复排队计数取消泄漏 (v0.6.3-omniinfer-v6.3.1)"
+          name: "OmniInfer 版 · 本地模型全链路审计修复 (v0.6.3-omniinfer-v6.4)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.4)：本地模型全链路代码审计后的批量修复。
+
+            - Flutter 事件流改为单例订阅：eventStream 不再每次访问都新建 receiveBroadcastStream()，
+              多个 UI 监听者共享一条原生流。此前任一订阅 cancel 会拆掉全部原生分发，导致「排队中」
+              指示卡死、下载事件丢失。
+            - QNN 模型市场：Build.SOC_MODEL（API 31 字段）的日志访问也加版本守卫，修掉 Android
+              10/11 打开该页必崩。
+            - 前台下载服务 stopIfIdle 改为统计全部四个后端（此前只算 llama+MNN，QNN/LiteRT
+              下载中会被误停）。
+            - 删除模型时取消进行中的下载（此前只移除引用，.part 文件占用的磁盘不释放）。
+            - MNN 暂停下载后不再用陈旧的「下载中」快照覆盖「已暂停」状态。
+            - QNN 断点续传：服务器忽略 Range 返回 200 时改为整文件重写，不再把全量数据追加到
+              半成品文件上（会静默产出损坏模型）。
+            - 局域网代理转发时透传 Authorization / x-api-key，修掉开启 API Token 后 LAN 设备
+              全部 401。
+            - LiteRT 后端：cancel() 不再争抢 generate() 的锁，停止生成真正生效。
+            - 本地模型页两处删除按钮补异常保护。
+
             本轮 (v6.3.1)：修掉本地服务排队计数在「等待中被取消」时的泄漏。
 
             - 根因：handleChatCompletion 里 queuedChatReq 先 +1，再 chatGate.acquire()。
