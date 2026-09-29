@@ -903,6 +903,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       lastUsedAt: current.lastUsedAt,
       downloadedAt: current.downloadedAt,
       readOnly: current.readOnly,
+      backend: current.backend,
       download: download,
     );
     setState(() {

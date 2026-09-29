@@ -71,6 +71,10 @@ class MnnLocalModel {
   final bool readOnly;
   final MnnLocalDownloadInfo? download;
 
+  /// Backend this model belongs to. The installed list merges all four backends, so an
+  /// action on an entry must target its own backend rather than the selected one.
+  final String backend;
+
   const MnnLocalModel({
     required this.id,
     required this.name,
@@ -92,6 +96,7 @@ class MnnLocalModel {
     required this.downloadedAt,
     required this.readOnly,
     this.download,
+    this.backend = kBackendLlamaCpp,
   });
 
   factory MnnLocalModel.fromMap(Map<dynamic, dynamic>? map) {
@@ -122,6 +127,7 @@ class MnnLocalModel {
       download: map?['download'] is Map
           ? MnnLocalDownloadInfo.fromMap(map?['download'] as Map?)
           : null,
+      backend: normalizeInferenceBackend(map?['backend']),
     );
   }
 }
