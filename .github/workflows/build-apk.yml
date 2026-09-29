@@ -113,15 +113,38 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.4
+          tag_name: v0.6.3-omniinfer-v6.5
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 本地模型全链路审计修复 (v0.6.3-omniinfer-v6.4)"
+          name: "OmniInfer 版 · 本地模型审计收尾：下载链路 + 跨后端操作 (v0.6.3-omniinfer-v6.5)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.5)：本地模型审计遗留问题收尾——下载链路健壮性、跨后端操作路由、并发与 JNI 生命周期。
+
+            下载链路（四个后端通用）：
+            - 下载完成后统一做完整性校验再落位，renameTo 失败显式报错（此前被静默吞掉，页面却显示成功）。
+            - 断点续传遇到 HTTP 416（Range 超出文件末尾）按已完成处理，不再当成错误。
+            - llama.cpp 下载在异常路径也关闭 response（try/finally），不再泄漏连接。
+            - MNN 修复“下载实际失败却报成功”。
+
+            跨后端操作路由：
+            - 已安装列表跨四个后端合并展示，但“加载 / 设为当前”此前总是发给当前选中的后端——
+              对非当前后端的模型会静默命中错误的管理器。现在 setActiveModel / startApiService
+              支持显式 backend，页面逐条透传模型自身的后端。
+            - MnnLocalModel 补 backend 字段并在状态更新复制时保留，不再丢失。
+
+            并发与生命周期：
+            - EngineDownloader 的 downloadAndInstall / installFromZip 加 @Synchronized（共享固定
+              zip 路径与 staging 目录，并发安装会互相清空）。
+            - NativeLibs.resolve() 加锁（并发首次使用会在 staging + rename 上互相踩踏）。
+            - JNI：g_sessions 改用 shared_ptr 保存，generate / reset / load_history 在跨锁等待期间
+              持有引用，消除“lookup 之后、加锁之前”被 NativeFree 释放的 use-after-free 窗口。
+            - MNN：存在 .part 残留的未完成下载不再列入已安装列表；反查市场模型时优先当前下载源，
+              downloadId 与实际任务一致（此前双源模型删除时 cancel 落空）。
+
             本轮 (v6.4)：本地模型全链路代码审计后的批量修复。
 
             - Flutter 事件流改为单例订阅：eventStream 不再每次访问都新建 receiveBroadcastStream()，
