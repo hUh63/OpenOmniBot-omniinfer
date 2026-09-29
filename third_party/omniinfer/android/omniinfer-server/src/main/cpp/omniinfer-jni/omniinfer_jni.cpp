@@ -93,7 +93,11 @@ struct Session {
 };
 
 std::mutex g_sessions_mutex;
-std::unordered_map<int64_t, Session*> g_sessions;
+// shared_ptr so a JNI entry point that looked a session up (NativeGenerate / NativeReset /
+// NativeLoadHistory) keeps it alive even if NativeFree erases it concurrently. With a raw
+// pointer there was a use-after-free window between taking the pointer out of the map and
+// acquiring session->mtx -- NativeFree could delete the session in that gap.
+std::unordered_map<int64_t, std::shared_ptr<Session>> g_sessions;
 std::atomic<int64_t> g_next_handle{1};
 
 // ---------------------------------------------------------------------------
@@ -361,7 +365,7 @@ jlong NativeInit(JNIEnv* env, jobject, jstring config_json) {
     return 0;
   }
 
-  auto* session = new Session();
+  auto session = std::make_shared<Session>();
   session->handle = g_next_handle.fetch_add(1);
   session->backend = std::move(backend);
 
@@ -381,7 +385,9 @@ jstring NativeGetLastError(JNIEnv* env, jobject) {
 
 jstring NativeGenerate(JNIEnv* env, jobject, jlong handle, jstring system_prompt,
                        jstring prompt, jstring request_json, jobjectArray image_data_array, jobject callback) {
-  Session* session = nullptr;
+  // Keep the session alive across the (unlocked) wait for session->mtx below: a concurrent
+  // NativeFree may erase it from the map meanwhile.
+  std::shared_ptr<Session> session;
   {
     std::lock_guard<std::mutex> guard(g_sessions_mutex);
     auto it = g_sessions.find(static_cast<int64_t>(handle));
@@ -483,7 +489,7 @@ jstring NativeGenerate(JNIEnv* env, jobject, jlong handle, jstring system_prompt
 }
 
 jboolean NativeLoadHistory(JNIEnv* env, jobject, jlong handle, jobjectArray roles, jobjectArray contents) {
-  Session* session = nullptr;
+  std::shared_ptr<Session> session;
   {
     std::lock_guard<std::mutex> guard(g_sessions_mutex);
     auto it = g_sessions.find(static_cast<int64_t>(handle));
@@ -517,7 +523,7 @@ void NativeSetThinkMode(JNIEnv*, jobject, jlong handle, jboolean enabled) {
 }
 
 void NativeReset(JNIEnv*, jobject, jlong handle) {
-  Session* session = nullptr;
+  std::shared_ptr<Session> session;
   {
     std::lock_guard<std::mutex> guard(g_sessions_mutex);
     auto it = g_sessions.find(static_cast<int64_t>(handle));
@@ -554,10 +560,12 @@ constexpr auto kFreeDrainTimeout = std::chrono::seconds(2);
 // Waits for the session's in-flight generate() to return and only then destroys
 // the session, off the calling thread. Reached only when the bounded drain
 // expires, so it does not leak: it reclaims the session as soon as it is idle.
-void DestroySessionWhenIdle(Session* session, int64_t handle) {
-  std::thread([session, handle]() {
+// Takes the shared_ptr so the session stays alive until the reaper gets the lock.
+void DestroySessionWhenIdle(std::shared_ptr<Session> session, int64_t handle) {
+  std::thread([session = std::move(session), handle]() {
     std::lock_guard<std::timed_mutex> lock(session->mtx);
-    delete session;
+    // The reference count reaches zero here (no JNI entry point can still hold it) and
+    // the session is destroyed; there is nothing to delete explicitly any more.
     LogPrint(ANDROID_LOG_INFO,
              "NativeFree: session " + std::to_string(handle) +
              " destroyed by reaper once the in-flight generate() returned");
@@ -565,7 +573,7 @@ void DestroySessionWhenIdle(Session* session, int64_t handle) {
 }
 
 void NativeFree(JNIEnv*, jobject, jlong handle) {
-  Session* session = nullptr;
+  std::shared_ptr<Session> session;
   {
     std::lock_guard<std::mutex> guard(g_sessions_mutex);
     auto it = g_sessions.find(static_cast<int64_t>(handle));
@@ -583,7 +591,8 @@ void NativeFree(JNIEnv*, jobject, jlong handle) {
 
   if (session->mtx.try_lock_for(kFreeDrainTimeout)) {
     session->mtx.unlock();
-    delete session;
+    // Dropping the last reference frees the session (a generate() still holding its own
+    // shared_ptr keeps it alive until it returns).
     LogPrint(ANDROID_LOG_INFO, "NativeFree: session " + std::to_string(handle) + " destroyed");
     return;
   }
@@ -592,7 +601,7 @@ void NativeFree(JNIEnv*, jobject, jlong handle) {
            "NativeFree: session " + std::to_string(handle) +
            " still generating after " + std::to_string(kFreeDrainTimeout.count()) +
            "s; destroying it on a reaper thread instead of blocking the caller");
-  DestroySessionWhenIdle(session, handle);
+  DestroySessionWhenIdle(std::move(session), handle);
 }
 
 jstring NativeCollectDiagnosticsJson(JNIEnv* env, jobject, jlong handle) {

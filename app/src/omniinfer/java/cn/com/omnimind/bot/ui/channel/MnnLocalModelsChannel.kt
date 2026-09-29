@@ -322,7 +322,12 @@ class MnnLocalModelsChannel {
             }
         }
 
-        when (getSelectedBackend()) {
+        // The installed list merges all four backends, so a call may target a model that does
+        // not belong to the currently selected backend (load / set-active on a cross-backend
+        // entry). Such calls pass an explicit "backend"; everything else uses the selection.
+        val explicitBackend = call.argument<String>("backend")
+            ?.let { OmniInferLocalRuntime.normalizeBackend(it) }
+        when (explicitBackend ?: getSelectedBackend()) {
             OmniInferLocalRuntime.BACKEND_OMNIINFER_MNN -> handleMnnCall(call, result)
             OmniInferLocalRuntime.BACKEND_EXECUTORCH_QNN -> handleQnnCall(call, result)
             OmniInferLocalRuntime.BACKEND_LITERT -> handleLiteRtCall(call, result)

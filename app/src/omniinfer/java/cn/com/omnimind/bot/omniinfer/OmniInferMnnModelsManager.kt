@@ -476,38 +476,36 @@ object OmniInferMnnModelsManager {
 
         val allModels = OmniInferMnnMarketRepository.allModels()
 
-        // Build lookup: directory name → resolved market model
+        // Prefer the model from the currently selected download source, so the recorded
+        // downloadId matches the task the user actually started. A model that exists on both
+        // HuggingFace and ModelScope otherwise resolved to the wrong source and made
+        // delete() cancel nothing.
+        val preferredSource = getDownloadProvider()
         val dirNameToModel = mutableMapOf<String, OmniInferMnnMarketRepository.ResolvedMarketModel>()
         for (model in allModels) {
             val dirName = model.repoPath.substringAfterLast('/')
-            dirNameToModel.putIfAbsent(dirName, model)
+            val existing = dirNameToModel[dirName]
+            if (existing == null ||
+                (existing.source != preferredSource && model.source == preferredSource)
+            ) {
+                dirNameToModel[dirName] = model
+            }
         }
 
         return scanModelDirectories(mnnDir).mapNotNull { modelDir ->
             val configFile = File(modelDir, "config.json")
             if (!configFile.exists()) return@mapNotNull null
 
+            // Unfinished downloads (any .part still present) are not installed. They stay
+            // visible in the market tab as PAUSED/resumable, but must not appear as loadable
+            // models here -- that let users pick a half-written model.
+            if (modelDir.walkTopDown().any { it.isFile && it.name.endsWith(".part") }) {
+                return@mapNotNull null
+            }
+
             val dirName = modelDir.name
             val resolved = dirNameToModel[dirName]
-            val activeTask = resolved?.let { activeDownloads[it.downloadId] }
-            val downloadInfo = activeTask?.info ?: run {
-                val hasPartFiles = modelDir.walkTopDown()
-                    .any { it.isFile && it.name.endsWith(".part") }
-                if (hasPartFiles) {
-                    val savedSize = modelDir.walkTopDown()
-                        .filter { it.isFile }
-                        .sumOf { it.length() }
-                    val total = resolved?.item?.fileSize?.takeIf { it > 0L } ?: savedSize
-                    MnnDownloadInfo(
-                        downloadState = MnnDownloadState.DOWNLOAD_PAUSED,
-                        progress = if (total > 0) savedSize.toDouble() / total else 0.0,
-                        totalSize = total,
-                        savedSize = savedSize,
-                    )
-                } else {
-                    null
-                }
-            }
+            val downloadInfo = resolved?.let { activeDownloads[it.downloadId]?.info }
 
             InstalledModelRecord(
                 id = resolved?.modelId ?: dirName,

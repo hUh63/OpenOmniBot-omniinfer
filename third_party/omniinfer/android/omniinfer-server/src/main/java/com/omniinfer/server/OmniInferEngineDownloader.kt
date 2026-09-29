@@ -48,6 +48,12 @@ object OmniInferEngineDownloader {
      * @throws OmniInferEngineException when the download, checksum, extraction or
      *   manifest verification fails.
      */
+    /**
+     * The engine zip lives at a fixed path and the staging directory is shared, so the whole
+     * install path is serialised: two concurrent installs would delete each other's staging
+     * dir and clobber the zip.
+     */
+    @Synchronized
     fun downloadAndInstall(
         context: Context,
         engineUrl: String,
@@ -69,6 +75,7 @@ object OmniInferEngineDownloader {
      * Extract and install an engine zip that is already on disk (e.g. sideloaded by
      * the user). The zip itself is still checksum-verified per library.
      */
+    @Synchronized
     fun installFromZip(
         context: Context,
         zip: File,

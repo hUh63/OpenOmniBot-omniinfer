@@ -83,15 +83,20 @@ object OmniInferNativeLibs {
     @Volatile
     private var cachedResolvedDir: String? = null
 
+    /** Guards [computeResolvedDir]; building the filtered dir uses a staging dir + rename. */
+    private val resolveLock = Any()
+
     /**
      * Native directory to pass to the backend for [context].
      * Never returns null; falls back to `applicationInfo.nativeLibraryDir`.
      */
     fun resolve(context: Context): String {
         cachedResolvedDir?.let { return it }
-        val resolved = computeResolvedDir(context)
-        cachedResolvedDir = resolved
-        return resolved
+        // Several threads can race here on first use; an unsynchronised race could let two
+        // builders clobber each other's staging directory.
+        return synchronized(resolveLock) {
+            cachedResolvedDir ?: computeResolvedDir(context).also { cachedResolvedDir = it }
+        }
     }
 
     private fun computeResolvedDir(context: Context): String {

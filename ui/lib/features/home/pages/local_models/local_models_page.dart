@@ -509,9 +509,12 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     }
   }
 
-  Future<void> _setActiveModel(String? modelId) async {
+  Future<void> _setActiveModel(String? modelId, {String? backend}) async {
     try {
-      final config = await MnnLocalModelsService.setActiveModel(modelId);
+      final config = await MnnLocalModelsService.setActiveModel(
+        modelId,
+        backend: backend,
+      );
       if (!mounted) return;
       setState(() => _config = config);
       _refreshInstalled(silent: true);
@@ -712,7 +715,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     }
   }
 
-  Future<void> _startApiService({String? modelId}) async {
+  Future<void> _startApiService({String? modelId, String? backend}) async {
     final targetModelId = modelId?.trim().isNotEmpty == true
         ? modelId!.trim()
         : _config?.activeModelId.trim() ?? '';
@@ -728,6 +731,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     try {
       final config = await MnnLocalModelsService.startApiService(
         modelId: targetModelId,
+        backend: backend,
       );
       if (!mounted) return;
       setState(() => _config = config);
@@ -2104,7 +2108,10 @@ class _LocalModelsPageState extends State<LocalModelsPage>
               FilledButton.icon(
                 onPressed: _serviceBusy
                     ? null
-                    : () => _startApiService(modelId: model.id),
+                    : () => _startApiService(
+                        modelId: model.id,
+                        backend: model.backend,
+                      ),
                 style: _softButtonStyle(
                   tone: isLoaded ? _AccentTone.success : _AccentTone.accent,
                 ),
@@ -2131,7 +2138,8 @@ class _LocalModelsPageState extends State<LocalModelsPage>
               ),
               if (!model.active)
                 FilledButton.icon(
-                  onPressed: () => _setActiveModel(model.id),
+                  onPressed: () =>
+                      _setActiveModel(model.id, backend: model.backend),
                   style: _softButtonStyle(tone: _AccentTone.accent),
                   icon: const Icon(
                     Icons.playlist_add_check_circle_rounded,

@@ -422,18 +422,24 @@ class MnnLocalModelsService {
     return MnnLocalConfig.fromMap(result);
   }
 
-  static Future<MnnLocalConfig> setActiveModel(String? modelId) async {
+  static Future<MnnLocalConfig> setActiveModel(
+    String? modelId, {
+    String? backend,
+  }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'setActiveModel',
-      {'modelId': modelId},
+      {'modelId': modelId, if (backend != null) 'backend': backend},
     );
     return MnnLocalConfig.fromMap(result);
   }
 
-  static Future<MnnLocalConfig> startApiService({String? modelId}) async {
+  static Future<MnnLocalConfig> startApiService({
+    String? modelId,
+    String? backend,
+  }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'startApiService',
-      {'modelId': modelId},
+      {'modelId': modelId, if (backend != null) 'backend': backend},
     );
     return MnnLocalConfig.fromMap(result);
   }
