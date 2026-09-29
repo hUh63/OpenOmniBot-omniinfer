@@ -893,42 +893,68 @@ object OmniInferModelsManager {
             }
             call = OmniInferModelsManager.client.newCall(requestBuilder.build())
             val response = call!!.execute()
+            // A stale .part can already hold the whole file, so the Range request is
+            // unsatisfiable and the server answers 416; drop it and restart cleanly
+            // instead of failing on every retry.
+            if (response.code == 416) {
+                runCatching { response.close() }
+                tempFile.delete()
+                throw IOException("HTTP 416 (stale .part removed)")
+            }
             if (!response.isSuccessful && response.code != 206) {
+                runCatching { response.close() }
                 throw IOException("HTTP ${response.code}")
             }
-            val body = response.body ?: throw IOException("Empty body")
+            val body = response.body ?: run {
+                runCatching { response.close() }
+                throw IOException("Empty body")
+            }
             val contentLength = body.contentLength()
             totalSize = if (response.code == 206) existingSize + contentLength else contentLength
             savedSize = if (response.code == 206) existingSize else 0L
-            val output = RandomAccessFile(tempFile, "rw")
-            if (response.code == 206) {
-                output.seek(existingSize)
-            } else {
-                output.setLength(0)
-            }
-            val buffer = ByteArray(8192)
-            val input = body.byteStream()
-            var lastEmitTime = 0L
-            while (!cancelled.get()) {
-                val read = input.read(buffer)
-                if (read == -1) break
-                output.write(buffer, 0, read)
-                savedSize += read
-                progress = if (totalSize > 0) savedSize.toDouble() / totalSize else 0.0
-                val now = System.currentTimeMillis()
-                if (now - lastEmitTime > 500) {
-                    lastEmitTime = now
-                    OmniInferModelsManager.emitEvent("downloads_changed", mapOf("modelId" to modelId))
+            var output: RandomAccessFile? = null
+            var input: java.io.InputStream? = null
+            try {
+                output = RandomAccessFile(tempFile, "rw")
+                if (response.code == 206) {
+                    output.seek(existingSize)
+                } else {
+                    output.setLength(0)
                 }
+                val buffer = ByteArray(8192)
+                input = body.byteStream()
+                var lastEmitTime = 0L
+                while (!cancelled.get()) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    output.write(buffer, 0, read)
+                    savedSize += read
+                    progress = if (totalSize > 0) savedSize.toDouble() / totalSize else 0.0
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmitTime > 500) {
+                        lastEmitTime = now
+                        OmniInferModelsManager.emitEvent("downloads_changed", mapOf("modelId" to modelId))
+                    }
+                }
+            } finally {
+                // These used to leak on any IO error (every close below was skipped).
+                runCatching { output?.close() }
+                runCatching { input?.close() }
+                runCatching { body.closeQuietly() }
+                runCatching { response.close() }
             }
-            output.close()
-            input.close()
-            body.closeQuietly()
-            if (!cancelled.get()) {
-                tempFile.renameTo(dest)
-                return true
+            if (cancelled.get()) {
+                return false
             }
-            return false
+            // A short read means the connection dropped early; keep the .part so the retry
+            // can resume, and never promote a truncated file to a real model.
+            if (totalSize > 0 && savedSize < totalSize) {
+                throw IOException("Incomplete download ($savedSize/$totalSize)")
+            }
+            if (!tempFile.renameTo(dest)) {
+                throw IOException("Failed to finalize ${dest.name}")
+            }
+            return true
         }
 
         /**

@@ -356,6 +356,11 @@ object OmniInferQnnModelsManager {
             state = state,
             onProgress = { onProgress(it) },
         )
+
+        // Both files must be fully on disk before the model counts as installed.
+        if (state.totalSize > 0 && state.savedSize < state.totalSize) {
+            throw RuntimeException("Incomplete download (${state.savedSize}/${state.totalSize})")
+        }
     }
 
     private fun downloadFile(
@@ -388,6 +393,13 @@ object OmniInferQnnModelsManager {
         }
 
         val response = httpClient.newCall(requestBuilder.build()).execute()
+        // A stale .part can already hold the whole file; the Range request is then
+        // unsatisfiable and the server answers 416. Drop the .part and restart cleanly.
+        if (response.code == 416) {
+            response.close()
+            partFile.delete()
+            throw RuntimeException("Download failed: HTTP 416 (stale .part removed) for $url")
+        }
         if (!response.isSuccessful && response.code != 206) {
             response.close()
             throw RuntimeException("Download failed: HTTP ${response.code} for $url")
@@ -437,7 +449,9 @@ object OmniInferQnnModelsManager {
         }
 
         // Rename .part to final
-        partFile.renameTo(dest)
+        if (!partFile.renameTo(dest)) {
+            throw RuntimeException("Failed to finalize ${dest.name}")
+        }
     }
 
     // ---- Internal: model scanning ----

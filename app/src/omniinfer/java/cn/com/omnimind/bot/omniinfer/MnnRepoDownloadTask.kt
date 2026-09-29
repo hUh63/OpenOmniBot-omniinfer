@@ -111,6 +111,13 @@ class MnnRepoDownloadTask(
                 if (cancelled.get()) return
             }
 
+            // Every file must be fully on disk before this counts as finished; otherwise a
+            // dropped connection would be reported as SUCCESS (savedSize was forced to
+            // totalSize below regardless of how much actually landed).
+            if (totalSize > 0 && savedSize < totalSize) {
+                throw IOException("Incomplete download ($savedSize/$totalSize)")
+            }
+
             info = info.copy(
                 downloadState = MnnDownloadState.DOWNLOAD_SUCCESS,
                 progress = 1.0,

@@ -764,6 +764,10 @@ object OmniInferLiteRtModelsManager {
             }
         }
         if (state.cancelled) throw DownloadCancelledException()
+        // A short read means the connection dropped; never promote a truncated file.
+        if (state.totalSize > 0L && state.savedSize < state.totalSize) {
+            throw RuntimeException("Incomplete download (${state.savedSize}/${state.totalSize})")
+        }
         if (!partFile.renameTo(destFile)) {
             throw RuntimeException("Failed to finalize downloaded file")
         }
