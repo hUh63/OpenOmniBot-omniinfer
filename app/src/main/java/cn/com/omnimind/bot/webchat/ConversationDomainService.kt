@@ -3,6 +3,7 @@ package cn.com.omnimind.bot.webchat
 import android.content.Context
 import cn.com.omnimind.baselib.database.Conversation
 import cn.com.omnimind.baselib.database.DatabaseHelper
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.AgentConversationContextCompactor
 import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentConversationHistorySupport
@@ -11,6 +12,7 @@ import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.runtime.AcpAgentProfileStore
 
 private const val WEB_CONVERSATION_TITLE_LIMIT = 20
+private const val TAG = "ConversationDomainService"
 
 /**
  * Resolves the immutable Harness owner of one durable conversation.
@@ -91,11 +93,13 @@ class ConversationDomainService(
         includeArchived: Boolean = true,
         archivedOnly: Boolean = false
     ): List<Map<String, Any?>> {
+        val startedAt = System.currentTimeMillis()
         val conversations = when {
             archivedOnly -> DatabaseHelper.getArchivedConversations()
             includeArchived -> DatabaseHelper.getAllConversations()
             else -> DatabaseHelper.getUnarchivedConversations()
         }
+        val queriedAt = System.currentTimeMillis()
         val agentConversationIds = conversations
             .filter { isAgentMode(it.mode) }
             .map { it.id }
@@ -104,16 +108,24 @@ class ConversationDomainService(
         )
         val agentBindingByConversationId =
             agentBindings.associateBy { binding -> binding.conversationId }
-        return conversations.map { conversation ->
+        // 绑定表一次取快照：逐条会话去查会为每条重新读取并解析整份绑定 JSON
+        // （O(会话数 × 绑定数)），归档页是全量历史、最容易被拖到几十秒甚至更久，
+        // 表现就是「一直转圈」。
+        val sessionAgentIdByThreadId = acpAgentProfileStore.agentIdsForSessions(
+            agentBindings.map { binding -> binding.threadId }
+        )
+        val conversationAgentIdById =
+            acpAgentProfileStore.agentIdsForConversations(agentConversationIds)
+        val resolvedAt = System.currentTimeMillis()
+        val payloads = conversations.map { conversation ->
             val agentBinding = agentBindingByConversationId[conversation.id]
             val agentId = if (isAgentMode(conversation.mode)) {
                 resolveConversationHarnessOwner(
                     storedMode = conversation.mode,
                     sessionAgentId = agentBinding?.let { binding ->
-                        acpAgentProfileStore.agentIdForSession(binding.threadId)
+                        sessionAgentIdByThreadId[binding.threadId.trim()]
                     },
-                    conversationAgentId = acpAgentProfileStore
-                        .agentIdForConversation(conversation.id),
+                    conversationAgentId = conversationAgentIdById[conversation.id],
                 )
             } else {
                 null
@@ -124,6 +136,13 @@ class ConversationDomainService(
                 agentId = agentId
             )
         }
+        OmniLog.d(
+            TAG,
+            "listConversationPayloads archivedOnly=$archivedOnly 总数=${conversations.size} " +
+                "查询=${queriedAt - startedAt}ms 绑定=${resolvedAt - queriedAt}ms " +
+                "组装=${System.currentTimeMillis() - resolvedAt}ms"
+        )
+        return payloads
     }
 
     suspend fun archiveConversationsUpdatedBefore(cutoff: Long): Int {

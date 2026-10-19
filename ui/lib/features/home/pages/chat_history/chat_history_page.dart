@@ -51,6 +51,9 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   bool _isLoading = true;
   String? _loadError;
   int _loadGeneration = 0;
+  bool _loadInFlight = false;
+  bool _reloadPending = false;
+  Timer? _reloadDebounce;
   StreamSubscription<Map<String, dynamic>>?
   _conversationListChangedSubscription;
 
@@ -74,19 +77,41 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
     super.initState();
     _conversationListChangedSubscription = AssistsMessageService
         .conversationListChangedStream
-        .listen((_) {
-          unawaited(_loadConversations());
-        });
+        .listen((_) => _scheduleReload());
     _loadConversations();
   }
 
   @override
   void dispose() {
+    _reloadDebounce?.cancel();
     _conversationListChangedSubscription?.cancel();
     super.dispose();
   }
 
+  void _scheduleReload() {
+    // 原生在会话更新（例如 Agent 流式输出）时会高频广播 conversationListChanged。
+    // 归档页是全量历史、单次加载本来就慢，若每条事件都重开一轮加载，页面会长期
+    // 停在 loading（表现为「一直转圈」）。这里 600ms 去抖，并把加载中到来的事件
+    // 合并成「本轮结束后补一次」，不打断正在进行的加载。
+    _reloadDebounce?.cancel();
+    _reloadDebounce = Timer(const Duration(milliseconds: 600), () {
+      if (!mounted) {
+        return;
+      }
+      if (_loadInFlight) {
+        _reloadPending = true;
+        return;
+      }
+      unawaited(_loadConversations());
+    });
+  }
+
   Future<void> _loadConversations() async {
+    if (_loadInFlight) {
+      _reloadPending = true;
+      return;
+    }
+    _loadInFlight = true;
     // 每次加载领取一个代际号：并发/连发时只让最新一次的结果或失败态落地，
     // 避免晚到的旧请求把刚结束的 loading 又翻回 true。
     final generation = ++_loadGeneration;
@@ -129,6 +154,12 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
             ? '\u52a0\u8f7d\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5'
             : '\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5';
       });
+    } finally {
+      _loadInFlight = false;
+      if (_reloadPending) {
+        _reloadPending = false;
+        _scheduleReload();
+      }
     }
   }
 

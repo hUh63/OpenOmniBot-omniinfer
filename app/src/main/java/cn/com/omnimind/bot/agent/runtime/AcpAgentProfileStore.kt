@@ -281,6 +281,51 @@ internal class AcpAgentProfileStore(context: Context) {
             ?.takeUnless { it in catalog.retiredAgentIds }
     }
 
+    /**
+     * 批量版 [agentIdForSession]。
+     *
+     * 会话列表一次可能几百上千条，逐条调用会让「每条会话」都重新读取并解析整份
+     * session_bindings JSON（每条都跑一次 migrate + Gson），整体是 O(会话数 × 绑定数)。
+     * 归档页正是全量历史会话，所以最慢、最容易停不下来。这里只取一次快照，
+     * 调用方按 threadId 查表。
+     */
+    fun agentIdsForSessions(sessionIds: Collection<String>): Map<String, String> {
+        if (sessionIds.isEmpty()) return emptyMap()
+        migrateLegacyXiaowanAliases()
+        val bindings = sessionBindings()
+        if (bindings.isEmpty()) return emptyMap()
+        val retired = catalog.retiredAgentIds
+        val resolved = HashMap<String, String>()
+        for (rawSessionId in sessionIds) {
+            val key = rawSessionId.trim()
+            val agentId = bindings[key]
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() && it !in retired }
+                ?: continue
+            resolved[key] = agentId
+        }
+        return resolved
+    }
+
+    /** 批量版 [agentIdForConversation]，语义同上：只解析一次 conversation_bindings。 */
+    fun agentIdsForConversations(conversationIds: Collection<Long>): Map<Long, String> {
+        if (conversationIds.isEmpty()) return emptyMap()
+        migrateLegacyXiaowanAliases()
+        val bindings = conversationBindings()
+        if (bindings.isEmpty()) return emptyMap()
+        val retired = catalog.retiredAgentIds
+        val resolved = HashMap<Long, String>()
+        for (conversationId in conversationIds) {
+            if (conversationId <= 0L) continue
+            val agentId = bindings[conversationId.toString()]
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() && it !in retired }
+                ?: continue
+            resolved[conversationId] = agentId
+        }
+        return resolved
+    }
+
     @Synchronized
     fun unbindConversation(conversationId: Long) {
         if (conversationId <= 0L) return
