@@ -25,8 +25,9 @@ val bundledRuntimeDir = layout.projectDirectory.dir("src/main/embedded-terminal-
 val prootDebFileName = "proot_5.1.107.77_aarch64.deb"
 val prootDebFile = bundledRuntimeDir.file(prootDebFileName)
 val prootDebChecksum = "f2cd07bafbebf625c62931994120d469934a8925a831f6e049bb08f91889a00d"
-val libtallocDebUrl = "$termuxPackageBaseUrl/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb"
-val libtallocDebChecksum = "ac81ad623d74c209718b9f3acb2dd702cc8a88c431e820d212229910b4db29da"
+// Termux 的 pool 只保留最新版本：libtalloc 2.4.3 已从镜像移除（404），当前为 2.5.0。
+val libtallocDebUrl = "$termuxPackageBaseUrl/pool/main/libt/libtalloc/libtalloc_2.5.0_aarch64.deb"
+val libtallocDebChecksum = "556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7"
 val alpineMiniRootfsUrl =
     "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.0-aarch64.tar.gz"
 val alpineMiniRootfsChecksum = "f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
@@ -270,8 +271,16 @@ val prepareEmbeddedTerminalRuntime by tasks.registering {
         )
         val libtallocPackageRoot = workDir.resolve("libtalloc")
         unpackDebData(libtallocDeb, libtallocPackageRoot)
+        // Termux 每个版本都会重命名实体库（2.4.3 -> 2.5.0），按实体文件挑选，
+        // 避免把 soname 写死导致上游升版后这里找不到文件、deb 又已换名而 404。
+        val libtallocLibDir =
+            libtallocPackageRoot.resolve("data/data/com.termux/files/usr/lib")
+        val libtallocLib = libtallocLibDir.listFiles()
+            ?.filter { it.isFile && it.name.matches(Regex("libtalloc\\.so\\.2(\\..+)?")) }
+            ?.maxByOrNull { it.name }
+            ?: error("libtalloc.so.2 not found under ${libtallocLibDir.absolutePath}")
         copyRuntimeFile(
-            source = libtallocPackageRoot.resolve("data/data/com.termux/files/usr/lib/libtalloc.so.2.4.3"),
+            source = libtallocLib,
             target = root.resolve("libtalloc.so.2"),
             executable = false
         )
