@@ -49,6 +49,8 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   final Set<String> _busyKeys = <String>{};
   final Map<String, bool> _expandedDateSections = <String, bool>{};
   bool _isLoading = true;
+  String? _loadError;
+  int _loadGeneration = 0;
   StreamSubscription<Map<String, dynamic>>?
   _conversationListChangedSubscription;
 
@@ -85,17 +87,24 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   }
 
   Future<void> _loadConversations() async {
+    // 每次加载领取一个代际号：并发/连发时只让最新一次的结果或失败态落地，
+    // 避免晚到的旧请求把刚结束的 loading 又翻回 true。
+    final generation = ++_loadGeneration;
     if (mounted) {
       setState(() {
         _isLoading = true;
+        _loadError = null;
       });
     }
 
     try {
+      // 原生 getConversations 若不回调 result（协程作用域失效、handler 抛异常等），
+      // await 会永久挂起，页面就永远停在转圈。这里兜一个超时：到点后结束 loading
+      // 并进入可重试的错误态，至少不会再无限转圈。
       final loadedConversations = await ConversationService.getAllConversations(
         archivedOnly: widget.archivedOnly,
-      );
-      if (!mounted) {
+      ).timeout(const Duration(seconds: 15));
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       final sectionLabels = _buildConversationSections(
@@ -107,14 +116,18 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
           (label, _) => !sectionLabels.contains(label),
         );
         _isLoading = false;
+        _loadError = null;
       });
     } catch (error) {
       debugPrint('[ChatHistoryPage] failed to load conversations: $error');
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
         _isLoading = false;
+        _loadError = error is TimeoutException
+            ? '\u52a0\u8f7d\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5'
+            : '\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5';
       });
     }
   }
@@ -343,6 +356,9 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
     }
 
     if (_conversations.isEmpty) {
+      if (_loadError != null) {
+        return _buildLoadErrorState();
+      }
       return _buildEmptyState();
     }
 
@@ -754,6 +770,39 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       style: TextStyle(
         fontSize: 13,
         color: context.isDarkTheme ? palette.textSecondary : Colors.grey[500],
+      ),
+    );
+  }
+
+  Widget _buildLoadErrorState() {
+    final palette = context.omniPalette;
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.cloud_off_outlined,
+            size: 64,
+            color: context.isDarkTheme
+                ? palette.borderStrong
+                : Colors.grey[300],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            _loadError ?? '\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5',
+            style: TextStyle(
+              fontSize: 16,
+              color: context.isDarkTheme
+                  ? palette.textSecondary
+                  : Colors.grey[500],
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextButton(
+            onPressed: _loadConversations,
+            child: const Text('\u91cd\u8bd5'),
+          ),
+        ],
       ),
     );
   }

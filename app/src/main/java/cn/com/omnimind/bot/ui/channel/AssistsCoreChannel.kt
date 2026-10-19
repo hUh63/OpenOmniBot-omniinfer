@@ -39,6 +39,17 @@ class AssistsCoreChannel {
             if (omniFlowToolChannel?.handle(call, result) == true) {
                 return@setMethodCallHandler
             }
+            // manager 未初始化时下面各分支的 `!!` 会直接抛 NPE，result 永不回调，
+            // Flutter 侧对应的 await 会一直挂住（页面无限转圈）。这里统一回明确错误。
+            if (assistsCoreManager == null) {
+                OmniLog.e(TAG, "AssistsCoreManager is null, method=${call.method}")
+                result.error(
+                    "ASSISTS_CORE_UNAVAILABLE",
+                    "AssistsCoreManager is not initialized",
+                    null
+                )
+                return@setMethodCallHandler
+            }
             when (call.method) {
                 "openLocalModelService" -> {
                     App.instance.startActivity(android.content.Intent(App.instance,

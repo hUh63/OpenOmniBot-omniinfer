@@ -349,8 +349,12 @@ class AssistsCoreManager(private val context: Context) {
 
     // 用于存储需要等待用户操作的回调结果
     private lateinit var channel: MethodChannel
-    private var mainJob: CoroutineScope = CoroutineScope(Dispatchers.Main)
-    private var workJob: CoroutineScope = CoroutineScope(Dispatchers.Default)
+    // SupervisorJob：单个子协程失败不再取消整条通道路径的作用域。此前用普通 Job，
+    // 任一子协程抛出非 Exception（Error / OutOfMemoryError 等）就会让整个 scope 进入
+    // cancelled，之后所有 workJob.launch 都静默不执行 —— Flutter 侧的 await 永久挂起，
+    // 表现为会话列表 / 归档页一直转圈且无任何错误提示。
+    private var mainJob: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var workJob: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val conversationDomainService by lazy { ConversationDomainService(context) }
 
     // 当前活跃的对话ID
@@ -3016,10 +3020,20 @@ class AssistsCoreManager(private val context: Context) {
                     OmniLog.d(TAG, "[getConversations] 返回 Flutter: $jsonList")
                     result.success(jsonList)
                 }
-            } catch (e: Exception) {
-                OmniLog.e(TAG, "[getConversations] 获取对话列表失败: ${e.message}")
+            } catch (e: CancellationException) {
+                // 页面离开 / 引擎销毁：不再回调，但必须把取消继续向上抛，
+                // 否则会吞掉协程的取消语义。
+                throw e
+            } catch (e: Throwable) {
+                // Exception 之外的 Error（OOM 等）也必须回错误：否则 result 永不回调，
+                // Flutter 侧 invokeMethod 会一直 await，页面就停在 loading。
+                OmniLog.e(TAG, "[getConversations] 获取对话列表失败: $e")
                 withContext(Dispatchers.Main) {
-                    result.error("GET_CONVERSATIONS_ERROR", e.message, null)
+                    result.error(
+                        "GET_CONVERSATIONS_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
                 }
             }
         }
