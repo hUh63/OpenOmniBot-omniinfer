@@ -472,22 +472,14 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return;
     }
 
-    final conversations = await ConversationService.getAllConversations(
+    // 只需要这一条会话的元数据：单条查询，不要为一条记录拉整张表。
+    final conversation = await ConversationService.getConversationById(
+      conversationId,
       includeArchived: true,
+      mode: _conversationModeForPageMode(mode),
     );
     if (!mounted || !isConversationLifecycleTokenCurrent(lifecycleToken)) {
       return;
-    }
-
-    ConversationModel? conversation;
-    try {
-      conversation = conversations.firstWhere(
-        (item) =>
-            item.id == conversationId &&
-            item.mode == _conversationModeForPageMode(mode),
-      );
-    } catch (_) {
-      conversation = null;
     }
 
     // The metadata read may overlap the current ACP turn. Select the current

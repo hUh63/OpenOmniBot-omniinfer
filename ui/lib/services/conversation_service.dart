@@ -65,10 +65,39 @@ class ConversationService {
     return conversations;
   }
 
+  // 启动时抽屉、聊天页、统计卡片等会各自请求一次会话列表。同一参数的在飞请求
+  // 共享同一次原生查询，避免同一时刻把整张表序列化并跨 channel 传好几遍。
+  static final Map<String, Future<List<ConversationModel>>>
+  _inFlightConversationLists = <String, Future<List<ConversationModel>>>{};
+
   static Future<List<ConversationModel>> getAllConversations({
     bool includeArchived = false,
     bool archivedOnly = false,
     int? archiveBefore,
+  }) {
+    final key = '$includeArchived|$archivedOnly|${archiveBefore ?? -1}';
+    final inFlight = _inFlightConversationLists[key];
+    if (inFlight != null) {
+      return inFlight;
+    }
+    late final Future<List<ConversationModel>> future;
+    future = _fetchConversations(
+      includeArchived: includeArchived,
+      archivedOnly: archivedOnly,
+      archiveBefore: archiveBefore,
+    ).whenComplete(() {
+      if (identical(_inFlightConversationLists[key], future)) {
+        _inFlightConversationLists.remove(key);
+      }
+    });
+    _inFlightConversationLists[key] = future;
+    return future;
+  }
+
+  static Future<List<ConversationModel>> _fetchConversations({
+    required bool includeArchived,
+    required bool archivedOnly,
+    required int? archiveBefore,
   }) async {
     try {
       final result = await _assistCore
