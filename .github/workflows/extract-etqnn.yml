@@ -30,15 +30,16 @@ jobs:
       - name: Publish mirror release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: hUh63/OpenOmniBot-omniinfer
         run: |
           set -e
-          if gh release view etqnn-prebuilt-v3 >/dev/null 2>&1; then
+          if gh release view etqnn-prebuilt-v3 -R "$REPO" >/dev/null 2>&1; then
             echo "release already exists"
           else
-            gh release create etqnn-prebuilt-v3 \
+            gh release create etqnn-prebuilt-v3 -R "$REPO" \
               --title "ET-QNN prebuilt v3 (mirror)" \
               --notes "Mirror of the OmniInfer ExecuTorch QNN Android binaries (v3). The original OSS source (omnimind-model.oss-cn-beijing.aliyuncs.com/omniinfer-android/arm64-v8a) began returning 404 on 2026-10-20; these files were extracted from the signed v6.5.1 APK built from the same source." \
               --prerelease
           fi
-          gh release upload etqnn-prebuilt-v3 out/*.so --clobber
-          gh release view etqnn-prebuilt-v3
+          gh release upload etqnn-prebuilt-v3 -R "$REPO" out/*.so --clobber
+          gh release view etqnn-prebuilt-v3 -R "$REPO"
