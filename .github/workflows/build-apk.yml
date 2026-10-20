@@ -113,15 +113,41 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.1
+          tag_name: v0.6.3-omniinfer-v6.5.2
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 归档页卡死修复：回调保底 + O(N) 绑定 + 懒构建 (v0.6.3-omniinfer-v6.5.1)"
+          name: "OmniInfer 版 · 会话列表分页 + SQL 搜索 + 索引 (v0.6.3-omniinfer-v6.5.2)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.5.2)：会话列表与归档页按体验重做——分页、SQL 搜索、索引。
+
+            一、列表改滚动分页（首屏 60 条）
+            - 原生新增 getConversationsPage：SQL LIMIT/OFFSET，多取一条判断 hasMore。
+            - 归档页与普通会话列表首屏只取 60 条，滚到底自动追加；追加按 id 去重
+              （offset 分页遇到新会话插到头部时不会重复）。
+            - 会话上千条时，首帧从「构建全部条目」变为「构建可见的十来个」。
+
+            二、搜索改走后端 SQL，不再逐会话拉全部消息
+            - 原实现对每个会话查元数据、不命中就把该会话全部消息拉过来建索引，
+              复杂度 O(会话数 × 消息数)。现在一条 LIKE 查询命中
+              title / summary / contextSummary / lastMessage，结果为最近 50 条。
+            - 转义 LIKE 通配符（ESCAPE '\'），输入 % 或 _ 不再匹配全部。
+
+            三、数据库索引与迁移
+            - conversations 表新增 (isArchived, updatedAt) 复合索引，schema 18 → 19，
+              带 MIGRATION_18_19 平滑升级。
+            - 列表与归档页的「按归档状态过滤 + 按更新时间倒序」从全表扫描改为走索引。
+
+            四、抽屉列表瘦身
+            - getSidebarConversations 不再传 contextSummary（每行最大的字段），
+              抽屉只渲染标题/时间/最后一条消息。
+
+            顺带把上一轮遗留的「列表仍按全量构建」彻底收口：归档页的懒构建、去抖、
+            单条查询、批量绑定解析全部保留。
+
             本轮 (v6.5.1)：继续排查「归档页一直转圈」，定位并修掉三个机制性问题。
 
             一、原生 getConversations 可能永不回调 → 页面无限 loading

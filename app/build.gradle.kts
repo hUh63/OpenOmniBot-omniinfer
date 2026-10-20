@@ -226,8 +226,8 @@ android {
         targetSdk = 36
         // Keep the Android version code monotonic so the APK
         // can be installed as an update over the previously tested build.
-        versionCode = 18
-        versionName = "0.6.3.3"
+        versionCode = 19
+        versionName = "0.6.3.4"
         buildConfigField("String", "IMAGE_BASE_URL", buildConfigString(omnibotImageBaseUrl))
         buildConfigField("String", "IMAGE_MODEL", buildConfigString(omnibotImageModel))
         buildConfigField("String", "IMAGE_API_KEY", buildConfigString(omnibotImageApiKey))
