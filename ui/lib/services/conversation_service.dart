@@ -388,19 +388,66 @@ class ConversationService {
     }
   }
 
-  static Future<ConversationModel?> _getConversationById(
+  /// 单条会话元数据。
+  ///
+  /// 之前所有调用方都是先 `getAllConversations()` 再线性查找：会话越多越慢，
+  /// 而且要把整张表的全字段跨 channel 传一遍。原生侧已有单条查询，这里优先用它，
+  /// 接口不可用（旧原生 / 异常）时回退全量查找，语义保持一致。
+  static Future<ConversationModel?> getConversationById(
     int conversationId, {
-    bool includeArchived = false,
+    bool includeArchived = true,
+    ConversationMode? mode,
   }) async {
+    if (conversationId <= 0) {
+      return null;
+    }
+    try {
+      final raw = await _assistCore.invokeMethod<dynamic>(
+        'getConversation',
+        <String, dynamic>{'conversationId': conversationId},
+      );
+      if (raw is Map) {
+        final conversation = ConversationModel.fromJson(
+          Map<String, dynamic>.from(raw),
+        );
+        if (!includeArchived && conversation.isArchived) {
+          return null;
+        }
+        if (mode != null && conversation.mode != mode) {
+          return null;
+        }
+        // 与列表接口保持一致：被隐藏的 Agent 会话对调用方不可见。
+        if (conversation.mode == ConversationMode.agent) {
+          final hiddenIds = await _getHiddenAgentConversationIds();
+          if (hiddenIds.contains(conversation.id)) {
+            return null;
+          }
+        }
+        return conversation;
+      }
+    } catch (e) {
+      debugPrint('[ConversationService] 单条会话查询失败，回退全量查找: $e');
+    }
     final conversations = await getAllConversations(
       includeArchived: includeArchived,
     );
     for (final conversation in conversations) {
-      if (conversation.id == conversationId) {
+      if (conversation.id == conversationId &&
+          (mode == null || conversation.mode == mode)) {
         return conversation;
       }
     }
     return null;
+  }
+
+  static Future<ConversationModel?> _getConversationById(
+    int conversationId, {
+    bool includeArchived = false,
+  }) {
+    return getConversationById(
+      conversationId,
+      includeArchived: includeArchived,
+    );
   }
 
   static Future<List<ConversationModel>> _filterHiddenAgentConversations(

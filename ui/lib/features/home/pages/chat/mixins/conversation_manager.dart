@@ -301,8 +301,11 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     final operationMode = mode ?? activeConversationModeValue;
     final historyRevision = conversationHistoryRevision(conversationId, operationMode);
     try {
-      final conversations = await ConversationService.getAllConversations(
+      // 只需要这一条会话的元数据：走单条查询，不要再为一条记录拉整张表。
+      final conversation = await ConversationService.getConversationById(
+        conversationId,
         includeArchived: true,
+        mode: operationMode,
       );
       if (!_isConversationOperationCurrent(token) ||
           conversationHistoryRevision(conversationId, operationMode) != historyRevision) {
@@ -319,14 +322,6 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       final inMemoryMessages = preferInMemory
           ? getInMemoryMessagesForConversation(conversationId, operationMode)
           : null;
-      ConversationModel? conversation;
-      try {
-        conversation = conversations.firstWhere(
-          (c) => c.id == conversationId && c.mode == operationMode,
-        );
-      } catch (_) {
-        conversation = null;
-      }
       final resolvedConversation = inMemoryConversation ?? conversation;
 
       if (resolvedConversation != null) {
@@ -470,17 +465,17 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     if (isEphemeralConversation(activeConversationId, operationMode)) return;
 
     try {
-      final allConversations = await ConversationService.getAllConversations(
-        includeArchived: true,
-      );
+      // 只判断这一条是否存在：单条查询即可，不必拉全量列表。
+      final existingConversation =
+          await ConversationService.getConversationById(
+            activeConversationId,
+            includeArchived: true,
+            mode: operationMode,
+          );
       if (!_isConversationOperationCurrent(token)) {
         return;
       }
-      final exists = allConversations.any(
-        (conversation) =>
-            conversation.id == activeConversationId &&
-            conversation.mode == operationMode,
-      );
+      final exists = existingConversation != null;
 
       if (!exists) {
         final missingConversationId = activeConversationId;
@@ -499,6 +494,15 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
         invalidateConversationLifecycle();
         final transitionToken = captureConversationLifecycleToken();
         onConversationMissing(operationMode, missingConversationId);
+
+        // 只有走到「当前会话已失效」这个罕见分支，才需要列表来挑最近的同模式会话。
+        final allConversations =
+            await ConversationService.getAllConversations(
+              includeArchived: true,
+            );
+        if (!_isConversationOperationCurrent(transitionToken)) {
+          return;
+        }
 
         final sameModeConversations = allConversations
             .where((conversation) => conversation.mode == operationMode)

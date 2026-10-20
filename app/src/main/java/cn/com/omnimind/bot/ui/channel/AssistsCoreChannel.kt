@@ -271,6 +271,9 @@ class AssistsCoreChannel {
                 "getConversations" -> {
                     assistsCoreManager!!.getConversations(call, result)
                 }
+                "getConversation" -> {
+                    assistsCoreManager!!.getConversation(call, result)
+                }
                 "getConversationMessages" -> {
                     assistsCoreManager!!.getConversationMessages(call, result)
                 }

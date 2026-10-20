@@ -3043,6 +3043,39 @@ class AssistsCoreManager(private val context: Context) {
         }
     }
 
+    /**
+     * 单条会话元数据。
+     *
+     * 列表接口是一次「全表 + 全字段」的快照；切换对话、校验对话是否存在这类
+     * 只需要一条记录的场景若走列表接口，会话越多越慢，还要跨 channel 传全量。
+     */
+    fun getConversation(call: MethodCall, result: MethodChannel.Result) {
+        val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L
+        if (conversationId <= 0L) {
+            result.error("INVALID_ARGUMENTS", "conversationId is invalid", null)
+            return
+        }
+        workJob.launch {
+            try {
+                val payload = conversationDomainService.getConversationPayload(conversationId)
+                withContext(Dispatchers.Main) {
+                    result.success(payload)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "[getConversation] 获取会话失败: $e")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "GET_CONVERSATION_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
+                }
+            }
+        }
+    }
+
     fun getConversationMessages(call: MethodCall, result: MethodChannel.Result) {
         val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L
         val mode = normalizeConversationMode(
