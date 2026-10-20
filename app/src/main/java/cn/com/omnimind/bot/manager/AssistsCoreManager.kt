@@ -3004,7 +3004,9 @@ class AssistsCoreManager(private val context: Context) {
         val includeArchived = call.argument<Boolean>("includeArchived") ?: true
         val archivedOnly = call.argument<Boolean>("archivedOnly") ?: false
         val archiveBefore = call.argument<Number>("archiveBefore")?.toLong()
-        workJob.launch {
+        // 这些 handler 全是 DB / 文件 IO。放在 CPU 池（Default，线程数=核数）里，
+        // 一旦有阻塞任务就会把池占满、后续所有通道方法排队，页面整体变卡；切到 IO 池。
+        workJob.launch(Dispatchers.IO) {
             try {
                 if (archiveBefore != null && archiveBefore > 0L) {
                     conversationDomainService.archiveConversationsUpdatedBefore(
@@ -3055,7 +3057,7 @@ class AssistsCoreManager(private val context: Context) {
             result.error("INVALID_ARGUMENTS", "conversationId is invalid", null)
             return
         }
-        workJob.launch {
+        workJob.launch(Dispatchers.IO) {
             try {
                 val payload = conversationDomainService.getConversationPayload(conversationId)
                 withContext(Dispatchers.Main) {
@@ -3085,7 +3087,7 @@ class AssistsCoreManager(private val context: Context) {
             result.error("INVALID_ARGUMENTS", "conversationId is invalid", null)
             return
         }
-        workJob.launch {
+        workJob.launch(Dispatchers.IO) {
             try {
                 val messages = conversationDomainService.listConversationMessages(
                     conversationId = conversationId,
@@ -3120,7 +3122,7 @@ class AssistsCoreManager(private val context: Context) {
             result.error("INVALID_ARGUMENTS", "conversationId is invalid", null)
             return
         }
-        workJob.launch {
+        workJob.launch(Dispatchers.IO) {
             try {
                 val pagedResult = conversationDomainService.listConversationMessagesPaged(
                     conversationId = conversationId,

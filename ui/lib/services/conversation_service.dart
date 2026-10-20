@@ -220,10 +220,11 @@ class ConversationService {
       final payload = preserveLatestMetadata
           ? await _mergeLatestConversationMetadata(conversation)
           : conversation;
+      // 写操作同样要设上限：若原生不回调，归档/删除按钮的 busy 态会永远不结束。
       final result = await _assistCore.invokeMethod<dynamic>(
         'updateConversation',
         {'conversation': payload.toJson()},
-      );
+      ).timeout(const Duration(seconds: 15));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       debugPrint('更新对话失败: ${e.message}');
