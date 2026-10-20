@@ -149,8 +149,13 @@ class ConversationDomainService(
     ): List<Map<String, Any?>> {
         val trimmed = keyword.trim()
         if (trimmed.isEmpty()) return emptyList()
+        // 转义 LIKE 的通配符：用户输入 "%" 时应按字面匹配，而不是匹配全部。
+        val escaped = trimmed
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
         val conversations = DatabaseHelper.searchConversations(
-            pattern = "%$trimmed%",
+            pattern = "%$escaped%",
             limit = limit.coerceIn(1, 200)
         )
         return buildConversationPayloads(conversations)

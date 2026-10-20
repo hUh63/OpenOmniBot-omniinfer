@@ -193,9 +193,14 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
         return;
       }
       setState(() {
+        // 用 offset 分页时，期间若有新会话插到前面，同一批可能被重复取到；
+        // 按 id 去重，避免列表里出现重复条目。
+        final existingIds = _conversations
+            .map((conversation) => conversation.id)
+            .toSet();
         _conversations = <ConversationModel>[
           ..._conversations,
-          ...page.items,
+          ...page.items.where((item) => !existingIds.contains(item.id)),
         ];
         _hasMore = page.hasMore;
         _isLoadingMore = false;

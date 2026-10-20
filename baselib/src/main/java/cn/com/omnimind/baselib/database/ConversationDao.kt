@@ -82,8 +82,9 @@ interface ConversationDao {
      */
     @Query(
         "SELECT * FROM conversations WHERE " +
-            "title LIKE :pattern OR summary LIKE :pattern OR " +
-            "contextSummary LIKE :pattern OR lastMessage LIKE :pattern " +
+            "title LIKE :pattern ESCAPE '\\' OR summary LIKE :pattern ESCAPE '\\' OR " +
+            "contextSummary LIKE :pattern ESCAPE '\\' OR " +
+            "lastMessage LIKE :pattern ESCAPE '\\' " +
             "ORDER BY updatedAt DESC LIMIT :limit"
     )
     suspend fun searchByKeyword(pattern: String, limit: Int): List<Conversation>
