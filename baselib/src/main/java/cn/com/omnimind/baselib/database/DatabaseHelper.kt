@@ -10,6 +10,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 object DatabaseHelper {
     // 保留既有 OSS 数据库文件名，避免用户升级后丢失本地数据。
     private const val LOCAL_DATABASE_NAME = AppDatabase.DATABASE_NAME + "oss"
+    // SQLite 的绑定变量上限（老设备 999），IN (...) 一次传上千个 id 会直接报
+    // "too many SQL variables"。批量查询统一按此大小分块。
+    private const val IN_QUERY_CHUNK_SIZE = 500
     private var database: AppDatabase? = null
 
     // Migration from version 1 to 2 - adding cache_suggestion table
@@ -680,8 +683,15 @@ object DatabaseHelper {
         conversationIds: List<Long>
     ): List<AgentSessionBinding> {
         if (conversationIds.isEmpty()) return emptyList()
-        return getDatabase().agentSessionBindingDao()
-            .getByConversationIds(conversationIds)
+        val dao = getDatabase().agentSessionBindingDao()
+        if (conversationIds.size <= IN_QUERY_CHUNK_SIZE) {
+            return dao.getByConversationIds(conversationIds)
+        }
+        // 归档页这类全量列表一次可能传来上千个 id，IN (...) 会撞上 SQLite 的
+        // 绑定变量上限；分块查询后合并，避免整页加载直接失败。
+        return conversationIds.chunked(IN_QUERY_CHUNK_SIZE).flatMap { chunk ->
+            dao.getByConversationIds(chunk)
+        }
     }
 
     suspend fun getAgentSessionBindingByConversationId(conversationId: Long): AgentSessionBinding? {

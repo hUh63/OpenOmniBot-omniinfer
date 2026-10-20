@@ -3017,7 +3017,11 @@ class AssistsCoreManager(private val context: Context) {
                 )
                 OmniLog.d(TAG, "[getConversations] 从数据库获取到 ${jsonList.size} 条对话记录")
                 withContext(Dispatchers.Main) {
-                    OmniLog.d(TAG, "[getConversations] 返回 Flutter: $jsonList")
+                    // 不要在这里打印 $jsonList：字符串插值会在主线程上对整份列表做
+                    // toString（每条都带 summary / contextSummary / lastMessage），
+                    // 上千条归档会话能拼出几十 MB 的字符串，直接卡死主线程、甚至 OOM，
+                    // 而 OOM 会让整条 AssistsCore 通道失效（页面永久 loading）。
+                    // 需要排查时看 ConversationDomainService 打的条数与分段耗时即可。
                     result.success(jsonList)
                 }
             } catch (e: CancellationException) {
