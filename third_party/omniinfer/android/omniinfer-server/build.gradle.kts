@@ -125,7 +125,14 @@ val syncLlamaCppHtpJniLibs by tasks.registering {
 // --- ExecuTorch QNN: auto-download pre-built binaries ---
 if (enableExecutorchQnn) {
     val etQnnVersion = 3  // bump when uploading new binaries to OSS
-    val baseUrl = "https://omnimind-model.oss-cn-beijing.aliyuncs.com/omniinfer-android/arm64-v8a"
+    // 原 OSS 目录（omnimind-model.oss-cn-beijing.aliyuncs.com/omniinfer-android/arm64-v8a）
+    // 自 2026-10-20 起对其下所有对象返回 404，构建会直接失败。改用本仓 release 镜像：
+    // 内容是同一份 v3 二进制（从按相同源码构建并签名的 APK 中提取）。
+    // 需要时可 -Pomniinfer.etqnn.base_url=... 覆盖。
+    val baseUrl = (findProperty("omniinfer.etqnn.base_url") as String?)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: "https://github.com/hUh63/OpenOmniBot-omniinfer/releases/download/etqnn-prebuilt-v3"
     val jniDir = file("src/main/jniLibs/arm64-v8a")
     val versionFile = File(jniDir, ".etqnn_version")
 
@@ -159,7 +166,13 @@ if (enableExecutorchQnn) {
                 val target = File(jniDir, name)
                 if (!target.exists() || outdated) {
                     logger.lifecycle("  Downloading $name ...")
-                    uri("$baseUrl/$name").toURL().openStream().use { input ->
+                    // Release 资产会 302 到对象存储（HttpURLConnection 默认跟随重定向）；
+                    // 显式设 UA 与读写超时，避免大文件（如 85MB 的 QnnHtpPrepare）中途断流。
+                    val connection = uri("$baseUrl/$name").toURL().openConnection()
+                    connection.setRequestProperty("User-Agent", "OmniInfer-Build")
+                    connection.connectTimeout = 60_000
+                    connection.readTimeout = 600_000
+                    connection.getInputStream().use { input ->
                         target.outputStream().use { output -> input.copyTo(output) }
                     }
                 }
