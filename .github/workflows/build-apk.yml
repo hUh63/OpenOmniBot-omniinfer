@@ -113,15 +113,43 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5
+          tag_name: v0.6.3-omniinfer-v6.5.1
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 本地模型审计收尾：下载链路 + 跨后端操作 (v0.6.3-omniinfer-v6.5)"
+          name: "OmniInfer 版 · 归档页卡死修复：回调保底 + O(N) 绑定 + 懒构建 (v0.6.3-omniinfer-v6.5.1)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.5.1)：继续排查「归档页一直转圈」，定位并修掉三个机制性问题。
+
+            一、原生 getConversations 可能永不回调 → 页面无限 loading
+            - AssistsCore 的共享协程作用域之前是普通 Job：任一子协程抛出非 Exception
+              （Error / OOM）就会取消整个 scope，之后所有通道方法都静默不执行。
+              改为 SupervisorJob；getConversations 捕获 Throwable（取消照常上抛），
+              保证 result.error 一定会送达。
+            - channel 层在 manager 未初始化时不再 NPE 后静默，统一回明确错误。
+            - 页面侧对 invokeMethod 加 15s 超时 + 请求代际号：超时进入可重试的错误态，
+              晚到的旧结果直接丢弃，不再无限转圈。
+
+            二、归档页的绑定解析是 O(会话数 × 绑定数)
+            - 列表原来对每条会话调用 agentIdForSession / agentIdForConversation，
+              每次都会重新读取并解析整份 session / conversation 绑定 JSON。归档页
+              是全量历史（自动归档只增不减），几百上千条时会卡几十秒。
+              新增批量接口一次取快照查表，复杂度降到 O(N)；并输出分段耗时日志
+              （查询 / 绑定 / 组装），下次可一眼定位慢在哪一段。
+
+            三、事件风暴把 loading 无限续命 + UI 全量构建
+            - 原生在会话更新时会高频广播 conversationListChanged，页面每条事件都
+              重开一轮加载，慢加载永远完不成。改为 600ms 去抖 + 在飞合并。
+            - 归档时间线原本是 ListView(children: [...])：一次性构建全部分组，
+              上千条时首帧就卡住。改为 ListView.builder 按分组懒构建。
+            - 日期分组结果按列表实例缓存，不再每次 build 重算 3~4 次。
+
+            顺带：修复 Termux 源移除 libtalloc 2.4.3 导致的构建失败（改用 2.5.0，
+            并按模式挑选实体库，避免下次上游升版再断）。
+
             本轮 (v6.5)：本地模型审计遗留问题收尾——下载链路健壮性、跨后端操作路由、并发与 JNI 生命周期。
 
             下载链路（四个后端通用）：

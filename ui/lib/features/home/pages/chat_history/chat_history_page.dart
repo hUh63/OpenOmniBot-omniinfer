@@ -54,6 +54,10 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   bool _loadInFlight = false;
   bool _reloadPending = false;
   Timer? _reloadDebounce;
+  // 归档页是全量历史，分组是 O(N) 且原本每次 build 会被重算 3~4 次（各自 getter）。
+  // 按 _conversations 实例做缓存：列表每次变更都是新实例，identical 即可正确失效。
+  List<ConversationModel>? _sectionsCacheSource;
+  List<_ConversationDateSection>? _sectionsCache;
   StreamSubscription<Map<String, dynamic>>?
   _conversationListChangedSubscription;
 
@@ -415,6 +419,17 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
     );
   }
 
+  List<_ConversationDateSection> get _sections {
+    final cached = _sectionsCache;
+    if (cached != null && identical(_sectionsCacheSource, _conversations)) {
+      return cached;
+    }
+    final computed = _buildConversationSections(_conversations);
+    _sectionsCacheSource = _conversations;
+    _sectionsCache = computed;
+    return computed;
+  }
+
   List<_ConversationDateSection> _buildConversationSections(
     List<ConversationModel> conversations,
   ) {
@@ -442,12 +457,12 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       !_isLoading && _conversations.isNotEmpty;
 
   bool get _hasAnyExpandedDateSection {
-    final sections = _buildConversationSections(_conversations);
+    final sections = _sections;
     return sections.any((section) => _isDateSectionExpanded(section.label));
   }
 
   bool get _areAllDateSectionsCollapsed {
-    final sections = _buildConversationSections(_conversations);
+    final sections = _sections;
     return sections.isNotEmpty &&
         sections.every((section) => !_isDateSectionExpanded(section.label));
   }
@@ -459,7 +474,7 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   }
 
   void _toggleAllDateSections() {
-    final sections = _buildConversationSections(_conversations);
+    final sections = _sections;
     if (sections.isEmpty) {
       return;
     }
@@ -514,20 +529,20 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   }
 
   Widget _buildArchivedConversationTimeline() {
-    final sections = _buildConversationSections(_conversations);
+    final sections = _sections;
     return SlidableAutoCloseBehavior(
-      child: ListView(
+      // 原本是 ListView(children: [...])：一次性构建全部分组（归档页是全量历史，
+      // 上千条时首帧就要建上千个带 Slidable / 动画的条目，直接卡住）。
+      // 改成 builder 按分组懒构建，只创建可见范围。
+      child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
-        children: [
-          for (
-            int sectionIndex = 0;
-            sectionIndex < sections.length;
-            sectionIndex++
-          ) ...[
-            if (sectionIndex > 0) const SizedBox(height: 14),
-            _buildConversationDateSection(sections[sectionIndex]),
-          ],
-        ],
+        itemCount: sections.length,
+        itemBuilder: (context, sectionIndex) {
+          return Padding(
+            padding: EdgeInsets.only(top: sectionIndex > 0 ? 14 : 0),
+            child: _buildConversationDateSection(sections[sectionIndex]),
+          );
+        },
       ),
     );
   }
