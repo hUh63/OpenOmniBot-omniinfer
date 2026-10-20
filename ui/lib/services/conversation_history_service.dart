@@ -496,7 +496,7 @@ class ConversationHistoryService {
       final result = await _assistCore.invokeMethod<List<dynamic>>(
         'getConversationMessages',
         {'conversationId': conversationId, 'mode': mode.canonicalStorageValue},
-      );
+      ).timeout(const Duration(seconds: 20));
       final nativeMessages = _decodeMessageList(result, mode: mode);
       return _resolveNativeAndLegacyMessages(
         conversationId,
@@ -535,7 +535,8 @@ class ConversationHistoryService {
             'mode': mode.canonicalStorageValue,
             'limit': limit,
             'offset': offset,
-          });
+          })
+          .timeout(const Duration(seconds: 20));
       if (result == null) {
         return _legacyPagedConversationMessages(
           conversationId,

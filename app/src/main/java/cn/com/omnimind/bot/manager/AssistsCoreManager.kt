@@ -3094,10 +3094,16 @@ class AssistsCoreManager(private val context: Context) {
                 withContext(Dispatchers.Main) {
                     result.success(messages)
                 }
-            } catch (e: Exception) {
-                OmniLog.e(TAG, "获取对话消息失败: ${e.message}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "获取对话消息失败: $e")
                 withContext(Dispatchers.Main) {
-                    result.error("GET_CONVERSATION_MESSAGES_ERROR", e.message, null)
+                    result.error(
+                        "GET_CONVERSATION_MESSAGES_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
                 }
             }
         }
@@ -3125,10 +3131,16 @@ class AssistsCoreManager(private val context: Context) {
                 withContext(Dispatchers.Main) {
                     result.success(pagedResult)
                 }
-            } catch (e: Exception) {
-                OmniLog.e(TAG, "分页获取对话消息失败: ${e.message}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "分页获取对话消息失败: $e")
                 withContext(Dispatchers.Main) {
-                    result.error("GET_CONVERSATION_MESSAGES_PAGED_ERROR", e.message, null)
+                    result.error(
+                        "GET_CONVERSATION_MESSAGES_PAGED_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
                 }
             }
         }

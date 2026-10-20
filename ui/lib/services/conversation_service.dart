@@ -100,12 +100,16 @@ class ConversationService {
     required int? archiveBefore,
   }) async {
     try {
+      // 原生不回调 result 时（协程失效 / handler 在 result 之前抛错）await 会永久
+      // 挂起，所有依赖列表的页面都会停在 loading。服务层兜一个超时，按“拿不到数据”
+      // 处理；页面仍可各自用更短的超时给出更快的错误态。
       final result = await _assistCore
           .invokeMethod<List<dynamic>>('getConversations', <String, dynamic>{
             'includeArchived': includeArchived,
             'archivedOnly': archivedOnly,
             if (archiveBefore != null) 'archiveBefore': archiveBefore,
-          });
+          })
+          .timeout(const Duration(seconds: 20));
       if (result == null) return [];
       final conversations = await _filterHiddenAgentConversations(
         _normalizeConversations(result),
@@ -434,7 +438,7 @@ class ConversationService {
       final raw = await _assistCore.invokeMethod<dynamic>(
         'getConversation',
         <String, dynamic>{'conversationId': conversationId},
-      );
+      ).timeout(const Duration(seconds: 10));
       if (raw is Map) {
         final conversation = ConversationModel.fromJson(
           Map<String, dynamic>.from(raw),
@@ -498,13 +502,23 @@ class ConversationService {
         .toList();
   }
 
+  // 隐藏 Agent 会话的 id 每次列表加载、每次单条会话查询都要用，而它是
+  // SharedPreferences（platform channel）读取。缓存在内存，写入时同步更新。
+  static Set<int>? _hiddenAgentConversationIdsCache;
+
   static Future<Set<int>> _getHiddenAgentConversationIds() async {
+    final cached = _hiddenAgentConversationIdsCache;
+    if (cached != null) {
+      return cached;
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
-      return <String>{
+      final ids = <String>{
         ...?prefs.getStringList(_hiddenAgentConversationIdsKey),
         ...?prefs.getStringList(_legacyHiddenAgentConversationIdsKey),
       }.map(int.tryParse).whereType<int>().toSet();
+      _hiddenAgentConversationIdsCache = ids;
+      return ids;
     } catch (e) {
       debugPrint('[ConversationService] 读取 Agent 隐藏会话失败: $e');
       return const <int>{};
@@ -514,12 +528,14 @@ class ConversationService {
   static Future<void> _markAgentConversationHidden(int conversationId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final hiddenIds = await _getHiddenAgentConversationIds();
+      // 拷贝一份再改，避免直接修改返回的缓存集合。
+      final hiddenIds = <int>{...await _getHiddenAgentConversationIds()};
       if (!hiddenIds.add(conversationId)) {
         return;
       }
       final encoded = hiddenIds.map((id) => id.toString()).toList()..sort();
       await prefs.setStringList(_hiddenAgentConversationIdsKey, encoded);
+      _hiddenAgentConversationIdsCache = hiddenIds;
     } catch (e) {
       debugPrint('[ConversationService] 保存 Agent 隐藏会话失败: $e');
     }
