@@ -91,7 +91,8 @@ class ConversationDomainService(
 
     suspend fun listConversationPayloads(
         includeArchived: Boolean = true,
-        archivedOnly: Boolean = false
+        archivedOnly: Boolean = false,
+        includeContextSummary: Boolean = true,
     ): List<Map<String, Any?>> {
         val startedAt = System.currentTimeMillis()
         val conversations = when {
@@ -100,7 +101,7 @@ class ConversationDomainService(
             else -> DatabaseHelper.getUnarchivedConversations()
         }
         val queriedAt = System.currentTimeMillis()
-        val payloads = buildConversationPayloads(conversations)
+        val payloads = buildConversationPayloads(conversations, includeContextSummary)
         OmniLog.d(
             TAG,
             "listConversationPayloads archivedOnly=$archivedOnly 总数=${conversations.size} " +
@@ -168,7 +169,8 @@ class ConversationDomainService(
      * （O(会话数 × 绑定数)），大列表会被拖到几十秒。
      */
     private suspend fun buildConversationPayloads(
-        conversations: List<Conversation>
+        conversations: List<Conversation>,
+        includeContextSummary: Boolean = true,
     ): List<Map<String, Any?>> {
         if (conversations.isEmpty()) return emptyList()
         val agentConversationIds = conversations
@@ -200,7 +202,8 @@ class ConversationDomainService(
             conversationToPayload(
                 conversation,
                 agentCwd = agentBinding?.cwd,
-                agentId = agentId
+                agentId = agentId,
+                includeContextSummary = includeContextSummary
             )
         }
     }
@@ -600,7 +603,9 @@ class ConversationDomainService(
     fun conversationToPayload(
         conversation: Conversation,
         agentCwd: String? = null,
-        agentId: String? = null
+        agentId: String? = null,
+        // 列表场景（抽屉等）不需要上下文压缩摘要全文 —— 它是单条 payload 里最大的字段。
+        includeContextSummary: Boolean = true,
     ): Map<String, Any?> {
         val normalizedMode = normalizeConversationMode(conversation.mode)
         val resolvedAgentId = agentId
@@ -627,9 +632,21 @@ class ConversationDomainService(
                 ?.let(::normalizeConversationMode),
             "scheduledTaskId" to conversation.scheduledTaskId,
             "summary" to conversation.summary,
-            "contextSummary" to conversation.contextSummary,
-            "contextSummaryCutoffEntryDbId" to conversation.contextSummaryCutoffEntryDbId,
-            "contextSummaryUpdatedAt" to conversation.contextSummaryUpdatedAt,
+            "contextSummary" to if (includeContextSummary) {
+                conversation.contextSummary
+            } else {
+                null
+            },
+            "contextSummaryCutoffEntryDbId" to if (includeContextSummary) {
+                conversation.contextSummaryCutoffEntryDbId
+            } else {
+                null
+            },
+            "contextSummaryUpdatedAt" to if (includeContextSummary) {
+                conversation.contextSummaryUpdatedAt
+            } else {
+                0
+            },
             "status" to conversation.status,
             "lastMessage" to conversation.lastMessage,
             "messageCount" to conversation.messageCount,

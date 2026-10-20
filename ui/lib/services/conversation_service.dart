@@ -74,8 +74,10 @@ class ConversationService {
     bool includeArchived = false,
     bool archivedOnly = false,
     int? archiveBefore,
+    bool includeContextSummary = true,
   }) {
-    final key = '$includeArchived|$archivedOnly|${archiveBefore ?? -1}';
+    final key =
+        '$includeArchived|$archivedOnly|${archiveBefore ?? -1}|$includeContextSummary';
     final inFlight = _inFlightConversationLists[key];
     if (inFlight != null) {
       return inFlight;
@@ -85,6 +87,7 @@ class ConversationService {
       includeArchived: includeArchived,
       archivedOnly: archivedOnly,
       archiveBefore: archiveBefore,
+      includeContextSummary: includeContextSummary,
     ).whenComplete(() {
       if (identical(_inFlightConversationLists[key], future)) {
         _inFlightConversationLists.remove(key);
@@ -98,6 +101,7 @@ class ConversationService {
     required bool includeArchived,
     required bool archivedOnly,
     required int? archiveBefore,
+    required bool includeContextSummary,
   }) async {
     try {
       // 原生不回调 result 时（协程失效 / handler 在 result 之前抛错）await 会永久
@@ -107,6 +111,7 @@ class ConversationService {
           .invokeMethod<List<dynamic>>('getConversations', <String, dynamic>{
             'includeArchived': includeArchived,
             'archivedOnly': archivedOnly,
+            'includeContextSummary': includeContextSummary,
             if (archiveBefore != null) 'archiveBefore': archiveBefore,
           })
           .timeout(const Duration(seconds: 20));
@@ -137,6 +142,9 @@ class ConversationService {
     return getAllConversations(
       includeArchived: !recentOnly,
       archiveBefore: recentOnly ? recentConversationCutoff(now: now) : null,
+      // 抽屉只展示标题/时间/最后一条消息；上下文压缩摘要全文用不到，去掉可显著减小
+      // 传输与解析开销（搜索已改走后端 SQL，不再依赖列表里的这个字段）。
+      includeContextSummary: false,
     );
   }
 

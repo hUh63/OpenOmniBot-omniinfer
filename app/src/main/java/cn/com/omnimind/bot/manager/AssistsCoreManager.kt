@@ -3004,6 +3004,9 @@ class AssistsCoreManager(private val context: Context) {
         val includeArchived = call.argument<Boolean>("includeArchived") ?: true
         val archivedOnly = call.argument<Boolean>("archivedOnly") ?: false
         val archiveBefore = call.argument<Number>("archiveBefore")?.toLong()
+        // 抽屉这类列表场景不需要上下文压缩摘要全文（单条 payload 里最大的字段）。
+        val includeContextSummary =
+            call.argument<Boolean>("includeContextSummary") ?: true
         // 这些 handler 全是 DB / 文件 IO。放在 CPU 池（Default，线程数=核数）里，
         // 一旦有阻塞任务就会把池占满、后续所有通道方法排队，页面整体变卡；切到 IO 池。
         workJob.launch(Dispatchers.IO) {
@@ -3015,7 +3018,8 @@ class AssistsCoreManager(private val context: Context) {
                 }
                 val jsonList = conversationDomainService.listConversationPayloads(
                     includeArchived = includeArchived,
-                    archivedOnly = archivedOnly
+                    archivedOnly = archivedOnly,
+                    includeContextSummary = includeContextSummary
                 )
                 OmniLog.d(TAG, "[getConversations] 从数据库获取到 ${jsonList.size} 条对话记录")
                 withContext(Dispatchers.Main) {
