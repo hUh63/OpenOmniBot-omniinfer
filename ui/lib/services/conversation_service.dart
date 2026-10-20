@@ -173,6 +173,72 @@ class ConversationService {
     return all.sublist(start, end);
   }
 
+  /// 分页会话列表（首屏一页 + 滚动追加）。
+  ///
+  /// 与 [getAllConversations] 的区别：原生侧用 SQL LIMIT/OFFSET 只取一页，
+  /// 不再把整张表序列化后跨 channel 传过来。
+  static Future<({List<ConversationModel> items, bool hasMore})>
+  getConversationsPage({
+    bool archivedOnly = false,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    try {
+      final result = await _assistCore.invokeMethod<Map<dynamic, dynamic>>(
+        'getConversationsPage',
+        <String, dynamic>{
+          'archivedOnly': archivedOnly,
+          'limit': limit,
+          'offset': offset,
+        },
+      ).timeout(const Duration(seconds: 20));
+      if (result == null) {
+        return (items: <ConversationModel>[], hasMore: false);
+      }
+      final rawItems = result['items'] as List<dynamic>? ?? const <dynamic>[];
+      final conversations = await _filterHiddenAgentConversations(
+        _normalizeConversations(rawItems),
+      );
+      return (
+        items: conversations,
+        hasMore: result['hasMore'] as bool? ?? false,
+      );
+    } on PlatformException catch (e) {
+      debugPrint('[ConversationService] 分页获取对话列表失败: ${e.message}');
+    } catch (e) {
+      debugPrint('[ConversationService] 分页获取对话列表异常: $e');
+    }
+    return (items: <ConversationModel>[], hasMore: false);
+  }
+
+  /// 会话搜索（后端 SQL：标题 / 摘要 / 上下文摘要 / 最后一条消息）。
+  static Future<List<ConversationModel>> searchConversations(
+    String keyword, {
+    int limit = 50,
+  }) async {
+    final trimmed = keyword.trim();
+    if (trimmed.isEmpty) {
+      return const <ConversationModel>[];
+    }
+    try {
+      final result = await _assistCore.invokeMethod<List<dynamic>>(
+        'searchConversations',
+        <String, dynamic>{'keyword': trimmed, 'limit': limit},
+      ).timeout(const Duration(seconds: 15));
+      if (result == null) {
+        return const <ConversationModel>[];
+      }
+      return await _filterHiddenAgentConversations(
+        _normalizeConversations(result),
+      );
+    } on PlatformException catch (e) {
+      debugPrint('[ConversationService] 搜索会话失败: ${e.message}');
+    } catch (e) {
+      debugPrint('[ConversationService] 搜索会话异常: $e');
+    }
+    return const <ConversationModel>[];
+  }
+
   static Future<int?> createConversation({
     required String title,
     String? summary,

@@ -54,6 +54,11 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   bool _loadInFlight = false;
   bool _reloadPending = false;
   Timer? _reloadDebounce;
+  // 列表分页：首屏只取一页，滚动到底再追加。归档页是全部历史，
+  // 一次性加载在会话多时必然卡顿。
+  static const int _pageSize = 60;
+  bool _hasMore = false;
+  bool _isLoadingMore = false;
   // 归档页是全量历史，分组是 O(N) 且原本每次 build 会被重算 3~4 次（各自 getter）。
   // 按 _conversations 实例做缓存：列表每次变更都是新实例，identical 即可正确失效。
   List<ConversationModel>? _sectionsCacheSource;
@@ -127,20 +132,23 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
     }
 
     try {
-      // 原生 getConversations 若不回调 result（协程作用域失效、handler 抛异常等），
-      // await 会永久挂起，页面就永远停在转圈。这里兜一个超时：到点后结束 loading
-      // 并进入可重试的错误态，至少不会再无限转圈。
-      final loadedConversations = await ConversationService.getAllConversations(
+      // 首屏只取一页：原生用 SQL LIMIT/OFFSET，不再把整张表序列化后传过来。
+      // 仍保留超时兜底（原生不回调时页面可退出 loading）。
+      final page = await ConversationService.getConversationsPage(
         archivedOnly: widget.archivedOnly,
+        limit: _pageSize,
+        offset: 0,
       ).timeout(const Duration(seconds: 15));
       if (!mounted || generation != _loadGeneration) {
         return;
       }
       final sectionLabels = _buildConversationSections(
-        loadedConversations,
+        page.items,
       ).map((section) => section.label).toSet();
       setState(() {
-        _conversations = loadedConversations;
+        _conversations = page.items;
+        _hasMore = page.hasMore;
+        _isLoadingMore = false;
         _expandedDateSections.removeWhere(
           (label, _) => !sectionLabels.contains(label),
         );
@@ -164,6 +172,42 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
         _reloadPending = false;
         _scheduleReload();
       }
+    }
+  }
+
+  /// 滚动到底时追加下一页。失败只记录，已加载内容保持不动。
+  Future<void> _loadMore() async {
+    if (_isLoadingMore || !_hasMore || _isLoading) {
+      return;
+    }
+    final generation = _loadGeneration;
+    final offset = _conversations.length;
+    _isLoadingMore = true;
+    try {
+      final page = await ConversationService.getConversationsPage(
+        archivedOnly: widget.archivedOnly,
+        limit: _pageSize,
+        offset: offset,
+      ).timeout(const Duration(seconds: 15));
+      if (!mounted || generation != _loadGeneration) {
+        return;
+      }
+      setState(() {
+        _conversations = <ConversationModel>[
+          ..._conversations,
+          ...page.items,
+        ];
+        _hasMore = page.hasMore;
+        _isLoadingMore = false;
+      });
+    } catch (error) {
+      debugPrint('[ChatHistoryPage] failed to load more: $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoadingMore = false;
+      });
     }
   }
 
@@ -403,8 +447,15 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
 
     return ListView.builder(
       padding: edgeToEdgeScrollPadding(context, const EdgeInsets.all(16)),
-      itemCount: _conversations.length,
+      itemCount: _conversations.length + (_hasMore ? 1 : 0),
       itemBuilder: (context, index) {
+        if (index >= _conversations.length) {
+          _scheduleLoadMore();
+          return _buildLoadMoreIndicator();
+        }
+        if (index >= _conversations.length - 3) {
+          _scheduleLoadMore();
+        }
         final conversation = _conversations[index];
         return ChatHistoryConversationItem(
           conversation: conversation,
@@ -528,6 +579,34 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
     );
   }
 
+  void _scheduleLoadMore() {
+    if (!_hasMore || _isLoadingMore || _isLoading) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_loadMore());
+      }
+    });
+  }
+
+  Widget _buildLoadMoreIndicator() {
+    final palette = context.omniPalette;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 18),
+      child: Center(
+        child: SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(palette.accentPrimary),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildArchivedConversationTimeline() {
     final sections = _sections;
     return SlidableAutoCloseBehavior(
@@ -536,8 +615,15 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       // 改成 builder 按分组懒构建，只创建可见范围。
       child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
-        itemCount: sections.length,
+        itemCount: sections.length + (_hasMore ? 1 : 0),
         itemBuilder: (context, sectionIndex) {
+          if (sectionIndex >= sections.length) {
+            _scheduleLoadMore();
+            return _buildLoadMoreIndicator();
+          }
+          if (sectionIndex >= sections.length - 2) {
+            _scheduleLoadMore();
+          }
           return Padding(
             padding: EdgeInsets.only(top: sectionIndex > 0 ? 14 : 0),
             child: _buildConversationDateSection(sections[sectionIndex]),

@@ -3078,6 +3078,64 @@ class AssistsCoreManager(private val context: Context) {
         }
     }
 
+    /** 分页会话列表：首屏一页，滚动时按 offset 追加。 */
+    fun getConversationsPage(call: MethodCall, result: MethodChannel.Result) {
+        val archivedOnly = call.argument<Boolean>("archivedOnly") ?: false
+        val limit = call.argument<Number>("limit")?.toInt() ?: 50
+        val offset = call.argument<Number>("offset")?.toInt() ?: 0
+        workJob.launch(Dispatchers.IO) {
+            try {
+                val page = conversationDomainService.listConversationPayloadsPage(
+                    archivedOnly = archivedOnly,
+                    limit = limit,
+                    offset = offset
+                )
+                withContext(Dispatchers.Main) {
+                    result.success(page)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "[getConversationsPage] 获取对话列表失败: $e")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "GET_CONVERSATIONS_PAGE_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
+                }
+            }
+        }
+    }
+
+    /** 会话搜索（SQL，标题/摘要/上下文摘要/最后一条消息）。 */
+    fun searchConversations(call: MethodCall, result: MethodChannel.Result) {
+        val keyword = call.argument<String>("keyword").orEmpty()
+        val limit = call.argument<Number>("limit")?.toInt() ?: 50
+        workJob.launch(Dispatchers.IO) {
+            try {
+                val payloads = conversationDomainService.searchConversationPayloads(
+                    keyword = keyword,
+                    limit = limit
+                )
+                withContext(Dispatchers.Main) {
+                    result.success(payloads)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "[searchConversations] 搜索失败: $e")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "SEARCH_CONVERSATIONS_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
+                }
+            }
+        }
+    }
+
     fun getConversationMessages(call: MethodCall, result: MethodChannel.Result) {
         val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L
         val mode = normalizeConversationMode(

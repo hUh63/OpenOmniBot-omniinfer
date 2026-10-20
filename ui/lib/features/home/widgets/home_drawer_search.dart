@@ -342,24 +342,28 @@ extension _HomeDrawerSearch on HomeDrawerState {
       });
     }
 
-    final snapshot = List<ConversationModel>.from(_allConversations);
-    final results = <_ConversationSearchResult>[];
-
-    for (final conversation in snapshot) {
-      if (!mounted || generation != _searchGeneration) {
-        return;
-      }
-      final result = await _matchConversationAgainstQuery(
-        conversation,
-        queryTokens,
-      );
-      if (!mounted || generation != _searchGeneration) {
-        return;
-      }
-      if (result != null) {
-        results.add(result);
-      }
+    // 搜索交给后端 SQL（标题 / 摘要 / 上下文摘要 / 最后一条消息）。
+    // 原实现在 Dart 侧遍历全部会话、对每条不命中的会话再去拉「全部消息」建索引，
+    // 代价是 O(会话数 × 全部消息)，输入一次可能要跑很久。
+    final matched = await ConversationService.searchConversations(
+      trimmedQuery,
+      limit: 80,
+    );
+    if (!mounted || generation != _searchGeneration) {
+      return;
     }
+
+    final results = <_ConversationSearchResult>[
+      for (final conversation in matched)
+        _ConversationSearchResult(
+          conversation: conversation,
+          matchedPreview: _resolveMatchedPreview(
+            candidates: _buildConversationMetadataCandidates(conversation),
+            conversation: conversation,
+            queryTokens: queryTokens,
+          ),
+        ),
+    ];
 
     if (!mounted || generation != _searchGeneration) {
       return;

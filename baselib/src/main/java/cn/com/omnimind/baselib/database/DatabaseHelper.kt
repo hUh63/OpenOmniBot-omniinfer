@@ -533,6 +533,18 @@ object DatabaseHelper {
         return getDatabase().conversationDao().getConversationsByPage(offset, limit)
     }
 
+    suspend fun getArchivedPage(
+        archived: Boolean,
+        offset: Int,
+        limit: Int
+    ): List<Conversation> {
+        return getDatabase().conversationDao().getArchivedPage(archived, offset, limit)
+    }
+
+    suspend fun searchConversations(pattern: String, limit: Int): List<Conversation> {
+        return getDatabase().conversationDao().searchByKeyword(pattern, limit)
+    }
+
     suspend fun getConversationCount(): Int {
         return getDatabase().conversationDao().getConversationCount()
     }

@@ -100,6 +100,72 @@ class ConversationDomainService(
             else -> DatabaseHelper.getUnarchivedConversations()
         }
         val queriedAt = System.currentTimeMillis()
+        val payloads = buildConversationPayloads(conversations)
+        OmniLog.d(
+            TAG,
+            "listConversationPayloads archivedOnly=$archivedOnly 总数=${conversations.size} " +
+                "查询=${queriedAt - startedAt}ms 组装=${System.currentTimeMillis() - queriedAt}ms"
+        )
+        return payloads
+    }
+
+    /**
+     * 分页版列表：只取一页（内部多取一条判断是否还有下一页）。
+     * 归档页这类全量历史用它首屏秒开，滚动时再追加。
+     */
+    suspend fun listConversationPayloadsPage(
+        archivedOnly: Boolean = false,
+        limit: Int,
+        offset: Int
+    ): Map<String, Any?> {
+        val startedAt = System.currentTimeMillis()
+        val safeLimit = limit.coerceIn(1, 200)
+        val safeOffset = offset.coerceAtLeast(0)
+        val rows = DatabaseHelper.getArchivedPage(
+            archived = archivedOnly,
+            offset = safeOffset,
+            limit = safeLimit + 1
+        )
+        val hasMore = rows.size > safeLimit
+        val page = if (hasMore) rows.subList(0, safeLimit) else rows
+        val queriedAt = System.currentTimeMillis()
+        val payloads = buildConversationPayloads(page)
+        OmniLog.d(
+            TAG,
+            "listConversationPayloadsPage archivedOnly=$archivedOnly offset=$safeOffset " +
+                "返回=${payloads.size} hasMore=$hasMore 查询=${queriedAt - startedAt}ms " +
+                "组装=${System.currentTimeMillis() - queriedAt}ms"
+        )
+        return linkedMapOf(
+            "items" to payloads,
+            "hasMore" to hasMore
+        )
+    }
+
+    /** SQL 搜索：标题 / 摘要 / 上下文摘要 / 最后一条消息。 */
+    suspend fun searchConversationPayloads(
+        keyword: String,
+        limit: Int = 50
+    ): List<Map<String, Any?>> {
+        val trimmed = keyword.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val conversations = DatabaseHelper.searchConversations(
+            pattern = "%$trimmed%",
+            limit = limit.coerceIn(1, 200)
+        )
+        return buildConversationPayloads(conversations)
+    }
+
+    /**
+     * 会话 → 列表 payload。
+     *
+     * 绑定表一次取快照：逐条会话去查会为每条重新读取并解析整份绑定 JSON
+     * （O(会话数 × 绑定数)），大列表会被拖到几十秒。
+     */
+    private suspend fun buildConversationPayloads(
+        conversations: List<Conversation>
+    ): List<Map<String, Any?>> {
+        if (conversations.isEmpty()) return emptyList()
         val agentConversationIds = conversations
             .filter { isAgentMode(it.mode) }
             .map { it.id }
@@ -108,16 +174,12 @@ class ConversationDomainService(
         )
         val agentBindingByConversationId =
             agentBindings.associateBy { binding -> binding.conversationId }
-        // 绑定表一次取快照：逐条会话去查会为每条重新读取并解析整份绑定 JSON
-        // （O(会话数 × 绑定数)），归档页是全量历史、最容易被拖到几十秒甚至更久，
-        // 表现就是「一直转圈」。
         val sessionAgentIdByThreadId = acpAgentProfileStore.agentIdsForSessions(
             agentBindings.map { binding -> binding.threadId }
         )
         val conversationAgentIdById =
             acpAgentProfileStore.agentIdsForConversations(agentConversationIds)
-        val resolvedAt = System.currentTimeMillis()
-        val payloads = conversations.map { conversation ->
+        return conversations.map { conversation ->
             val agentBinding = agentBindingByConversationId[conversation.id]
             val agentId = if (isAgentMode(conversation.mode)) {
                 resolveConversationHarnessOwner(
@@ -136,13 +198,6 @@ class ConversationDomainService(
                 agentId = agentId
             )
         }
-        OmniLog.d(
-            TAG,
-            "listConversationPayloads archivedOnly=$archivedOnly 总数=${conversations.size} " +
-                "查询=${queriedAt - startedAt}ms 绑定=${resolvedAt - queriedAt}ms " +
-                "组装=${System.currentTimeMillis() - resolvedAt}ms"
-        )
-        return payloads
     }
 
     suspend fun archiveConversationsUpdatedBefore(cutoff: Long): Int {

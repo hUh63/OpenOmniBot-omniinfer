@@ -66,6 +66,28 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations ORDER BY updatedAt DESC LIMIT :limit OFFSET :offset")
     suspend fun getConversationsByPage(offset: Int, limit: Int): List<Conversation>
 
+    @Query(
+        "SELECT * FROM conversations WHERE isArchived = :archived " +
+            "ORDER BY updatedAt DESC LIMIT :limit OFFSET :offset"
+    )
+    suspend fun getArchivedPage(
+        archived: Boolean,
+        offset: Int,
+        limit: Int
+    ): List<Conversation>
+
+    /**
+     * 会话搜索。数据库里本来就有这四列，直接在 SQL 里过滤即可；
+     * 之前是在 Dart 侧对每个会话逐个拉全量消息建索引，代价是 O(会话数 × 全部消息)。
+     */
+    @Query(
+        "SELECT * FROM conversations WHERE " +
+            "title LIKE :pattern OR summary LIKE :pattern OR " +
+            "contextSummary LIKE :pattern OR lastMessage LIKE :pattern " +
+            "ORDER BY updatedAt DESC LIMIT :limit"
+    )
+    suspend fun searchByKeyword(pattern: String, limit: Int): List<Conversation>
+
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun getConversationCount(): Int
 
