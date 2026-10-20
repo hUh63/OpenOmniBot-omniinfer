@@ -1,10 +1,15 @@
 package cn.com.omnimind.baselib.database
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import java.util.Date
 
-@Entity(tableName = "conversations")
+// 列表固定按 isArchived 过滤 + updatedAt 倒序；会话多了以后没有索引就是全表扫描 + 排序。
+@Entity(
+    tableName = "conversations",
+    indices = [Index(value = ["isArchived", "updatedAt"])]
+)
 data class Conversation(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

@@ -369,6 +369,17 @@ object DatabaseHelper {
         }
     }
 
+    private val MIGRATION_18_19 = object : Migration(18, 19) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            // 会话列表与归档页都是 WHERE isArchived = ? ORDER BY updatedAt DESC。
+            // 会话/归档记录多了以后没有索引就是全表扫描 + 排序，这里补复合索引。
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_conversations_isArchived_updatedAt` " +
+                    "ON `conversations` (`isArchived`, `updatedAt`)"
+            )
+        }
+    }
+
     internal val ALL_MIGRATIONS = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -386,7 +397,8 @@ object DatabaseHelper {
         MIGRATION_14_15,
         MIGRATION_15_16,
         MIGRATION_16_17,
-        MIGRATION_17_18
+        MIGRATION_17_18,
+        MIGRATION_18_19
     )
 
     fun init(context: Context) {
