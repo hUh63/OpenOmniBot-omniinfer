@@ -163,7 +163,10 @@ class ConversationDomainService(
         )
         return linkedMapOf(
             "items" to payloads,
-            "hasMore" to hasMore
+            "hasMore" to hasMore,
+            // 本次真正消费掉的行数（截断前）。Dart 侧会再过滤隐藏会话，
+            // 用 items.size 当分页游标会偏小、从而重复请求同一区间。
+            "scanned" to page.size
         )
     }
 

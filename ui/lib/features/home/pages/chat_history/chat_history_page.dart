@@ -152,7 +152,7 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       setState(() {
         _conversations = page.items;
         _hasMore = page.hasMore;
-        _pageOffset = page.items.length;
+        _pageOffset = page.scanned;
         _isLoadingMore = false;
         _expandedDateSections.removeWhere(
           (label, _) => !sectionLabels.contains(label),
@@ -210,7 +210,7 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
         // 一页里全是「被隐藏过滤掉」的会话时原生仍会说 hasMore；此时若继续
         // 允许加载，滚到底会反复请求空页、指示器永远转。空页直接收尾。
         _hasMore = page.hasMore && page.items.isNotEmpty;
-        _pageOffset += page.items.length;
+        _pageOffset += page.scanned;
         _isLoadingMore = false;
       });
     } catch (error) {

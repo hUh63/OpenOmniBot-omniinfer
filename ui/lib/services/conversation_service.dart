@@ -220,7 +220,9 @@ class ConversationService {
   ///
   /// 与 [getAllConversations] 的区别：原生侧用 SQL LIMIT/OFFSET 只取一页，
   /// 不再把整张表序列化后跨 channel 传过来。
-  static Future<({List<ConversationModel> items, bool hasMore})>
+  static Future<
+    ({List<ConversationModel> items, bool hasMore, int scanned})
+  >
   getConversationsPage({
     bool archivedOnly = false,
     int limit = 50,
@@ -236,7 +238,7 @@ class ConversationService {
         },
       ).timeout(const Duration(seconds: 20));
       if (result == null) {
-        return (items: <ConversationModel>[], hasMore: false);
+        return (items: <ConversationModel>[], hasMore: false, scanned: 0);
       }
       final rawItems = result['items'] as List<dynamic>? ?? const <dynamic>[];
       final conversations = await _filterHiddenAgentConversations(
@@ -245,13 +247,16 @@ class ConversationService {
       return (
         items: conversations,
         hasMore: result['hasMore'] as bool? ?? false,
+        // 原生实际消费的行数（隐藏会话被 Dart 过滤后 items 会变少，
+        // 用它当游标才不会重复取同一区间）。
+        scanned: (result['scanned'] as num?)?.toInt() ?? rawItems.length,
       );
     } on PlatformException catch (e) {
       debugPrint('[ConversationService] 分页获取对话列表失败: ${e.message}');
     } catch (e) {
       debugPrint('[ConversationService] 分页获取对话列表异常: $e');
     }
-    return (items: <ConversationModel>[], hasMore: false);
+    return (items: <ConversationModel>[], hasMore: false, scanned: 0);
   }
 
   /// 会话搜索（后端 SQL：标题 / 摘要 / 上下文摘要 / 最后一条消息）。
