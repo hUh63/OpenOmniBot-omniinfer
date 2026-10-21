@@ -273,6 +273,9 @@ extension _HomeDrawerSearch on HomeDrawerState {
       _refreshConversationImagePreviewsInBackground(
         loadedConversations
             .where((conversation) => !conversation.isArchived)
+            // 只预热最近十几条：其余行首次可见时按需加载。此前对全部未归档
+            // 会话逐条拉完整消息，会话越多抽屉越卡。
+            .take(HomeDrawerState._imagePreviewWarmupCount)
             .toList(growable: false),
         generation: generation,
       );

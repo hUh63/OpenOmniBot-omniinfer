@@ -311,6 +311,24 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     }());
   }
 
+  /// 行首次可见时按需取这条会话的图片预览（同一 threadKey 只跑一次）。
+  void _scheduleConversationImagePreviewLoad(
+    ConversationModel conversation,
+    String signature,
+  ) {
+    final threadKey = conversation.threadKey;
+    if (_conversationImagePreviewFutures.containsKey(threadKey)) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_conversationImagePreviewSignatures[threadKey] != signature) return;
+      if (_conversationImagePreviewCache.containsKey(threadKey)) return;
+      if (_conversationImagePreviewFutures.containsKey(threadKey)) return;
+      unawaited(_conversationImagePreviewsFor(conversation, notify: true));
+    });
+  }
+
   bool _needsConversationImagePreviewPreload(ConversationModel conversation) {
     final threadKey = conversation.threadKey;
     final signature = _conversationImagePreviewSignature(conversation);
@@ -737,6 +755,13 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
   Widget _buildConversationImagePreviewStrip(ConversationModel conversation) {
     final threadKey = conversation.threadKey;
     final signature = _conversationImagePreviewSignature(conversation);
+    // 抽屉的行是懒构建的：只有真的出现在屏幕上才会走到这里。此前抽屉一打开
+    // 就对「所有未归档会话」逐条拉全部消息来提取图片，会话越多越堵；现在
+    // 首屏只预热最近若干条，其余行首次可见时才去取。
+    if (_conversationImagePreviewSignatures[threadKey] != signature ||
+        !_conversationImagePreviewCache.containsKey(threadKey)) {
+      _scheduleConversationImagePreviewLoad(conversation, signature);
+    }
     final cached = _conversationImagePreviewSignatures[threadKey] == signature
         ? _conversationImagePreviewCache[threadKey]
         : null;

@@ -126,6 +126,8 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
   bool _showComputerSessions = false;
   bool _hasOpenedComputerSessions = false;
   static const double _conversationActionIconSize = 18;
+  /// 抽屉打开时最多预热多少条会话的图片预览（其余按需、行可见时才加载）。
+  static const int _imagePreviewWarmupCount = 16;
   static const Duration _searchDebounceDuration = Duration(milliseconds: 220);
   static const Duration _sectionToggleDuration = Duration(milliseconds: 260);
   static const Duration _imagePreviewStripTransitionDuration = Duration(
