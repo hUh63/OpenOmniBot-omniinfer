@@ -378,11 +378,13 @@ extension _HomeDrawerSearch on HomeDrawerState {
       for (final conversation in matched)
         _ConversationSearchResult(
           conversation: conversation,
-          matchedPreview: _resolveMatchedPreview(
-            candidates: _buildConversationMetadataCandidates(conversation),
-            conversation: conversation,
-            queryTokens: queryTokens,
-          ),
+          matchedPreview:
+              _resolveMatchedPreview(
+                candidates: _buildConversationMetadataCandidates(conversation),
+                conversation: conversation,
+                queryTokens: queryTokens,
+              ) ??
+              _fallbackSearchPreview(conversation),
         ),
     ];
 
@@ -559,6 +561,23 @@ extension _HomeDrawerSearch on HomeDrawerState {
       return false;
     }
     return queryTokens.every(searchableText.contains);
+  }
+
+  /// 正文命中（SQL 直接匹配消息内容）时，元数据里可能没有可展示的命中片段，
+  /// 用最后一条消息开头补一段，避免「搜到了但看不出为什么匹配」。
+  String? _fallbackSearchPreview(ConversationModel conversation) {
+    final raw = (conversation.lastMessage ?? conversation.summary ?? '').trim();
+    if (raw.isEmpty) {
+      return null;
+    }
+    final normalized = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    const maxLength = 80;
+    return normalized.length <= maxLength
+        ? normalized
+        : '${normalized.substring(0, maxLength)}…';
   }
 
   String? _resolveMatchedPreview({
