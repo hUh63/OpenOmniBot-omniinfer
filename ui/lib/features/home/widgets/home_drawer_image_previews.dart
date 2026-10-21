@@ -348,6 +348,14 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     final threadKey = conversation.threadKey;
     final signature = _conversationImagePreviewSignature(conversation);
     if (_conversationImagePreviewSignatures[threadKey] != signature) {
+      // 签名随 updatedAt / messageCount 变化：流式输出时列表会频繁刷新，
+      // 若每次都重读消息，单单「预热」就能把 IO 打满。短时间内沿用旧的缩略图。
+      final lastLoadedAt = _conversationImagePreviewLoadedAt[threadKey];
+      if (lastLoadedAt != null &&
+          DateTime.now().difference(lastLoadedAt) <
+              HomeDrawerState._imagePreviewReloadInterval) {
+        return false;
+      }
       return true;
     }
     return !_conversationImagePreviewCache.containsKey(threadKey);
