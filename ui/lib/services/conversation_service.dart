@@ -726,6 +726,30 @@ class ConversationService {
     ConversationMode? mode,
     bool includeArchived = false,
   }) async {
+    // 先问原生要「最新一条」：SQL 只取一行，避免每次进聊天页都做一次全表快照。
+    // 拿不到（旧版原生 / 该条被隐藏 / 模式归一化后不匹配）时回退全量查找，
+    // 保证行为与改造前一致。
+    try {
+      final payload = await _assistCore
+          .invokeMethod<dynamic>('getLatestConversation', <String, dynamic>{
+            'mode': mode?.storageValue,
+            'includeArchived': includeArchived,
+          })
+          .timeout(const Duration(seconds: 10));
+      if (payload is Map) {
+        final visible = await _filterHiddenAgentConversations(
+          _normalizeConversations(<dynamic>[payload]),
+        );
+        for (final conversation in visible) {
+          if (mode == null || conversation.mode == mode) {
+            return conversation;
+          }
+        }
+        debugPrint('[ConversationService] 最新会话不可用，回退全量查找');
+      }
+    } catch (e) {
+      debugPrint('[ConversationService] 单条最新会话查询失败，回退全量查找: $e');
+    }
     final conversations = await getAllConversations(
       includeArchived: includeArchived,
     );

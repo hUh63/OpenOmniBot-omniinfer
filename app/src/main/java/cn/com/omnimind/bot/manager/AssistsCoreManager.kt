@@ -3082,6 +3082,39 @@ class AssistsCoreManager(private val context: Context) {
         }
     }
 
+    /**
+     * 最新一条会话（打开聊天页时「恢复上次对话」用）。
+     *
+     * 之前 Dart 侧先拉全量列表再线性找第一条，等于每次进聊天页都做一次全表快照；
+     * 现在直接由 SQL 取一条。
+     */
+    fun getLatestConversation(call: MethodCall, result: MethodChannel.Result) {
+        val mode = call.argument<String>("mode")
+        val includeArchived = call.argument<Boolean>("includeArchived") ?: false
+        workJob.launch(Dispatchers.IO) {
+            try {
+                val payload = conversationDomainService.getLatestConversationPayload(
+                    mode = mode,
+                    includeArchived = includeArchived
+                )
+                withContext(Dispatchers.Main) {
+                    result.success(payload)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "[getLatestConversation] 获取最新会话失败: $e")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "GET_LATEST_CONVERSATION_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
+                }
+            }
+        }
+    }
+
     /** 分页会话列表：首屏一页，滚动时按 offset 追加。 */
     fun getConversationsPage(call: MethodCall, result: MethodChannel.Result) {
         val archivedOnly = call.argument<Boolean>("archivedOnly") ?: false

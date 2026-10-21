@@ -77,6 +77,25 @@ interface ConversationDao {
     ): List<Conversation>
 
     /**
+     * 「恢复上次会话」只需要最新一条。原先在 Dart 侧先拉全表再线性找第一条，
+     * 打开聊天页就是一次全量快照；这里让 SQL 直接给出结果。
+     */
+    @Query("SELECT * FROM conversations WHERE isArchived = 0 ORDER BY updatedAt DESC LIMIT 1")
+    suspend fun getLatestUnarchived(): Conversation?
+
+    @Query(
+        "SELECT * FROM conversations WHERE isArchived = 0 AND mode IN (:modes) " +
+            "ORDER BY updatedAt DESC LIMIT 1"
+    )
+    suspend fun getLatestUnarchivedByModes(modes: List<String>): Conversation?
+
+    @Query("SELECT * FROM conversations ORDER BY updatedAt DESC LIMIT 1")
+    suspend fun getLatestAny(): Conversation?
+
+    @Query("SELECT * FROM conversations WHERE mode IN (:modes) ORDER BY updatedAt DESC LIMIT 1")
+    suspend fun getLatestAnyByModes(modes: List<String>): Conversation?
+
+    /**
      * 会话搜索。数据库里本来就有这四列，直接在 SQL 里过滤即可；
      * 之前是在 Dart 侧对每个会话逐个拉全量消息建索引，代价是 O(会话数 × 全部消息)。
      */

@@ -219,6 +219,43 @@ class ConversationDomainService(
         return archivedCount
     }
 
+    /**
+     * 最新一条会话的 payload（「恢复上次会话」用）。
+     *
+     * 调用方原先在 Dart 侧拉全表再线性找第一条，打开聊天页就是一次全量快照；
+     * 这里让 SQL 直接给出那条记录，只组装一条 payload。
+     */
+    suspend fun getLatestConversationPayload(
+        mode: String? = null,
+        includeArchived: Boolean = false,
+    ): Map<String, Any?>? {
+        val modes = mode?.let { storageValuesForMode(it) }
+        if (modes != null && modes.isEmpty()) return null
+        val latest = DatabaseHelper.getLatestConversation(
+            modes = modes,
+            includeArchived = includeArchived,
+        ) ?: return null
+        return getConversationPayload(latest.id) ?: conversationToPayload(latest)
+    }
+
+    /**
+     * Dart 侧比较的是归一化后的 ConversationMode（`normal`/`codex`/`acp` 等都算
+     * agent），所以 SQL 里要按等价的存储值集合过滤，否则会漏掉历史别名。
+     */
+    private fun storageValuesForMode(mode: String): List<String> {
+        return when (mode.trim().lowercase()) {
+            "agent" -> AGENT_MODE_STORAGE_ALIASES.toList()
+            "chat_only", "chatonly", "chat", "chat-only" ->
+                listOf("chat_only", "chatonly", "chat", "chat-only")
+            "openclaw" -> listOf("openclaw")
+            "subagent" -> listOf("subagent")
+            // `normal` 在 Dart 侧会被归一成 agent，因此它自身永远匹配不到会话。
+            "normal" -> emptyList()
+            "" -> emptyList()
+            else -> listOf(mode.trim().lowercase())
+        }
+    }
+
     suspend fun getConversationPayload(conversationId: Long): Map<String, Any?>? {
         val conversation = DatabaseHelper.getConversationById(conversationId) ?: return null
         val agentBinding = if (isAgentMode(conversation.mode)) {

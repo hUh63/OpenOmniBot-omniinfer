@@ -557,6 +557,23 @@ object DatabaseHelper {
         return getDatabase().conversationDao().searchByKeyword(pattern, limit)
     }
 
+    /**
+     * 最新一条会话（按 updatedAt 倒序取 1 条）。
+     * modes 为空表示不限模式；includeArchived 为 false 时只看未归档。
+     */
+    suspend fun getLatestConversation(
+        modes: List<String>? = null,
+        includeArchived: Boolean = false
+    ): Conversation? {
+        val dao = getDatabase().conversationDao()
+        return when {
+            modes.isNullOrEmpty() && !includeArchived -> dao.getLatestUnarchived()
+            modes.isNullOrEmpty() -> dao.getLatestAny()
+            !includeArchived -> dao.getLatestUnarchivedByModes(modes)
+            else -> dao.getLatestAnyByModes(modes)
+        }
+    }
+
     suspend fun getConversationCount(): Int {
         return getDatabase().conversationDao().getConversationCount()
     }
