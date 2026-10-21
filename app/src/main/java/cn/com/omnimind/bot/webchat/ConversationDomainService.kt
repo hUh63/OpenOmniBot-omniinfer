@@ -191,14 +191,16 @@ class ConversationDomainService(
             limit = safeLimit
         )
         val seenIds = byMetadata.mapTo(HashSet()) { it.id }
-        val byBody = DatabaseHelper.searchConversationIdsByBody(
+        val bodyHits = DatabaseHelper.searchConversationIdsByBody(
             pattern = pattern,
             limit = safeLimit
         )
-            .asSequence()
-            .filter { id -> seenIds.add(id) }
-            .mapNotNull { id -> DatabaseHelper.getConversationById(id) }
-            .toList()
+        val byBody = ArrayList<Conversation>(bodyHits.size)
+        for (id in bodyHits) {
+            if (!seenIds.add(id)) continue
+            val conversation = DatabaseHelper.getConversationById(id) ?: continue
+            byBody.add(conversation)
+        }
         if (byBody.isEmpty()) {
             return buildConversationPayloads(byMetadata)
         }
