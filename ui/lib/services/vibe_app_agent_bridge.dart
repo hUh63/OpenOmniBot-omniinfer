@@ -31,9 +31,6 @@ abstract interface class VibeAppAgentGateway {
 class XiaowanVibeAppAgentGateway implements VibeAppAgentGateway {
   const XiaowanVibeAppAgentGateway();
 
-  /// 给 AI / 插件看的 lastMessage 只保留开头这么多字符。
-  static const int _conversationPreviewLimit = 160;
-
   @override
   void addStreamListener(AgentStreamEventCallback listener) {
     AssistsMessageService.setOnAgentStreamEventCallback(listener);
@@ -46,14 +43,10 @@ class XiaowanVibeAppAgentGateway implements VibeAppAgentGateway {
 
   @override
   Future<List<ConversationModel>> getConversations() {
-    // AI / 插件侧仍然要能看到全部会话（不能分页截断），所以保持全量；
-    // 但每条只留「能认出是哪个会话、最后说了什么」的信息：
-    // 去掉上下文压缩摘要全文，并把 lastMessage 截断，传输与解析成本大幅下降。
-    return ConversationService.getAllConversations(
-      includeArchived: true,
-      includeContextSummary: false,
-      lastMessageLimit: _conversationPreviewLimit,
-    );
+    // AI / 插件侧要看到「全部会话的完整信息」：不截断条数，也不裁剪字段
+    // （上下文摘要、完整 lastMessage 都可能被用来理解用户上下文）。
+    // 降负载放在调用侧做：恢复上次会话不再为此拉全表，改成单条查询。
+    return ConversationService.getAllConversations(includeArchived: true);
   }
 
   @override

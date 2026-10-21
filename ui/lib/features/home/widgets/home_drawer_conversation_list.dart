@@ -1009,7 +1009,9 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       conversation.id,
     );
     final isCompleted = !isExecuting && conversation.isCompleted;
-    final showArchivedBadge = _isSearchActive && conversation.isArchived;
+    // 抽屉在「显示全部会话」时会把归档会话一起列出来（filterSidebarSnapshot）。
+    // 原来徽章只在搜索态显示，于是一堆已归档的会话看起来和普通会话一模一样。
+    final showArchivedBadge = conversation.isArchived;
     final isEditing = _editingThreadKey == conversation.threadKey;
 
     return ConversationSlidable(

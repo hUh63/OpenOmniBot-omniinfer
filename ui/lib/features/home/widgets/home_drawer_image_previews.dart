@@ -369,26 +369,13 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     final threadKey = conversation.threadKey;
     try {
       await OmnibotResourceService.ensureWorkspacePathsLoaded();
-      // 缩略图只需要「最近的图片」。原先每次都把整段历史（上千条）读回来再遍历，
-      // 现在从最新一页开始读，找到图片就停；没有图片的会话最多读 3 页。
-      const pageSize = 40;
-      const maxPages = 3;
-      final messages = <ChatMessageModel>[];
-      var offset = 0;
-      for (var page = 0; page < maxPages; page++) {
-        final result =
-            await ConversationHistoryService.getConversationMessagesPaged(
-              conversation.id,
-              mode: conversation.mode,
-              limit: pageSize,
-              offset: offset,
-              expectedMessageCount: conversation.messageCount,
-            );
-        messages.addAll(result.messages);
-        offset += result.messages.length;
-        if (!result.hasMore || result.messages.isEmpty) break;
-        if (_collectConversationImagePreviews(messages).isNotEmpty) break;
-      }
+      // 缩略图要在「整个会话」里找图（更早的图片也算），所以仍然读完整历史。
+      // 降负载放在别处：只有行可见才加载、且 12s 内不重复读（见加载入口）。
+      final messages = await ConversationHistoryService.getConversationMessages(
+        conversation.id,
+        mode: conversation.mode,
+        expectedMessageCount: conversation.messageCount,
+      );
       final previews = _filterConversationImagePreviews(
         threadKey,
         _collectConversationImagePreviews(messages),
