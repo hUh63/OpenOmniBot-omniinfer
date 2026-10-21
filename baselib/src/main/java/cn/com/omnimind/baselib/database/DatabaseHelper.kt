@@ -578,6 +578,14 @@ object DatabaseHelper {
         return getDatabase().conversationDao().getConversationCount()
     }
 
+    /** 按天统计新建会话数（热力图 / 用量统计卡片用）。 */
+    suspend fun getConversationDailyCounts(
+        sinceMillis: Long,
+        untilMillis: Long
+    ): List<ConversationDailyCount> {
+        return getDatabase().conversationDao().getDailyCounts(sinceMillis, untilMillis)
+    }
+
     suspend fun upsertAgentConversationEntry(entry: AgentConversationEntry): Long {
         return getDatabase().agentConversationEntryDao().upsert(entry)
     }

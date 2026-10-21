@@ -277,6 +277,9 @@ class AssistsCoreChannel {
                 "getLatestConversation" -> {
                     assistsCoreManager!!.getLatestConversation(call, result)
                 }
+                "getConversationDailyCounts" -> {
+                    assistsCoreManager!!.getConversationDailyCounts(call, result)
+                }
                 "getConversationsPage" -> {
                     assistsCoreManager!!.getConversationsPage(call, result)
                 }

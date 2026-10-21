@@ -99,26 +99,22 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
 
   Future<void> _loadConversationData() async {
     try {
-      final conversations = await ConversationService.getAllConversations(
-        includeArchived: true,
-      );
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
       final startDate = today.subtract(
         Duration(days: widget.weeksToShow * 7 - 1),
       );
 
-      final Map<String, int> activityMap = {};
-      int totalInRange = 0;
-
-      for (final conv in conversations) {
-        final date = DateTime.fromMillisecondsSinceEpoch(conv.createdAt);
-        final dateOnly = DateTime(date.year, date.month, date.day);
-        if (dateOnly.isBefore(startDate) || dateOnly.isAfter(today)) continue;
-        final key = _dateKey(dateOnly);
-        activityMap[key] = (activityMap[key] ?? 0) + 1;
-        totalInRange++;
-      }
+      // 交给 SQLite 按天分组：只回几十行，不再传整张会话表。
+      final Map<String, int> activityMap =
+          await ConversationService.getConversationDailyCounts(
+            since: startDate,
+            until: now,
+          );
+      final totalInRange = activityMap.values.fold<int>(
+        0,
+        (sum, count) => sum + count,
+      );
 
       int streak = 0;
       var checkDate = today;

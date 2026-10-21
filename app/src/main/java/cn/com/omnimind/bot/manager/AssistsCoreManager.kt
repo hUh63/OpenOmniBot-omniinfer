@@ -3007,6 +3007,9 @@ class AssistsCoreManager(private val context: Context) {
         // 抽屉这类列表场景不需要上下文压缩摘要全文（单条 payload 里最大的字段）。
         val includeContextSummary =
             call.argument<Boolean>("includeContextSummary") ?: true
+        // 给 AI / 插件消费的列表仍然要全量条数，但单条 lastMessage 可以截断。
+        val lastMessageLimit =
+            call.argument<Number>("lastMessageLimit")?.toInt() ?: 0
         // 这些 handler 全是 DB / 文件 IO。放在 CPU 池（Default，线程数=核数）里，
         // 一旦有阻塞任务就会把池占满、后续所有通道方法排队，页面整体变卡；切到 IO 池。
         workJob.launch(Dispatchers.IO) {
@@ -3019,7 +3022,8 @@ class AssistsCoreManager(private val context: Context) {
                 val jsonList = conversationDomainService.listConversationPayloads(
                     includeArchived = includeArchived,
                     archivedOnly = archivedOnly,
-                    includeContextSummary = includeContextSummary
+                    includeContextSummary = includeContextSummary,
+                    lastMessageLimit = lastMessageLimit
                 )
                 OmniLog.d(TAG, "[getConversations] 从数据库获取到 ${jsonList.size} 条对话记录")
                 withContext(Dispatchers.Main) {
@@ -3107,6 +3111,40 @@ class AssistsCoreManager(private val context: Context) {
                 withContext(Dispatchers.Main) {
                     result.error(
                         "GET_LATEST_CONVERSATION_ERROR",
+                        e.message ?: e.javaClass.simpleName,
+                        null
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 会话活跃度按天聚合（热力图 / 用量统计卡片）。
+     *
+     * 只返回「日期 + 条数」几十行，替代把整张会话表跨 channel 传过来再在
+     * Dart 侧累加。
+     */
+    fun getConversationDailyCounts(call: MethodCall, result: MethodChannel.Result) {
+        val sinceMillis = call.argument<Number>("sinceMillis")?.toLong() ?: 0L
+        val untilMillis = call.argument<Number>("untilMillis")?.toLong()
+            ?: System.currentTimeMillis()
+        workJob.launch(Dispatchers.IO) {
+            try {
+                val rows = conversationDomainService.listConversationDailyCounts(
+                    sinceMillis = sinceMillis,
+                    untilMillis = untilMillis
+                )
+                withContext(Dispatchers.Main) {
+                    result.success(rows)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                OmniLog.e(TAG, "[getConversationDailyCounts] 聚合失败: $e")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "GET_CONVERSATION_DAILY_COUNTS_ERROR",
                         e.message ?: e.javaClass.simpleName,
                         null
                     )

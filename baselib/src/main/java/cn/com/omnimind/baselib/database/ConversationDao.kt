@@ -122,4 +122,28 @@ interface ConversationDao {
 
     @Query("SELECT * FROM conversations WHERE status = :status ORDER BY updatedAt DESC")
     suspend fun getByStatus(status: Int): List<Conversation>
+
+    /**
+     * 按天统计新建会话数（热力图 / 用量统计卡片）。
+     *
+     * 这两个页面的原始实现是「拉整张会话表 → 在 Dart 侧按天累加」，会话上千条时
+     * 既慢又费内存。聚合交给 SQLite，只回几十行。
+     */
+    @Query(
+        "SELECT strftime('%Y-%m-%d', createdAt / 1000, 'unixepoch', 'localtime') AS day, " +
+            "COUNT(*) AS cnt FROM conversations " +
+            "WHERE createdAt >= :sinceMillis AND createdAt <= :untilMillis " +
+            "GROUP BY day ORDER BY day"
+    )
+    suspend fun getDailyCounts(
+        sinceMillis: Long,
+        untilMillis: Long
+    ): List<ConversationDailyCount>
 }
+
+/** 会话按天计数（[ConversationDao.getDailyCounts] 的投影结果）。 */
+data class ConversationDailyCount(
+    val day: String,
+    val cnt: Int
+)
+

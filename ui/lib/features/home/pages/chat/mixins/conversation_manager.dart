@@ -495,20 +495,18 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
         final transitionToken = captureConversationLifecycleToken();
         onConversationMissing(operationMode, missingConversationId);
 
-        // 只有走到「当前会话已失效」这个罕见分支，才需要列表来挑最近的同模式会话。
-        final allConversations =
-            await ConversationService.getAllConversations(
+        // 只有走到「当前会话已失效」这个罕见分支，才需要挑一条最近的同模式会话。
+        // 单条查询即可，不必为此拉全表。
+        final fallbackConversation =
+            await ConversationService.getLatestConversation(
+              mode: operationMode,
               includeArchived: true,
             );
         if (!_isConversationOperationCurrent(transitionToken)) {
           return;
         }
 
-        final sameModeConversations = allConversations
-            .where((conversation) => conversation.mode == operationMode)
-            .toList();
-        if (sameModeConversations.isNotEmpty) {
-          final fallbackConversation = sameModeConversations.first;
+        if (fallbackConversation != null) {
           await loadConversation(
             fallbackConversation.id,
             mode: fallbackConversation.mode,

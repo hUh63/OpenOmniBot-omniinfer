@@ -229,6 +229,24 @@ extension _HomeDrawerSearch on HomeDrawerState {
     });
 
     try {
+      // 首屏先拿最近一页：会话很多的账号不必等全量传输 + 解析完才出列表。
+      // 随后仍会拉全量（快照缓存、日程分组、图片预览都依赖完整列表），
+      // 所以这里是「先出图、后补齐」，不改变任何最终语义。
+      if (isLoadingConversations) {
+        try {
+          final firstPage = await ConversationService
+              .getSidebarConversationsPage(limit: 40);
+          if (!mounted || generation != _conversationLoadGeneration) return;
+          if (firstPage.isNotEmpty) {
+            setState(() {
+              _allConversations = firstPage;
+              isLoadingConversations = false;
+            });
+          }
+        } catch (e) {
+          debugPrint('[HomeDrawer] First page load failed: $e');
+        }
+      }
       final loadedConversations =
           await ConversationService.getSidebarConversations();
       final loadedScheduledTasks =

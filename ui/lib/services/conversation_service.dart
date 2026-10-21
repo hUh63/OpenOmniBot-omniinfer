@@ -75,9 +75,10 @@ class ConversationService {
     bool archivedOnly = false,
     int? archiveBefore,
     bool includeContextSummary = true,
+    int lastMessageLimit = 0,
   }) {
     final key =
-        '$includeArchived|$archivedOnly|${archiveBefore ?? -1}|$includeContextSummary';
+        '$includeArchived|$archivedOnly|${archiveBefore ?? -1}|$includeContextSummary|$lastMessageLimit';
     final inFlight = _inFlightConversationLists[key];
     if (inFlight != null) {
       return inFlight;
@@ -88,6 +89,7 @@ class ConversationService {
       archivedOnly: archivedOnly,
       archiveBefore: archiveBefore,
       includeContextSummary: includeContextSummary,
+      lastMessageLimit: lastMessageLimit,
     ).whenComplete(() {
       if (identical(_inFlightConversationLists[key], future)) {
         _inFlightConversationLists.remove(key);
@@ -102,6 +104,7 @@ class ConversationService {
     required bool archivedOnly,
     required int? archiveBefore,
     required bool includeContextSummary,
+    int lastMessageLimit = 0,
   }) async {
     try {
       // 原生不回调 result 时（协程失效 / handler 在 result 之前抛错）await 会永久
@@ -112,6 +115,7 @@ class ConversationService {
             'includeArchived': includeArchived,
             'archivedOnly': archivedOnly,
             'includeContextSummary': includeContextSummary,
+            if (lastMessageLimit > 0) 'lastMessageLimit': lastMessageLimit,
             if (archiveBefore != null) 'archiveBefore': archiveBefore,
           })
           .timeout(const Duration(seconds: 20));
@@ -133,6 +137,54 @@ class ConversationService {
       debugPrint('[ConversationService] 获取对话列表异常: $e');
       return [];
     }
+  }
+
+  /// 会话活跃度按天聚合（记忆中心热力图 / 用量统计卡片）。
+  ///
+  /// 之前这两个页面先拉整张会话表、再在 Dart 侧按天累加；现在由 SQLite
+  /// 分组统计，只回几十行。
+  static Future<Map<String, int>> getConversationDailyCounts({
+    required DateTime since,
+    DateTime? until,
+  }) async {
+    try {
+      final rows = await _assistCore
+          .invokeMethod<List<dynamic>>(
+            'getConversationDailyCounts',
+            <String, dynamic>{
+              'sinceMillis': since.millisecondsSinceEpoch,
+              'untilMillis': (until ?? DateTime.now()).millisecondsSinceEpoch,
+            },
+          )
+          .timeout(const Duration(seconds: 15));
+      if (rows == null) return const <String, int>{};
+      final counts = <String, int>{};
+      for (final row in rows) {
+        if (row is Map) {
+          final day = row['day']?.toString();
+          final count = (row['count'] as num?)?.toInt() ?? 0;
+          if (day != null && day.isNotEmpty && count > 0) {
+            counts[day] = count;
+          }
+        }
+      }
+      return counts;
+    } on PlatformException catch (e) {
+      debugPrint('[ConversationService] 会话活跃度聚合失败: ${e.message}');
+    } catch (e) {
+      debugPrint('[ConversationService] 会话活跃度聚合异常: $e');
+    }
+    return const <String, int>{};
+  }
+
+  /// 抽屉首屏：只取最近 [limit] 条（已按更新时间倒序），先把列表画出来，
+  /// 全量数据随后在后台补齐。
+  static Future<List<ConversationModel>> getSidebarConversationsPage({
+    int limit = 40,
+    DateTime? now,
+  }) async {
+    final page = await getConversationsPage(limit: limit);
+    return filterSidebarSnapshot(page.items, now: now);
   }
 
   static Future<List<ConversationModel>> getSidebarConversations({
@@ -162,23 +214,6 @@ class ConversationService {
               !conversation.isArchived && conversation.updatedAt >= cutoff,
         )
         .toList(growable: false);
-  }
-
-  static Future<List<ConversationModel>> getConversationsByPage({
-    required int offset,
-    required int limit,
-    bool includeArchived = false,
-    bool archivedOnly = false,
-  }) async {
-    final all = await getAllConversations(
-      includeArchived: includeArchived,
-      archivedOnly: archivedOnly,
-    );
-    if (all.isEmpty) return [];
-    final start = offset < 0 ? 0 : offset;
-    if (start >= all.length) return [];
-    final end = (start + limit) > all.length ? all.length : (start + limit);
-    return all.sublist(start, end);
   }
 
   /// 分页会话列表（首屏一页 + 滚动追加）。

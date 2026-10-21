@@ -93,6 +93,7 @@ class ConversationDomainService(
         includeArchived: Boolean = true,
         archivedOnly: Boolean = false,
         includeContextSummary: Boolean = true,
+        lastMessageLimit: Int = 0,
     ): List<Map<String, Any?>> {
         val startedAt = System.currentTimeMillis()
         val conversations = when {
@@ -101,7 +102,11 @@ class ConversationDomainService(
             else -> DatabaseHelper.getUnarchivedConversations()
         }
         val queriedAt = System.currentTimeMillis()
-        val payloads = buildConversationPayloads(conversations, includeContextSummary)
+        val payloads = buildConversationPayloads(
+            conversations,
+            includeContextSummary,
+            lastMessageLimit,
+        )
         OmniLog.d(
             TAG,
             "listConversationPayloads archivedOnly=$archivedOnly 总数=${conversations.size} " +
@@ -114,6 +119,25 @@ class ConversationDomainService(
      * 分页版列表：只取一页（内部多取一条判断是否还有下一页）。
      * 归档页这类全量历史用它首屏秒开，滚动时再追加。
      */
+    /**
+     * 按天统计新建会话数（记忆中心热力图 / 用量统计卡片）。
+     *
+     * 这两个页面原来是「拉整张会话表 → 在 Dart 侧按天累加」，会话上千条时
+     * 既慢又费内存。聚合交给 SQLite，只回几十行。
+     */
+    suspend fun listConversationDailyCounts(
+        sinceMillis: Long,
+        untilMillis: Long,
+    ): List<Map<String, Any?>> {
+        val rows = DatabaseHelper.getConversationDailyCounts(sinceMillis, untilMillis)
+        return rows.map { row ->
+            linkedMapOf<String, Any?>(
+                "day" to row.day,
+                "count" to row.cnt,
+            )
+        }
+    }
+
     suspend fun listConversationPayloadsPage(
         archivedOnly: Boolean = false,
         limit: Int,
@@ -171,6 +195,7 @@ class ConversationDomainService(
     private suspend fun buildConversationPayloads(
         conversations: List<Conversation>,
         includeContextSummary: Boolean = true,
+        lastMessageLimit: Int = 0,
     ): List<Map<String, Any?>> {
         if (conversations.isEmpty()) return emptyList()
         val agentConversationIds = conversations
@@ -203,7 +228,8 @@ class ConversationDomainService(
                 conversation,
                 agentCwd = agentBinding?.cwd,
                 agentId = agentId,
-                includeContextSummary = includeContextSummary
+                includeContextSummary = includeContextSummary,
+                lastMessageLimit = lastMessageLimit,
             )
         }
     }
@@ -643,6 +669,9 @@ class ConversationDomainService(
         agentId: String? = null,
         // 列表场景（抽屉等）不需要上下文压缩摘要全文 —— 它是单条 payload 里最大的字段。
         includeContextSummary: Boolean = true,
+        // 大于 0 时截断 lastMessage：给 AI / 插件这类只需要「最后说了什么」的消费者，
+        // 避免把整条长消息也搬过去。0 表示不截断（UI 需要完整内容渲染预览）。
+        lastMessageLimit: Int = 0,
     ): Map<String, Any?> {
         val normalizedMode = normalizeConversationMode(conversation.mode)
         val resolvedAgentId = agentId
@@ -685,7 +714,13 @@ class ConversationDomainService(
                 0
             },
             "status" to conversation.status,
-            "lastMessage" to conversation.lastMessage,
+            "lastMessage" to conversation.lastMessage?.let { message ->
+                if (lastMessageLimit > 0 && message.length > lastMessageLimit) {
+                    message.take(lastMessageLimit)
+                } else {
+                    message
+                }
+            },
             "messageCount" to conversation.messageCount,
             "latestPromptTokens" to conversation.latestPromptTokens,
             "promptTokenThreshold" to conversation.promptTokenThreshold,
