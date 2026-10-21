@@ -58,6 +58,10 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
   // 一次性加载在会话多时必然卡顿。
   static const int _pageSize = 60;
   bool _hasMore = false;
+
+  /// 已经从数据库消费掉的行数（游标），不能用 `_conversations.length` 代替：
+  /// 删除/去重会让列表变短，长度一旦回退，下一页就会重复取已加载区间。
+  int _pageOffset = 0;
   bool _isLoadingMore = false;
   // 归档页是全量历史，分组是 O(N) 且原本每次 build 会被重算 3~4 次（各自 getter）。
   // 按 _conversations 实例做缓存：列表每次变更都是新实例，identical 即可正确失效。
@@ -148,6 +152,7 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       setState(() {
         _conversations = page.items;
         _hasMore = page.hasMore;
+        _pageOffset = page.items.length;
         _isLoadingMore = false;
         _expandedDateSections.removeWhere(
           (label, _) => !sectionLabels.contains(label),
@@ -181,7 +186,7 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       return;
     }
     final generation = _loadGeneration;
-    final offset = _conversations.length;
+    final offset = _pageOffset;
     _isLoadingMore = true;
     try {
       final page = await ConversationService.getConversationsPage(
@@ -202,7 +207,10 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
           ..._conversations,
           ...page.items.where((item) => !existingIds.contains(item.id)),
         ];
-        _hasMore = page.hasMore;
+        // 一页里全是「被隐藏过滤掉」的会话时原生仍会说 hasMore；此时若继续
+        // 允许加载，滚到底会反复请求空页、指示器永远转。空页直接收尾。
+        _hasMore = page.hasMore && page.items.isNotEmpty;
+        _pageOffset += page.items.length;
         _isLoadingMore = false;
       });
     } catch (error) {
