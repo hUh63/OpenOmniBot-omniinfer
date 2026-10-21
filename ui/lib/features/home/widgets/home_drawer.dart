@@ -160,6 +160,12 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       <String, String>{};
   final Map<String, Set<String>> _conversationImagePreviewFailures =
       <String, Set<String>>{};
+  /// 每条会话上次真正去读消息取缩略图的时间。签名随 updatedAt / messageCount
+  /// 变化，流式输出期间会一直变；没有这个节流，可见行会被反复要求重读整段消息。
+  final Map<String, DateTime> _conversationImagePreviewLoadedAt =
+      <String, DateTime>{};
+  /// 同一条会话两次缩略图重算的最小间隔。
+  static const Duration _imagePreviewReloadInterval = Duration(seconds: 12);
   final Map<String, bool> _expandedConversationSections = <String, bool>{};
   final Set<String> _busyConversationKeys = <String>{};
   final TextEditingController _titleEditingController = TextEditingController();

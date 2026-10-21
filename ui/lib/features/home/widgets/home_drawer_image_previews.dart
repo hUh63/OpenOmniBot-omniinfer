@@ -174,6 +174,7 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     }
 
     _conversationImagePreviewSignatures[threadKey] = signature;
+    _conversationImagePreviewLoadedAt[threadKey] = DateTime.now();
     _conversationImagePreviewCache.remove(threadKey);
     _conversationImagePreviewFailures.remove(threadKey);
     final future = _loadConversationImagePreviews(
@@ -320,11 +321,25 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     if (_conversationImagePreviewFutures.containsKey(threadKey)) {
       return;
     }
+    if (_conversationImagePreviewCache.containsKey(threadKey)) {
+      final lastLoadedAt = _conversationImagePreviewLoadedAt[threadKey];
+      if (lastLoadedAt != null &&
+          DateTime.now().difference(lastLoadedAt) <
+              HomeDrawerState._imagePreviewReloadInterval) {
+        // 刚读过一次：签名变化（流式输出的 updatedAt / lastMessage）先沿用旧缩略图。
+        return;
+      }
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (_conversationImagePreviewSignatures[threadKey] != signature) return;
-      if (_conversationImagePreviewCache.containsKey(threadKey)) return;
       if (_conversationImagePreviewFutures.containsKey(threadKey)) return;
+      // 只有「同签名且已有缓存」才算加载完成。首次加载时签名还没写进 map
+      // （要等 _conversationImagePreviewsFor 开始时才写），所以这里不能用
+      // `signatures[key] != signature` 早退，否则永远拉不到。
+      if (_conversationImagePreviewSignatures[threadKey] == signature &&
+          _conversationImagePreviewCache.containsKey(threadKey)) {
+        return;
+      }
       unawaited(_conversationImagePreviewsFor(conversation, notify: true));
     });
   }

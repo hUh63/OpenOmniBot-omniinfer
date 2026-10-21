@@ -489,15 +489,29 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       mode: _modeKey(mode),
     );
     var resolvedConversation = runtime?.conversation ?? conversation;
-    var resolvedMessages =
-        (runtime?.messages.isNotEmpty == true
-            ? List<ChatMessageModel>.from(runtime!.messages)
-            : null) ??
-        await ConversationHistoryService.getConversationMessages(
-          conversationId,
-          mode: _conversationModeForPageMode(mode),
-          expectedMessageCount: resolvedConversation?.messageCount,
-        );
+    final runtimeMessages = runtime?.messages.isNotEmpty == true
+        ? List<ChatMessageModel>.from(runtime!.messages)
+        : null;
+    var hasMoreFromFirstPage = false;
+    final loadedFromFirstPage = runtimeMessages == null;
+    List<ChatMessageModel> resolvedMessages;
+    if (runtimeMessages != null) {
+      resolvedMessages = runtimeMessages;
+    } else {
+      // 与 loadConversation 用同一套分页语义：只取最近一页，向上滚动时再按
+      // messageOffset 往前追加。这里原来是一次性拉整段消息，长会话（上千条）
+      // 首次进入某个 mode 时会把全部消息序列化过来再解析。
+      final firstPage =
+          await ConversationHistoryService.getConversationMessagesPaged(
+            conversationId,
+            mode: _conversationModeForPageMode(mode),
+            limit: 50,
+            offset: 0,
+            expectedMessageCount: resolvedConversation?.messageCount,
+          );
+      resolvedMessages = firstPage.messages;
+      hasMoreFromFirstPage = firstPage.hasMore;
+    }
     if (!mounted || !isConversationLifecycleTokenCurrent(lifecycleToken)) {
       return;
     }
@@ -516,6 +530,12 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _modeState(mode).messages
       ..clear()
       ..addAll(resolvedMessages);
+    if (runtime == null && loadedFromFirstPage) {
+      // 首屏是分页结果：把「还有更多」和已加载条数一起落到这个 mode 的状态上，
+      // 否则向上滚动时拿不到 offset、会停在第一页。
+      _modeState(mode).hasMoreMessages = hasMoreFromFirstPage;
+      _modeState(mode).messageOffset = resolvedMessages.length;
+    }
 
     if (runtime == null) {
       _runtimeCoordinator.ensureRuntime(
