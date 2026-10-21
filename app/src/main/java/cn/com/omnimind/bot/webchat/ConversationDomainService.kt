@@ -167,7 +167,12 @@ class ConversationDomainService(
         )
     }
 
-    /** SQL 搜索：标题 / 摘要 / 上下文摘要 / 最后一条消息。 */
+    /**
+     * SQL 搜索：标题 / 摘要 / 上下文摘要 / 最后一条消息，外加消息正文。
+     *
+     * 正文命中用一次 `payloadJson LIKE` 拿到会话 id（只回 id 列表），再按 id 取
+     * 会话；不再像原实现那样「逐条会话把全部消息拉回 Dart 建索引」。
+     */
     suspend fun searchConversationPayloads(
         keyword: String,
         limit: Int = 50
@@ -179,11 +184,28 @@ class ConversationDomainService(
             .replace("\\", "\\\\")
             .replace("%", "\\%")
             .replace("_", "\\_")
-        val conversations = DatabaseHelper.searchConversations(
-            pattern = "%$escaped%",
-            limit = limit.coerceIn(1, 200)
+        val safeLimit = limit.coerceIn(1, 200)
+        val pattern = "%$escaped%"
+        val byMetadata = DatabaseHelper.searchConversations(
+            pattern = pattern,
+            limit = safeLimit
         )
-        return buildConversationPayloads(conversations)
+        val seenIds = byMetadata.mapTo(HashSet()) { it.id }
+        val byBody = DatabaseHelper.searchConversationIdsByBody(
+            pattern = pattern,
+            limit = safeLimit
+        )
+            .asSequence()
+            .filter { id -> seenIds.add(id) }
+            .mapNotNull { id -> DatabaseHelper.getConversationById(id) }
+            .toList()
+        if (byBody.isEmpty()) {
+            return buildConversationPayloads(byMetadata)
+        }
+        val merged = (byMetadata + byBody)
+            .sortedByDescending { it.updatedAt }
+            .take(safeLimit)
+        return buildConversationPayloads(merged)
     }
 
     /**

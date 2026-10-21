@@ -35,6 +35,19 @@ interface AgentConversationEntryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entry: AgentConversationEntry): Long
 
+    /**
+     * 按消息正文搜索会话 id（正文存在 payloadJson 里）。
+     *
+     * 只回 conversationId（按会话分组去重、按最近更新时间排序），
+     * 由调用方再按 id 取会话——避免把整段消息搬进内存/跨线程。
+     */
+    @Query(
+        "SELECT conversationId FROM agent_conversation_entries " +
+            "WHERE entryType != 'stream_event' AND payloadJson LIKE :pattern ESCAPE '\\' " +
+            "GROUP BY conversationId ORDER BY MAX(updatedAt) DESC LIMIT :limit"
+    )
+    suspend fun searchConversationIdsByBody(pattern: String, limit: Int): List<Long>
+
     @Query(
         """
         SELECT $CHUNKED_ENTRY_PROJECTION FROM agent_conversation_entries

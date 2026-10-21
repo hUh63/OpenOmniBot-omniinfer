@@ -557,6 +557,12 @@ object DatabaseHelper {
         return getDatabase().conversationDao().searchByKeyword(pattern, limit)
     }
 
+    /** 按消息正文匹配的会话 id（去重），用于搜索时补齐「正文里提到」的会话。 */
+    suspend fun searchConversationIdsByBody(pattern: String, limit: Int): List<Long> {
+        return getDatabase().agentConversationEntryDao()
+            .searchConversationIdsByBody(pattern, limit)
+    }
+
     /**
      * 最新一条会话（按 updatedAt 倒序取 1 条）。
      * modes 为空表示不限模式；includeArchived 为 false 时只看未归档。
