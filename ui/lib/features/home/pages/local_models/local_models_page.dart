@@ -234,15 +234,23 @@ class _LocalModelsPageState extends State<LocalModelsPage>
 
   void _startPolling() {
     _pollTimer?.cancel();
+    var tick = 0;
     _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
+      tick++;
       switch (_LocalModelsTab.values[_tabController.index]) {
         case _LocalModelsTab.service:
+          // 已安装列表由事件驱动（download_update / downloads_changed /
+          // import_progress 都会刷新）。原来这里每 3 秒还调一次
+          // listAllInstalledModels，等于开着「服务」页签就持续重扫四个模型目录。
           _refreshConfig(silent: true);
-          _refreshInstalled(silent: true);
           break;
         case _LocalModelsTab.market:
-          _refreshMarket(silent: true);
+          // 市场列表是整份跨 channel 传过来的，没必要 3 秒一次；下载进度由事件
+          // 更新单条，这里只做低频兜底。
+          if (tick % 5 == 0) {
+            _refreshMarket(silent: true);
+          }
           break;
       }
     });
