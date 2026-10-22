@@ -473,6 +473,13 @@ class AgentRunService(
                 userMessageCreatedAt = (request["userMessageCreatedAt"] as? Number)?.toLong()
             )
         }
+        // runContexts 只在 cancelTask / clarifyTask 里移除，正常跑完的 run 没人清，
+        // 长时间使用（网页端一直在发消息）会一路累积。clarify / cancel 只关心
+        // 「这个会话当前这一次 run」，所以新 run 进来时把同会话的旧条目顶掉即可，
+        // map 大小收敛到活跃会话数量级。
+        runContexts.entries.removeIf { entry ->
+            entry.value.conversationId == conversationId && entry.key != taskId
+        }
         runContexts[taskId] = WebAgentRunContext(
             conversationId = conversationId,
             conversationMode = conversationMode
