@@ -113,15 +113,58 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.3
+          tag_name: v0.6.3-omniinfer-v6.5.4
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 会话链路去掉无用功：单行查询 / 按天聚合 / 按需缩略图 (v0.6.3-omniinfer-v6.5.3)"
+          name: "OmniInfer 版 · 崩溃/卡顿修复：本地服务启停、终端初始化、分页游标 (v0.6.3-omniinfer-v6.5.4)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.5.4)：本地模型与聊天长会话两个方向共 8 处修复。
+
+            一、启动/停止本地模型服务失败会直接崩溃
+            - startApiService / stopApiService（四个后端共八处）原来在裸的
+              scope.launch(IO) 里执行 JNI 加载模型与起局域网代理，没有 catch：
+              so 缺失、mmap 失败、OOM 都会变成未捕获协程异常，直接把 App 崩掉。
+              现在统一走 runSuspend —— IO 执行、失败回成明确错误，页面显示"启动失败"。
+
+            二、打开本地模型页在主线程扫模型目录
+            - MnnLocalModelsChannel.runSuspend 的 scope 是 Main.immediate，
+              而它下面全是文件系统/网络操作。listAllInstalledModels 会依次列
+              llama / mnn / qnn / litert 四个目录并读文件属性，全部发生在 UI 线程上。
+              现在改为 IO 执行、withContext(Main) 回包。
+
+            三、本地模型页每 3 秒重扫目录 + 重传整份市场列表
+            - 「服务」页签原来 3 秒刷一次已安装列表（= 重扫四个目录），而这份数据
+              本来就有事件驱动（下载完成 / downloads_changed / 导入完成都会刷新）。
+              现在只保留轻量的配置轮询；市场列表降到 15 秒一次做兜底。
+
+            四、本地模型页首屏两次目录扫描改成并行
+            - getOverview 与 listAllInstalledModels 互不依赖，原来串行 await，
+              页面要多等一整个扫描周期才出内容。
+
+            五、终端初始化进度会卡在「初始化中」
+            - embeddedTerminalInitProgressStream 是一个每次访问都调
+              receiveBroadcastStream() 的 getter，而 termux 设置页 / onboarding /
+              初始化浮层三处各订阅一份。原生只要收到任一 onCancel 就会拆掉整条分发，
+              谁先 dispose 谁就把另外两处的进度流断掉。现在全 App 共用一条订阅。
+            - OmniLinkPluginService.events 同样写法，一并改成缓存单例。
+
+            六、重发/删除消息后，向上翻历史会缺一段
+            - 分页游标的含义是「已从最新一端加载了多少条」。重发会删掉最新 N 条，
+              但游标没有跟着回收，之后「加载更早」会跳过同样多条，表现为历史中间
+              断了一截。现在删除后同步回退游标。
+
+            七、每条流式 delta 都在做全表扫描
+            - item/agentMessage/delta 原来用 where(...) 造出完整候选列表再取第一条，
+              长会话（上千条）下每个 delta 都是一次全表扫描加一次列表分配。
+              消息列表本身是「最新在前」，改为线性查找、命中即停。
+
+            说明：AI / 插件侧拿到的会话列表仍是全量与完整字段；抽屉缩略图仍读取整段
+            历史（更早的图片照样显示），降负载只落在「看不见的行不加载、12s 内不重复读」。
+
             本轮 (v6.5.3)：继续收口会话链路的性能问题，全部是「少做无用功」，
             不减少任何信息与功能。
 
