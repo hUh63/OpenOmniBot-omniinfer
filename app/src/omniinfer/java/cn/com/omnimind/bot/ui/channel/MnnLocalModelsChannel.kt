@@ -25,6 +25,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 class MnnLocalModelsChannel {
     companion object {
@@ -732,10 +733,22 @@ class MnnLocalModelsChannel {
         result: MethodChannel.Result,
         block: suspend () -> Any?,
     ) {
-        scope.launch {
-            runCatching { block() }
-                .onSuccess { value -> result.success(value) }
-                .onFailure { error -> result.error(ERROR_CODE, error.message ?: "unknown_error", null) }
+        // block 里基本都是文件系统 / 网络操作（扫描四个后端目录、刷新市场、删除模型），
+        // 不能在主线程跑：scope 是 Main.immediate，原来直接 launch 会让「打开本地模型页」
+        // 在主线程上列目录、读文件属性。改成 IO 执行，回调再切回主线程给 Flutter。
+        scope.launch(Dispatchers.IO) {
+            try {
+                val value = block()
+                withContext(Dispatchers.Main) { result.success(value) }
+            } catch (error: Throwable) {
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        ERROR_CODE,
+                        error.message ?: "unknown_error",
+                        null,
+                    )
+                }
+            }
         }
     }
 }
