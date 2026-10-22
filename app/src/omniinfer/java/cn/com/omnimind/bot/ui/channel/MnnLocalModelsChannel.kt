@@ -404,19 +404,16 @@ class MnnLocalModelsChannel {
 
             "startApiService" -> {
                 val modelId = call.argument<String>("modelId")
-                scope.launch(Dispatchers.IO) {
-                    val config = OmniInferModelsManager.startApiService(modelId)
-                    mainHandler.post { result.success(config) }
-                }
+                // 加载模型 / 起局域网代理可能抛异常（so 缺失、mmap 失败、OOM）。
+                // runSuspend 在 IO 上执行，异常也会回成 result.error；原来的裸
+                // scope.launch 会让这种异常直接冒到主线程把 App 崩掉。
+                runSuspend(result) { OmniInferModelsManager.startApiService(modelId) }
             }
 
-            "stopApiService" -> scope.launch(Dispatchers.IO) {
-                // Off the main thread: stopping unloads the engine, and that can
-                // wait on a generation that is still running. Running it inline on
-                // the MethodChannel thread (the UI thread) is what produced
-                // "Input dispatching timed out" in the ANR report.
-                val config = OmniInferModelsManager.stopApiService()
-                mainHandler.post { result.success(config) }
+            "stopApiService" -> runSuspend(result) {
+                // 卸载引擎可能等正在生成的请求结束，不能放在主线程；
+                // runSuspend 在 IO 上执行并把异常回成 result.error。
+                OmniInferModelsManager.stopApiService()
             }
 
             "startDownload" -> {
@@ -498,19 +495,16 @@ class MnnLocalModelsChannel {
 
             "startApiService" -> {
                 val modelId = call.argument<String>("modelId")
-                scope.launch(Dispatchers.IO) {
-                    val config = OmniInferMnnModelsManager.startApiService(modelId)
-                    mainHandler.post { result.success(config) }
-                }
+                // 加载模型 / 起局域网代理可能抛异常（so 缺失、mmap 失败、OOM）。
+                // runSuspend 在 IO 上执行，异常也会回成 result.error；原来的裸
+                // scope.launch 会让这种异常直接冒到主线程把 App 崩掉。
+                runSuspend(result) { OmniInferMnnModelsManager.startApiService(modelId) }
             }
 
-            "stopApiService" -> scope.launch(Dispatchers.IO) {
-                // Off the main thread: stopping unloads the engine, and that can
-                // wait on a generation that is still running. Running it inline on
-                // the MethodChannel thread (the UI thread) is what produced
-                // "Input dispatching timed out" in the ANR report.
-                val config = OmniInferMnnModelsManager.stopApiService()
-                mainHandler.post { result.success(config) }
+            "stopApiService" -> runSuspend(result) {
+                // 卸载引擎可能等正在生成的请求结束，不能放在主线程；
+                // runSuspend 在 IO 上执行并把异常回成 result.error。
+                OmniInferMnnModelsManager.stopApiService()
             }
 
             "startDownload" -> {
@@ -592,19 +586,16 @@ class MnnLocalModelsChannel {
 
             "startApiService" -> {
                 val modelId = call.argument<String>("modelId")
-                scope.launch(Dispatchers.IO) {
-                    val config = OmniInferQnnModelsManager.startApiService(modelId)
-                    mainHandler.post { result.success(config) }
-                }
+                // 加载模型 / 起局域网代理可能抛异常（so 缺失、mmap 失败、OOM）。
+                // runSuspend 在 IO 上执行，异常也会回成 result.error；原来的裸
+                // scope.launch 会让这种异常直接冒到主线程把 App 崩掉。
+                runSuspend(result) { OmniInferQnnModelsManager.startApiService(modelId) }
             }
 
-            "stopApiService" -> scope.launch(Dispatchers.IO) {
-                // Off the main thread: stopping unloads the engine, and that can
-                // wait on a generation that is still running. Running it inline on
-                // the MethodChannel thread (the UI thread) is what produced
-                // "Input dispatching timed out" in the ANR report.
-                val config = OmniInferQnnModelsManager.stopApiService()
-                mainHandler.post { result.success(config) }
+            "stopApiService" -> runSuspend(result) {
+                // 卸载引擎可能等正在生成的请求结束，不能放在主线程；
+                // runSuspend 在 IO 上执行并把异常回成 result.error。
+                OmniInferQnnModelsManager.stopApiService()
             }
 
             "startDownload" -> {
@@ -685,19 +676,16 @@ class MnnLocalModelsChannel {
 
             "startApiService" -> {
                 val modelId = call.argument<String>("modelId")
-                scope.launch(Dispatchers.IO) {
-                    val config = OmniInferLiteRtModelsManager.startApiService(modelId)
-                    mainHandler.post { result.success(config) }
-                }
+                // 加载模型 / 起局域网代理可能抛异常（so 缺失、mmap 失败、OOM）。
+                // runSuspend 在 IO 上执行，异常也会回成 result.error；原来的裸
+                // scope.launch 会让这种异常直接冒到主线程把 App 崩掉。
+                runSuspend(result) { OmniInferLiteRtModelsManager.startApiService(modelId) }
             }
 
-            "stopApiService" -> scope.launch(Dispatchers.IO) {
-                // Off the main thread: stopping unloads the engine, and that can
-                // wait on a generation that is still running. Running it inline on
-                // the MethodChannel thread (the UI thread) is what produced
-                // "Input dispatching timed out" in the ANR report.
-                val config = OmniInferLiteRtModelsManager.stopApiService()
-                mainHandler.post { result.success(config) }
+            "stopApiService" -> runSuspend(result) {
+                // 卸载引擎可能等正在生成的请求结束，不能放在主线程；
+                // runSuspend 在 IO 上执行并把异常回成 result.error。
+                OmniInferLiteRtModelsManager.stopApiService()
             }
 
             "startDownload" -> {
