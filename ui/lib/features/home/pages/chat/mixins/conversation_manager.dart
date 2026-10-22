@@ -438,7 +438,13 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       }
       if (_isConversationOperationCurrent(token)) {
         setState(() {
-          messages.addAll(pagedResult.messages);
+          // offset 分页在「加载过程中消息被删/被合并」时会重新吐回已加载的条目，
+          // 直接 addAll 会让同一句话在历史里出现两次，这里按 id 去重。
+          final knownIds = messages.map((message) => message.id).toSet();
+          final fresh = pagedResult.messages
+              .where((message) => knownIds.add(message.id))
+              .toList(growable: false);
+          messages.addAll(fresh);
           hasMoreMessages = pagedResult.hasMore;
           messageOffset = messageOffset + pagedResult.messages.length;
           isLoadingMore = false;
