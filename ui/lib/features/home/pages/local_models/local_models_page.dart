@@ -183,12 +183,19 @@ class _LocalModelsPageState extends State<LocalModelsPage>
       if (normalizedPreferredBackend != null) {
         await MnnLocalModelsService.setBackend(normalizedPreferredBackend);
       }
-      final overview = await MnnLocalModelsService.getOverview(
+      // overview（含当前后端的已安装列表）与「四后端合并列表」都要扫模型目录，
+      // 两者互不依赖，并行发出，页面能早一点出内容。
+      final overviewFuture = MnnLocalModelsService.getOverview(
         installedQuery: _installedSearchController.text.trim(),
         marketQuery: _marketSearchController.text.trim(),
         marketCategory: 'llm',
       );
-      final allInstalled = await MnnLocalModelsService.listAllInstalledModels();
+      // overview 失败会走下面 catch 分支，这条并行请求不能被漏掉（否则会留下
+      // 未处理的 Future 错误），所以自带兜底。
+      final installedFuture = MnnLocalModelsService.listAllInstalledModels()
+          .catchError((Object _) => const <MnnLocalModel>[]);
+      final overview = await overviewFuture;
+      final allInstalled = await installedFuture;
       if (!mounted) return;
       setState(() {
         _config = overview.config;
