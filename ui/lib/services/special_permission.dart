@@ -393,13 +393,22 @@ class EmbeddedTerminalAutoStartTaskRunResult {
   }
 }
 
+Stream<EmbeddedTerminalInitProgress>? _embeddedTerminalInitProgressBroadcast;
+
+/// 终端初始化进度：全 App 共用一个原生订阅。
+///
+/// `receiveBroadcastStream()` 每次调用都会向原生再注册一次监听，而原生只要收到
+/// 任一 onCancel 就会拆掉整条分发。这里原来是一个每次访问都新建的 getter，
+/// termux 设置页 / onboarding / 初始化浮层三个地方各订阅一份，谁先 dispose
+/// 谁的 cancel 就会把另外两处的进度流也断掉（表现为一直停在“初始化中”）。
 Stream<EmbeddedTerminalInitProgress> get embeddedTerminalInitProgressStream {
-  return _specialPermissionEvents.receiveBroadcastStream().map((event) {
-    final payload = event is Map
-        ? Map<dynamic, dynamic>.from(event)
-        : const <dynamic, dynamic>{};
-    return EmbeddedTerminalInitProgress.fromMap(payload);
-  });
+  return _embeddedTerminalInitProgressBroadcast ??=
+      _specialPermissionEvents.receiveBroadcastStream().map((event) {
+        final payload = event is Map
+            ? Map<dynamic, dynamic>.from(event)
+            : const <dynamic, dynamic>{};
+        return EmbeddedTerminalInitProgress.fromMap(payload);
+      });
 }
 
 Future<EmbeddedTerminalInitSnapshot> getEmbeddedTerminalInitSnapshot() async {
