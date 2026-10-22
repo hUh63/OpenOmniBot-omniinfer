@@ -493,6 +493,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         ? List<ChatMessageModel>.from(runtime!.messages)
         : null;
     var hasMoreFromFirstPage = false;
+    var scannedFromFirstPage = 0;
     final loadedFromFirstPage = runtimeMessages == null;
     List<ChatMessageModel> resolvedMessages;
     if (runtimeMessages != null) {
@@ -511,6 +512,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
           );
       resolvedMessages = firstPage.messages;
       hasMoreFromFirstPage = firstPage.hasMore;
+      scannedFromFirstPage = firstPage.scanned;
     }
     if (!mounted || !isConversationLifecycleTokenCurrent(lifecycleToken)) {
       return;
@@ -532,9 +534,11 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       ..addAll(resolvedMessages);
     if (runtime == null && loadedFromFirstPage) {
       // 首屏是分页结果：把「还有更多」和已加载条数一起落到这个 mode 的状态上，
-      // 否则向上滚动时拿不到 offset、会停在第一页。
-      _modeState(mode).hasMoreMessages = hasMoreFromFirstPage;
-      _modeState(mode).messageOffset = resolvedMessages.length;
+      // 否则向上滚动时拿不到 offset、会停在第一页。offset 用 SQL 消费行数
+      // （scanned），不是过滤后的消息条数。
+      _modeState(mode).hasMoreMessages =
+          hasMoreFromFirstPage && scannedFromFirstPage > 0;
+      _modeState(mode).messageOffset = scannedFromFirstPage;
     }
 
     if (runtime == null) {

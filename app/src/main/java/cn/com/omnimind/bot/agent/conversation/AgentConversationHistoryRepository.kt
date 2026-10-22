@@ -568,7 +568,7 @@ class AgentConversationHistoryRepository(
         conversationMode: String,
         limit: Int,
         offset: Int
-    ): Pair<List<Map<String, Any?>>, Boolean> = withContext(Dispatchers.IO) {
+    ): Triple<List<Map<String, Any?>>, Boolean, Int> = withContext(Dispatchers.IO) {
         val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
         // Deduplicate compatibility identities in SQL BEFORE paging. Hydrate only
         // the visible page plus one lookahead, never the entire large transcript.
@@ -584,7 +584,11 @@ class AgentConversationHistoryRepository(
         val normalized = normalizeEntriesForDisplay(entries)
         val messagePayloads = normalized.mapNotNull { entry -> entryToMessagePayload(entry) }
         val sorted = ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
-        Pair(sorted, hasMore)
+        // scanned = 本次真正从 SQL 消费掉的行数（entries.size）。payload 组装会
+        // 丢掉 transport / 空内容条目，`messages.size` 因此可能小于 limit；
+        // 调用方若用 messages.size 推进 offset，被丢掉的那些行会被反复重读，
+        // 极端情况下一页全被丢掉时 offset 原地不动，向上翻历史永远翻不动。
+        Triple(sorted, hasMore, entries.size)
     }
 
     suspend fun clearConversationMessages(

@@ -519,7 +519,7 @@ class ConversationHistoryService {
   }
 
   /// 分页获取对话消息列表
-  static Future<({List<ChatMessageModel> messages, bool hasMore})>
+  static Future<({List<ChatMessageModel> messages, bool hasMore, int scanned})>
   getConversationMessagesPaged(
     int conversationId, {
     ConversationMode mode = ConversationMode.agent,
@@ -548,6 +548,8 @@ class ConversationHistoryService {
       }
       final messagesList = result['messages'] as List<dynamic>? ?? [];
       final hasMore = result['hasMore'] as bool? ?? false;
+      // 原生按 SQL 行数回报 scanned；缺省时退回消息条数（老原生版本）。
+      final scanned = (result['scanned'] as num?)?.toInt() ?? messagesList.length;
       final messages = _decodeMessageList(messagesList, mode: mode);
       if (!hasMore && offset == 0) {
         final recoveredMessages = await _resolveNativeAndLegacyMessages(
@@ -558,12 +560,14 @@ class ConversationHistoryService {
           expectedMessageCount: expectedMessageCount,
         );
         final pageSize = limit <= 0 ? recoveredMessages.length : limit;
+        final taken = recoveredMessages.take(pageSize).toList();
         return (
-          messages: recoveredMessages.take(pageSize).toList(),
+          messages: taken,
           hasMore: recoveredMessages.length > pageSize,
+          scanned: taken.length,
         );
       }
-      return (messages: messages, hasMore: hasMore);
+      return (messages: messages, hasMore: hasMore, scanned: scanned);
     } on PlatformException catch (e) {
       debugPrint('分页获取对话历史失败: ${e.message}');
     } catch (e) {
@@ -579,7 +583,7 @@ class ConversationHistoryService {
     );
   }
 
-  static Future<({List<ChatMessageModel> messages, bool hasMore})>
+  static Future<({List<ChatMessageModel> messages, bool hasMore, int scanned})>
   _legacyPagedConversationMessages(
     int conversationId, {
     required ConversationMode mode,
@@ -603,6 +607,7 @@ class ConversationHistoryService {
     return (
       messages: persistedMessages.sublist(start, end),
       hasMore: end < persistedMessages.length,
+      scanned: end - start,
     );
   }
 

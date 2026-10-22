@@ -377,11 +377,15 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
             ? List<ChatMessageModel>.from(latestRuntimeMessages)
             : pagedResult.messages;
         setState(() {
-          hasMoreMessages = latestRuntimeMessages == null && pagedResult.hasMore;
+          hasMoreMessages = latestRuntimeMessages == null &&
+              pagedResult.hasMore &&
+              pagedResult.scanned > 0;
           // The history provider is allowed to return a short page. Advance
-          // from what was actually received so a partial response cannot
-          // create a gap before the next page.
-          messageOffset = savedMessages.length;
+          // from what was actually consumed from SQL (scanned) - a page whose
+          // entries were partly filtered out must not leave a gap.
+          messageOffset = latestRuntimeMessages != null
+              ? savedMessages.length
+              : pagedResult.scanned;
           // `messages` may be the shared runtime's live list. Deliver the
           // snapshot to onConversationLoaded below; its coordinator owns
           // reconciliation and must see the current items before any mutation.
@@ -445,8 +449,12 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
               .where((message) => knownIds.add(message.id))
               .toList(growable: false);
           messages.addAll(fresh);
-          hasMoreMessages = pagedResult.hasMore;
-          messageOffset = messageOffset + pagedResult.messages.length;
+          // offset 要按「SQL 实际消费的行数」推进：组装阶段会丢掉一部分条目
+          // （transport / 空内容 / 恢复过滤），用 messages.length 会让被丢掉的
+          // 行被反复重读，最坏情况下 offset 原地不动、向上翻历史永远翻不动。
+          messageOffset = messageOffset + pagedResult.scanned;
+          hasMoreMessages =
+              pagedResult.hasMore && pagedResult.scanned > 0;
           isLoadingMore = false;
         });
       }
