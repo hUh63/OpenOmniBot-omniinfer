@@ -113,15 +113,61 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.2
+          tag_name: v0.6.3-omniinfer-v6.5.3
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 会话列表分页 + SQL 搜索 + 索引 (v0.6.3-omniinfer-v6.5.2)"
+          name: "OmniInfer 版 · 会话链路去掉无用功：单行查询 / 按天聚合 / 按需缩略图 (v0.6.3-omniinfer-v6.5.3)"
           prerelease: true
           draft: false
           body: |
+            本轮 (v6.5.3)：继续收口会话链路的性能问题，全部是「少做无用功」，
+            不减少任何信息与功能。
+
+            一、打开聊天页不再拉整张表
+            - 「恢复上次会话」原来先 getAllConversations 再线性找第一条，等于每次进
+              聊天页都做一次全表快照 + 全量跨 channel 传输。新增原生
+              getLatestConversation（SQL LIMIT 1），取不到或被隐藏时回退全量，行为不变。
+
+            二、会话活跃度交给 SQLite 聚合
+            - 用量统计页的热力图原来拉整张会话表到 Dart 侧按天累加；现在一条
+              GROUP BY day 查询回几十行。
+
+            三、抽屉首屏先出图
+            - 打开抽屉先取最近 40 条立即渲染，全量仍在后台补（快照缓存、日程分组、
+              图片预览都还需要完整列表，最终结果与之前完全一致）。
+
+            四、搜索补回「消息正文」命中
+            - 上一版把抽屉搜索改成 SQL 后，正文里提到关键词的会话搜不到了。现在多一次
+              payloadJson LIKE，按会话分组只回 conversationId，再按 id 取会话合并。
+            - 正文命中的结果若没有元数据片段，用最后一条消息的开头作为命中说明。
+
+            五、抽屉缩略图按需加载 + 节流
+            - 原来抽屉一打开就对「所有未归档会话」逐条拉完整消息抠缩略图，而列表是
+              懒构建的，绝大多数根本不可见。现在只预热最近 16 条，其余行首次可见才加载
+              （仍然读整段历史，更早的图片照样能显示），同一会话 12s 内不重复读。
+            - 修掉上一版引入的回归：按需加载的早退条件写反了，导致预热名单之外的行
+              永远拿不到缩略图。
+
+            六、切换 mode 首屏不再一次性读整段历史
+            - chat_page_lifecycle 的 mode 预热原来是 getConversationMessages（全部消息），
+              与 loadConversation 的 50 条分页不一致。现在统一走分页，并把
+              hasMoreMessages / messageOffset 一起落到该 mode 上，向上滚动仍能继续加载。
+
+            七、归档页分页修复
+            - 游标改用原生实际消费的行数（scanned）：此前用列表长度，删除条目或隐藏会话
+              被过滤后游标会回退，导致重复请求同一区间（表现为「滚了但没新内容」）。
+            - 一页全被过滤时收尾，不再反复请求空页。
+            - 归档会话在抽屉里显示「已归档」徽章（此前只有搜索态才显示，看起来像普通会话）。
+
+            八、Vibe App 会话恢复修复
+            - 恢复上次会话的判断写的是 mode == ConversationMode.normal，而 normal 会被
+              归一成 agent，条件恒为 false —— 每次启动都把记录删掉重新建会话。现在改用
+              单条查询 + 只判断「存在且未归档」，历史对话能续上。
+
+            说明：AI / 插件侧拿到的会话列表仍是全量、完整字段（不裁剪摘要、不截断消息）。
+
             本轮 (v6.5.2)：会话列表与归档页按体验重做——分页、SQL 搜索、索引。
 
             一、列表改滚动分页（首屏 60 条）
