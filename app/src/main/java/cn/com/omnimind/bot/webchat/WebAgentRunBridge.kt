@@ -76,7 +76,12 @@ private data class WebAgentRunState(
 
 internal class WebAgentRunBridge(
     context: Context,
-    private val manager: AgentRuntimeManager
+    private val manager: AgentRuntimeManager,
+    // AgentRuntimeManager 的补充事件监听器按 key 存进 map，后注册的会**顶掉**
+    // 同 key 的旧实例。原来所有来源都写死 "webchat"：只要计划任务调度器与
+    // webchat/IM/MCP 各建一份 bridge，后建的那份就会抢走全部 agent 事件，
+    // 先建的那份 run 状态永远等不到完成（hasActiveRun 一直为 true）。
+    listenerKey: String = "webchat",
 ) {
     private val appContext = context.applicationContext
     private val historyRepository = AgentConversationHistoryRepository(appContext)
@@ -95,7 +100,7 @@ internal class WebAgentRunBridge(
 
     init {
         manager.setSupplementalEventListener(
-            key = "webchat"
+            key = listenerKey
         ) { event -> events.trySend(event) }
         scope.launch {
             for (event in events) {

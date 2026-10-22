@@ -64,7 +64,10 @@ class WorkspaceScheduledTaskScheduler(
     private val agentRunBridge by lazy {
         WebAgentRunBridge(
             context = appContext,
-            manager = AgentRuntimeManager.getInstance(appContext)
+            manager = AgentRuntimeManager.getInstance(appContext),
+            // 与 webchat / IM / MCP 的 bridge 分开注册：同一个 key 会被后来者覆盖，
+            // 被覆盖的一方收不到 agent 事件，run 状态会永远停在未完成。
+            listenerKey = "workspace-scheduler",
         )
     }
 
