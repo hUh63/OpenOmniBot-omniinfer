@@ -183,6 +183,15 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
       notify: notify,
     );
     _conversationImagePreviewFutures[threadKey] = future;
+    // 在飞标记必须无条件回收：原来只在「签名没变」的分支里 remove，而流式输出会
+    // 让 updatedAt/lastMessage 在加载途中就变掉，于是这条会话的 future 永远留在
+    // map 里，_scheduleConversationImagePreviewLoad 一进来就 return——缩略图从此
+    // 不再更新（要等整行滚出可见区被 prune 才恢复）。按身份删，避免误删后续新请求。
+    future.whenComplete(() {
+      if (identical(_conversationImagePreviewFutures[threadKey], future)) {
+        _conversationImagePreviewFutures.remove(threadKey);
+      }
+    });
     return future;
   }
 
