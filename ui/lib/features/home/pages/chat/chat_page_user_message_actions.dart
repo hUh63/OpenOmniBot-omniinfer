@@ -503,6 +503,10 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
     setState(() {
       if (shouldClearEditState) _editingUserMessageId = null;
       _messages.removeWhere((item) => removedIds.contains(item.id));
+      // removedIds 取自 _messages.take(...)（最新的几条）。分页游标是「已加载条数」，
+      // 不跟着往回收的话，之后向上加载更早消息会跳过同样多条（表现为历史里缺一段）。
+      final nextOffset = messageOffset - removedIds.length;
+      messageOffset = nextOffset < 0 ? 0 : nextOffset;
     });
     if (shouldClearEditState) {
       _modeState(_activeMode).draftMessage = '';
