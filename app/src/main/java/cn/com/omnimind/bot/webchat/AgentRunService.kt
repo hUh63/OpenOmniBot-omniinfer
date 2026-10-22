@@ -363,10 +363,11 @@ class AgentRunService(
         ConversationDomainService(context.applicationContext)
     }
     private val agentRunBridge by lazy {
-        WebAgentRunBridge(
-            context = context.applicationContext,
-            manager = AgentRuntimeManager.getInstance(context)
-        )
+        // AgentRunService 被 webchat、IM、MCP 各建一份（MCP 每次 startServer 都新建），
+        // 而 WebAgentRunBridge 内部有独立的 CoroutineScope、事件 Channel，并把自己
+        // 注册进 AgentRuntimeManager 的监听表——每 new 一份就多一份永不回收的常驻对象，
+        // 且新实例会把同 key 的旧监听顶掉。bridge 本身不持外部状态，做成进程级共享。
+        sharedBridge(context.applicationContext)
     }
 
     fun hasActiveConversationRun(
@@ -526,4 +527,18 @@ class AgentRunService(
         return accepted + ("previousTaskId" to normalizedTaskId)
     }
 
+    companion object {
+        @Volatile
+        private var bridgeInstance: WebAgentRunBridge? = null
+
+        private fun sharedBridge(context: Context): WebAgentRunBridge {
+            bridgeInstance?.let { return it }
+            return synchronized(this) {
+                bridgeInstance ?: WebAgentRunBridge(
+                    context = context,
+                    manager = AgentRuntimeManager.getInstance(context)
+                ).also { bridgeInstance = it }
+            }
+        }
+    }
 }
