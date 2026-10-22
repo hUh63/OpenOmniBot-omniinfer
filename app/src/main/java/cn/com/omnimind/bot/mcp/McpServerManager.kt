@@ -29,6 +29,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.request.host
+import io.ktor.server.request.local
 import io.ktor.server.request.path
 import io.ktor.server.request.receive
 import io.ktor.server.response.header
@@ -588,13 +589,11 @@ object McpServerManager {
     }
 
     private fun isLanRequest(call: io.ktor.server.application.ApplicationCall): Boolean {
-        val remoteHost = call.request.headers["X-Forwarded-For"]
-            ?.split(",")
-            ?.firstOrNull()
-            ?.trim()
-            ?: call.request.headers["X-Real-IP"]
-            ?: call.request.host()
-        return McpNetworkUtils.isLanAddress(remoteHost)
+        // 只认真实 TCP 对端地址。X-Forwarded-For / X-Real-IP 是客户端随手就能
+        // 填的 header，之前拿它做「是不是局域网」判定，等于任何能从公网摸到端口
+        // 的人加一行 `X-Forwarded-For: 192.168.1.2` 就通过了这道检查。本项目没有
+        // 反向代理：本地 ACP 走 loopback，WebChat 走局域网直连，真实地址足够。
+        return McpNetworkUtils.isLanAddress(call.request.local.remoteHost)
     }
 
     // ==================== Token 管理 ====================

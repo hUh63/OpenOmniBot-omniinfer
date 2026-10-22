@@ -19,7 +19,12 @@ import io.ktor.server.response.respondFile
 import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.*
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * WebChat API 路由注册。
@@ -27,6 +32,8 @@ import kotlinx.coroutines.flow.collect
  * 从 McpServerManager 拆分而来，包含对话管理、事件流、工作区文件、浏览器镜像等路由。
  */
 object WebChatRoutes {
+
+    private const val SSE_HEARTBEAT_INTERVAL_MS = 15_000L
 
     private val gson by lazy { Gson() }
 
@@ -194,11 +201,34 @@ object WebChatRoutes {
                 call.respondTextWriter(contentType = ContentType.Text.EventStream) {
                     write(": connected\n\n")
                     flush()
-                    RealtimeHub.stream().collect { event ->
-                        write("id: ${event.id}\n")
-                        write("event: ${event.event}\n")
-                        write("data: ${gson.toJson(event.data)}\n\n")
-                        flush()
+                    // 空闲时原来一条数据都不发：手机锁屏 / 路由器 NAT 超时会把这条
+                    // 连接悄悄掐掉，而前端 EventSource 仍以为连着，页面就此「不再
+                    // 自动刷新」，要手动刷新才能恢复。定期写一行注释既是心跳，也是
+                    // 探活——写失败说明对端已断，抛出去让 collect 一起收摊。
+                    // 写操作串行化，避免心跳与业务事件交错写坏 SSE 帧。
+                    val writeLock = Mutex()
+                    coroutineScope {
+                        val heartbeat = launch {
+                            while (true) {
+                                delay(SSE_HEARTBEAT_INTERVAL_MS)
+                                writeLock.withLock {
+                                    write(": ping\n\n")
+                                    flush()
+                                }
+                            }
+                        }
+                        try {
+                            RealtimeHub.stream().collect { event ->
+                                writeLock.withLock {
+                                    write("id: ${event.id}\n")
+                                    write("event: ${event.event}\n")
+                                    write("data: ${gson.toJson(event.data)}\n\n")
+                                    flush()
+                                }
+                            }
+                        } finally {
+                            heartbeat.cancel()
+                        }
                     }
                 }
             }
