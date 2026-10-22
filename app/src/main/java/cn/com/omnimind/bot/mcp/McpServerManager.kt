@@ -28,8 +28,8 @@ import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.origin
 import io.ktor.server.request.host
-import io.ktor.server.request.local
 import io.ktor.server.request.path
 import io.ktor.server.request.receive
 import io.ktor.server.response.header
@@ -593,7 +593,7 @@ object McpServerManager {
         // 填的 header，之前拿它做「是不是局域网」判定，等于任何能从公网摸到端口
         // 的人加一行 `X-Forwarded-For: 192.168.1.2` 就通过了这道检查。本项目没有
         // 反向代理：本地 ACP 走 loopback，WebChat 走局域网直连，真实地址足够。
-        return McpNetworkUtils.isLanAddress(call.request.local.remoteHost)
+        return McpNetworkUtils.isLanAddress(call.request.origin.remoteHost)
     }
 
     // ==================== Token 管理 ====================
