@@ -804,23 +804,32 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         update?['entryId'],
         update?['messageId'],
       ]);
-      final candidates = runtime.messages.where(
-        (message) =>
-            message.type == 1 &&
-            message.user == 2 &&
-            (taskId == null ||
-                message.streamMeta?['parentTaskId']?.toString() == taskId),
-      );
+      // 每条 delta 都会走到这里。原来先 where(...) 造一个完整候选列表再取第一条，
+      // 长会话（上千条消息）每个 delta 都是 O(n) 的全表扫描加一次列表分配。
+      // messages 是「最新在前」，直接线性找第一条匹配即可（正常情况几步命中）。
+      ChatMessageModel? firstAssistantWhere(
+        bool Function(ChatMessageModel message) test,
+      ) {
+        for (final message in runtime.messages) {
+          if (message.type != 1 || message.user != 2) continue;
+          if (taskId != null &&
+              message.streamMeta?['parentTaskId']?.toString() != taskId) {
+            continue;
+          }
+          if (test(message)) return message;
+        }
+        return null;
+      }
+
       if (itemId != null) {
-        assistantMessage = candidates.cast<ChatMessageModel?>().firstWhere(
+        assistantMessage = firstAssistantWhere(
           (message) =>
-              message!.id == itemId ||
+              message.id == itemId ||
               message.id.contains(itemId) ||
               message.streamMeta?['entryId']?.toString() == itemId,
-          orElse: () => null,
         );
       }
-      assistantMessage ??= candidates.isEmpty ? null : candidates.first;
+      assistantMessage ??= firstAssistantWhere((_) => true);
       final assistantText = assistantMessage?.text?.trim() ?? '';
       if (assistantMessage == null || assistantText.isEmpty) {
         return;
