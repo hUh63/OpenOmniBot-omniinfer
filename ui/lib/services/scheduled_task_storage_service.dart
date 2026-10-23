@@ -32,8 +32,27 @@ class ScheduledTaskStorageService {
     }
   }
 
-  /// 加载所有定时任务
+  static DateTime? _lastPrefsReloadAt;
+
+  /// 加载所有定时任务。
+  ///
+  /// 读之前先让 SharedPreferences 重新从磁盘加载：原生闹钟执行完会直写
+  /// `flutter.scheduled_tasks`（更新 nextExecutionTime / 删除一次性任务），
+  /// 而 Dart 侧拿到的是初次 init 时的内存快照。不 reload 的话列表一直显示旧
+  /// 时间，而且任何一次「读快照 → 改 → 整表写回」都会把已执行的任务恢复。
+  /// 2 秒内重复调用只 reload 一次，避免抽屉高频刷新反复读盘。
   static Future<List<ScheduledTask>> loadScheduledTasks() async {
+    final now = DateTime.now();
+    final lastReload = _lastPrefsReloadAt;
+    if (lastReload == null ||
+        now.difference(lastReload) > const Duration(seconds: 2)) {
+      _lastPrefsReloadAt = now;
+      try {
+        await StorageService.reload();
+      } catch (e) {
+        print('重载定时任务存储失败: $e');
+      }
+    }
     return loadScheduledTasksSync();
   }
 

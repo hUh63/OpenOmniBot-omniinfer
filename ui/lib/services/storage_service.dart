@@ -17,6 +17,16 @@ class StorageService {
     _prefs = await SharedPreferences.getInstance();
   }
 
+  /// 重新从磁盘加载一次。
+  ///
+  /// SharedPreferences 在 Dart 侧是**进程级内存缓存**，只在 init 时读一次；
+  /// 而原生侧会直写同一个 `FlutterSharedPreferences` 文件（定时任务执行后更新
+  /// 下次执行时间、删掉一次性任务）。不 reload 就会一直用陈旧快照，随后整表
+  /// 覆盖写回把原生已删除的任务"复活"并重复执行。
+  static Future<void> reload() async {
+    await _prefs?.reload();
+  }
+
   static SharedPreferences get _instance {
     if (_prefs == null) {
       throw Exception('StorageService未初始化，请先调用 StorageService.init()');

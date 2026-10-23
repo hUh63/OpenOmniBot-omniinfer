@@ -3424,21 +3424,26 @@ class AssistsCoreManager(private val context: Context) {
     fun getConversationsByPage(call: MethodCall, result: MethodChannel.Result) {
         val offset = call.argument<Int>("offset") ?: 0
         val limit = call.argument<Int>("limit") ?: 20
+        val archivedOnly = call.argument<Boolean>("archivedOnly") ?: false
 
-        workJob.launch {
+        // 原来是「全表取回 → 内存 subList」的假分页：每一页都把整张会话表重建一次
+        // （含每条会话的 contextSummary）并经 MethodChannel 全量序列化。改成真正的
+        // SQL LIMIT/OFFSET，并且把数据库 IO 放到 IO 调度器（workJob 是 Default，
+        // DB 阻塞会把调度池占满，后续通道方法跟着排队）。
+        workJob.launch(Dispatchers.IO) {
             try {
-                val all = conversationDomainService.listConversationPayloads(
-                    includeArchived = true
+                val page = conversationDomainService.listConversationPayloadsPage(
+                    archivedOnly = archivedOnly,
+                    limit = limit,
+                    offset = offset
                 )
-                val jsonList = if (offset >= all.size) {
-                    emptyList()
-                } else {
-                    all.subList(offset.coerceAtLeast(0), (offset + limit).coerceAtMost(all.size))
-                }
+                val items = page["items"]
                 withContext(Dispatchers.Main) {
-                    result.success(jsonList)
+                    result.success(items)
                 }
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
                 OmniLog.e(TAG, "分页获取对话列表失败: ${e.message}")
                 withContext(Dispatchers.Main) {
                     result.error("GET_CONVERSATIONS_BY_PAGE_ERROR", e.message, null)
