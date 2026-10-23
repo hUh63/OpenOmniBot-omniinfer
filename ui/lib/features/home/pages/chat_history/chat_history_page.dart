@@ -221,6 +221,19 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
       setState(() {
         _isLoadingMore = false;
       });
+    } finally {
+      // 刷新抢跑（generation 变了）会从上面的 setState 之前 return，失败分支也
+      // 可能抛在 setState 之前——这两种路径都要复位，否则 `_isLoadingMore`
+      // 永远为 true，之后滚到底、点击都被挡住，再也翻不了页。
+      if (!_isLoadingMore) {
+        // 正常路径已在 setState 里复位，无需重复。
+      } else if (mounted) {
+        setState(() {
+          _isLoadingMore = false;
+        });
+      } else {
+        _isLoadingMore = false;
+      }
     }
   }
 
@@ -261,6 +274,11 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
             : _conversations.length;
         _conversations = List<ConversationModel>.from(_conversations)
           ..insert(restoredIndex, conversation);
+      } else if (_pageOffset > 0) {
+        // _pageOffset 是「已消费的 SQL 行数」。这一行从数据库里删掉后，后面
+        // 所有行都往前挪一位，游标不减就会跳过一条更早的会话——用户会看到
+        // 「删一条之后历史里少一条，怎么翻都找不到」。
+        _pageOffset -= 1;
       }
     });
 
@@ -306,6 +324,10 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
             : _conversations.length;
         _conversations = List<ConversationModel>.from(_conversations)
           ..insert(restoredIndex, conversation);
+      } else if (_pageOffset > 0) {
+        // 同删除：归档/取消归档会让这条会话离开本列表的查询集合，数据库里的
+        // 行序也整体前移一位，游标要跟着退一格，否则会跳过一条更早的会话。
+        _pageOffset -= 1;
       }
     });
 

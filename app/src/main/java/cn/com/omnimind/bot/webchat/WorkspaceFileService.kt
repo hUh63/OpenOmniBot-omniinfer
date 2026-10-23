@@ -83,6 +83,23 @@ class WorkspaceFileService(
             workspace = workspace
         )
         require(file.exists() && file.isFile) { "文件不存在：${file.absolutePath}" }
+        // 只请求「一段」时走流式读。原来无论请求多少字符都先 readText()，
+        // 工作区里上百 MB 的日志/模型文件会让预览直接把内存打爆（String 还要
+        // 按 UTF-16 再翻一倍）。只有真正要全文的请求才整文件读入。
+        if (maxChars != null || offset > 0 || lineStart != null) {
+            val streamedSlice = sliceWorkspaceFileByStream(
+                file = file,
+                maxChars = maxChars,
+                offset = offset,
+                lineStart = lineStart,
+                lineCount = lineCount
+            )
+            return linkedMapOf(
+                "file" to filePayload(file, workspace),
+                "content" to streamedSlice.content,
+                "truncated" to streamedSlice.truncated
+            )
+        }
         val content = file.readText()
         val renderedContent = sliceWorkspaceFileText(
             content = content,
@@ -259,6 +276,90 @@ internal data class WorkspaceFileTextSlice(
     val content: String,
     val truncated: Boolean,
 )
+
+/**
+ * 流式切片：按请求只读取需要的那一段，避免大文件整份进内存。
+ * 语义与 [sliceWorkspaceFileText] 对齐（同样的 offset / lineStart / lineCount /
+ * maxChars 优先级：lineStart 优先，其次 offset，最后 maxChars 截断）。
+ */
+internal fun sliceWorkspaceFileByStream(
+    file: File,
+    maxChars: Int?,
+    offset: Int,
+    lineStart: Int?,
+    lineCount: Int?,
+): WorkspaceFileTextSlice {
+    val charLimit = maxChars?.takeIf { it > 0 }
+    if (lineStart != null) {
+        val from = (lineStart - 1).coerceAtLeast(0)
+        val want = lineCount?.coerceAtLeast(1)
+        val lines = ArrayList<String>()
+        var moreLines = false
+        file.bufferedReader().use { reader ->
+            var index = 0
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (index >= from) {
+                    if (want != null && lines.size >= want) {
+                        moreLines = true
+                        break
+                    }
+                    lines.add(line)
+                }
+                index++
+            }
+        }
+        val sliced = lines.joinToString("\n")
+        val rendered = charLimit?.let { sliced.take(it) } ?: sliced
+        return WorkspaceFileTextSlice(
+            content = rendered,
+            truncated = moreLines || rendered.length < sliced.length
+        )
+    }
+    if (offset > 0 || charLimit != null) {
+        val builder = StringBuilder()
+        var skipped = 0L
+        var truncated = false
+        file.bufferedReader().use { reader ->
+            val buffer = CharArray(8192)
+            while (true) {
+                val read = reader.read(buffer)
+                if (read <= 0) break
+                var start = 0
+                if (skipped < offset) {
+                    val need = (offset - skipped).coerceAtMost(read.toLong()).toInt()
+                    skipped += need
+                    start = need
+                }
+                if (start < read) {
+                    val remaining = charLimit?.let { it - builder.length }
+                    if (remaining != null && remaining <= 0) {
+                        truncated = true
+                        break
+                    }
+                    val take = if (remaining == null) read - start else minOf(remaining, read - start)
+                    builder.append(buffer, start, take)
+                    if (remaining != null && take < read - start) {
+                        truncated = true
+                        break
+                    }
+                }
+                if (charLimit != null && builder.length >= charLimit) {
+                    truncated = true
+                    break
+                }
+            }
+        }
+        return WorkspaceFileTextSlice(content = builder.toString(), truncated = truncated)
+    }
+    return sliceWorkspaceFileText(
+        content = file.readText(),
+        maxChars = maxChars,
+        offset = offset,
+        lineStart = lineStart,
+        lineCount = lineCount
+    )
+}
 
 internal fun sliceWorkspaceFileText(
     content: String,

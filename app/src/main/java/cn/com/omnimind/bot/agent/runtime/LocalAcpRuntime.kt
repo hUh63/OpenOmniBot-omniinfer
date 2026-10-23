@@ -3529,34 +3529,43 @@ internal class LocalAcpRuntime(
             pendingPermissions[requestId] = pending
             serverRequestOwners.register(requestId, activeAgentId(), threadId)
             val activeTurnId = turnOwnership.activeTurnId(threadId)
-            emitHostMessage(
-                linkedMapOf(
-                    "jsonrpc" to "2.0",
-                    "id" to requestId,
-                    "method" to "session/request_permission",
-                    // Host-envelope identity; ACP params stay standard.
-                    "turnId" to activeTurnId,
-                    "params" to mapOf(
-                        "sessionId" to threadId,
-                        // Forward the official ToolCallUpdate unchanged:
-                        // operation details must not be replaced by option labels.
-                        "toolCall" to standardAcpPermissionToolCallPayload(toolCall),
-                        "options" to permissions.map {
-                            mapOf(
-                                "optionId" to it.optionId.value,
-                                "name" to it.name,
-                                "kind" to it.kind.name.lowercase()
-                            )
-                        }
+            // 和 awaitElicitation 保持一致：emitHostMessage 抛异常、或 await 所在的
+            // 协程被取消时，这两个登记项原来会永久留在 map 里——弹窗数据（选项列表 +
+            // 未完成的 Deferred）越积越多，而且同 requestId 的后续响应会打在一个
+            // 已经死掉的 Deferred 上，respondToPermission 还会返回 ok=true。
+            try {
+                emitHostMessage(
+                    linkedMapOf(
+                        "jsonrpc" to "2.0",
+                        "id" to requestId,
+                        "method" to "session/request_permission",
+                        // Host-envelope identity; ACP params stay standard.
+                        "turnId" to activeTurnId,
+                        "params" to mapOf(
+                            "sessionId" to threadId,
+                            // Forward the official ToolCallUpdate unchanged:
+                            // operation details must not be replaced by option labels.
+                            "toolCall" to standardAcpPermissionToolCallPayload(toolCall),
+                            "options" to permissions.map {
+                                mapOf(
+                                    "optionId" to it.optionId.value,
+                                    "name" to it.name,
+                                    "kind" to it.kind.name.lowercase()
+                                )
+                            }
+                        )
                     )
                 )
-            )
-            val selected = pending.response.await()
-            return RequestPermissionResponse(
-                outcome = selected?.let {
-                    RequestPermissionOutcome.Selected(it.optionId)
-                } ?: RequestPermissionOutcome.Cancelled
-            )
+                val selected = pending.response.await()
+                return RequestPermissionResponse(
+                    outcome = selected?.let {
+                        RequestPermissionOutcome.Selected(it.optionId)
+                    } ?: RequestPermissionOutcome.Cancelled
+                )
+            } finally {
+                pendingPermissions.remove(requestId, pending)
+                serverRequestOwners.remove(requestId, activeAgentId(), threadId)
+            }
         }
 
         override suspend fun terminalCreate(

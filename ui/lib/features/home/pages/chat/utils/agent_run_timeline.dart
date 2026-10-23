@@ -174,6 +174,17 @@ List<AgentRunTimelineEntry> buildAgentRunTimelineEntries(
   final emittedTaskIds = <String>{};
   final entries = <AgentRunTimelineEntry>[];
 
+  // 先单遍把「候选消息」按 taskId 分组。原来每个新 taskId 都要对整份消息
+  // 列表过滤一次（O(N × 轮次数)），长会话每次新增一张卡片、每翻一屏都要在
+  // UI 线程重算几十万次字符串比较，这是长会话掉帧的主因。
+  final taskMessagesByTaskId = <String, List<ChatMessageModel>>{};
+  for (final message in renderMessages) {
+    if (!_isAgentRunCandidateMessage(message)) continue;
+    final messageTaskId = agentRunId(message);
+    if (messageTaskId == null) continue;
+    (taskMessagesByTaskId[messageTaskId] ??= <ChatMessageModel>[]).add(message);
+  }
+
   for (final message in renderMessages) {
     // Artifact metadata is already carried by the corresponding tool card and
     // powers the activity strip above the composer. Rendering the reducer's
@@ -195,7 +206,7 @@ List<AgentRunTimelineEntry> buildAgentRunTimelineEntries(
     }
 
     final group = _buildTimelineGroup(
-      renderMessages,
+      taskMessagesByTaskId[taskId] ?? const <ChatMessageModel>[],
       taskId: taskId,
       isActive: normalizedActiveTaskIds.contains(taskId),
       conversationAgentId: conversationAgentId,

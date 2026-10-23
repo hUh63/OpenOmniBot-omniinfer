@@ -650,6 +650,10 @@ class AgentRuntimeManager private constructor(
             clearActiveTurns()
             pendingTurnThreads.clear()
             remoteTurnOwnership.clear()
+            // threadStartMutexes 是「每会话一把锁」的缓存，只会 computeIfAbsent
+            // 增长，历史会话多了就永久占着。断开时把没被持有的清掉；正在用的
+            // 保留，否则同一会话的并发 thread/start 会各拿一把新锁。
+            threadStartMutexes.entries.removeIf { !it.value.isLocked }
         }
         return status()
     }

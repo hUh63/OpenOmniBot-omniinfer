@@ -2290,7 +2290,12 @@ class AgentEventReducer {
         kind: 'tool_content_delta',
         existingMessage: existing == null
             ? null
-            : runtime.messages.firstWhere((message) => message.id == cardId),
+            : runtime.messages.cast<ChatMessageModel?>().firstWhere(
+                (message) => message?.id == cardId,
+                // 卡片 id 可能来自 pending 表而消息还没落进 runtime.messages，
+                // 无 orElse 时 firstWhere 会抛 StateError，把整条工具增量流打断。
+                orElse: () => null,
+              ),
       ),
     );
   }

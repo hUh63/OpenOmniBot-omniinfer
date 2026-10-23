@@ -71,6 +71,8 @@ class _LocalModelsPageState extends State<LocalModelsPage>
   bool _loadingInstalled = true;
   bool _loadingMarket = true;
   bool _loadingConfig = true;
+  // 每次「启动/停止服务」这类权威变更 +1，用来丢掉迟到的轮询快照。
+  int _configMutation = 0;
   bool _serviceBusy = false;
   String _serviceBusyModelId = '';
   _PortTarget _selectedPortTarget = _PortTarget.local;
@@ -296,9 +298,14 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     if (!silent && mounted) {
       setState(() => _loadingConfig = true);
     }
+    final mutation = _configMutation;
     try {
       final config = await MnnLocalModelsService.getConfig();
       if (!mounted) return;
+      // 3s 轮询和「启动服务」是两条并发请求。启动要几秒（加载模型），这期间
+      // 轮询照旧发 getConfig，若它的旧快照晚于启动结果落地，界面会把刚起来的
+      // 服务刷回「未启动」。启动/停止会先 ++_configMutation，这里据此丢弃旧快照。
+      if (mutation != _configMutation) return;
       setState(() {
         _config = config;
         _loadingConfig = false;
@@ -742,6 +749,7 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     setState(() {
       _serviceBusy = true;
       _serviceBusyModelId = targetModelId;
+      _configMutation += 1;
     });
     try {
       final config = await MnnLocalModelsService.startApiService(
@@ -775,7 +783,10 @@ class _LocalModelsPageState extends State<LocalModelsPage>
 
   Future<void> _stopLanServiceAndUnloadModel() async {
     if (_serviceBusy) return;
-    setState(() => _serviceBusy = true);
+    setState(() {
+      _serviceBusy = true;
+      _configMutation += 1;
+    });
     try {
       final config = await MnnLocalModelsService.stopApiService();
       if (!mounted) return;

@@ -502,8 +502,18 @@ class TerminalToolHandler(
 
     private suspend fun closeOwnedDirectTerminalSessions() {
         terminalSessionRegistry.listSessionIds(SharedHelper.DIRECT_TERMINAL_WORKSPACE_ID).forEach { sessionId ->
-            runCatching { stopDirectTerminalSession(sessionId) }
-            forgetOwnedTerminalSession(sessionId)
+            // 停止失败时不能把所有权登记也删掉：登记同时是 session_exec/read/stop
+            // 的鉴权依据，删掉之后这个 shell 既停不掉也回收不了，等于把孤儿进程
+            // 钉死在系统里。失败就留着登记，下次 dispose 或 Agent 自己 stop 还能重试。
+            val stopped = runCatching { stopDirectTerminalSession(sessionId) }.isSuccess
+            if (stopped) {
+                forgetOwnedTerminalSession(sessionId)
+            } else {
+                OmniLog.w(
+                    "TerminalToolHandler",
+                    "stop owned direct terminal session failed: $sessionId",
+                )
+            }
         }
     }
 

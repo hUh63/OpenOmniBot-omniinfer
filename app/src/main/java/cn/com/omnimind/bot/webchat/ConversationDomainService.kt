@@ -425,8 +425,22 @@ class ConversationDomainService(
                 ?.takeIf { it > 0L }
                 ?: existing.contextSummaryUpdatedAt,
             status = conversationMap.readInt("status") ?: existing.status,
-            lastMessage = conversationMap["lastMessage"]?.toString() ?: existing.lastMessage,
-            messageCount = conversationMap.readInt("messageCount") ?: existing.messageCount,
+            // lastMessage / messageCount 是「谁在写谁权威」的元数据：Flutter 侧
+            // 传上来的是列表快照，可能是几秒前（甚至流式输出过程中）的旧值。
+            // 整行写回会把服务端刚刷新的摘要/条数顶掉，表现就是抽屉里最后一条
+            // 消息回退、会话莫名跳到顶部。只有 payload 确实更靠前（messageCount
+            // 比库里大）时才采用它。
+            lastMessage = if (
+                (conversationMap.readInt("messageCount") ?: 0) > existing.messageCount
+            ) {
+                conversationMap["lastMessage"]?.toString()
+            } else {
+                existing.lastMessage
+            },
+            messageCount = maxOf(
+                conversationMap.readInt("messageCount") ?: existing.messageCount,
+                existing.messageCount,
+            ),
             latestPromptTokens = conversationMap.readInt("latestPromptTokens")
                 ?: existing.latestPromptTokens,
             promptTokenThreshold = conversationMap.readInt("promptTokenThreshold")
@@ -784,7 +798,10 @@ class ConversationDomainService(
         require(isAgentMode(conversationMode)) {
             "agentId is only supported for Agent conversations."
         }
-        if (normalizeConversationMode(conversationMode) == "normal") {
+        // 必须比对「原始存储值」。normalizeConversationMode 会把包括历史值
+        // normal 在内的所有别名统一成 agent，用它去比 "normal" 永远是 false，
+        // 这条「小婉会话不能换 Harness」的约束实际从未生效。
+        if (conversationMode.trim().lowercase() == "normal") {
             require(normalizedAgentId == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
                 "Xiaowan conversations cannot switch Harness; create a new conversation."
             }
