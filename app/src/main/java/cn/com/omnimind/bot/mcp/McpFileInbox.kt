@@ -28,6 +28,9 @@ data class McpFileRecord(
 object McpFileInbox {
     private const val TAG = "[McpFileInbox]"
     private const val TOKEN_TTL_MS = 15 * 60 * 1000L
+    /** 收件箱记录的文件保留 24 小时，并对条数设上限（见 cleanupLocked）。 */
+    private const val RECORD_TTL_MS = 24 * 60 * 60 * 1000L
+    private const val MAX_RECORDS = 20
 
     private val lock = Any()
     private val records = ConcurrentHashMap<String, McpFileRecord>()
@@ -114,10 +117,23 @@ object McpFileInbox {
     }
 
     private fun cleanupLocked() {
-        val missingIds = records.values.filter { record ->
-            !File(record.path).exists()
-        }.map { it.id }
-        missingIds.forEach { removeLocked(it) }
+        val now = System.currentTimeMillis()
+        // 原来只清「文件已丢失」的记录：分享进来的每个文件（可能是几百 MB 视频）
+        // 都永久留在 filesDir 里，latest()/list() 还会把几天前的旧文件当成收件箱
+        // 内容返回给 Agent。这里补上 TTL 与条数上限。
+        records.values
+            .filter { record ->
+                !File(record.path).exists() || now - record.createdAt > RECORD_TTL_MS
+            }
+            .map { it.id }
+            .forEach { removeLocked(it) }
+        val overflow = records.size - MAX_RECORDS
+        if (overflow > 0) {
+            records.values
+                .sortedBy { it.createdAt }
+                .take(overflow)
+                .forEach { removeLocked(it.id) }
+        }
     }
 
     private fun removeLocked(fileId: String): Boolean {

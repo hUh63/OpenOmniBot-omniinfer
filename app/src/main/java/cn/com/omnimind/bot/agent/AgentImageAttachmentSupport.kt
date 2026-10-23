@@ -198,7 +198,19 @@ internal object AgentImageAttachmentSupport {
         if (!sourceDataUrl.isNullOrBlank()) {
             val modelAttachment = LinkedHashMap(base)
             modelAttachment["dataUrl"] = normalizeImageDataUrl(sourceDataUrl)
-            return modelAttachment to LinkedHashMap(modelAttachment)
+            // 历史里不要存 base64。一张几百 KB 的图 base64 后就是一条数 MB 的
+            // payload：Room 单行有 2MB 的 CursorWindow 读取上限，历史会直接读不
+            // 出来；而且每次重建 prompt 都要把历史里所有图片重新读盘 + 重新编码。
+            // 只要已经落盘（有 path / workspacePath），历史只留路径，dataUrl 在真正
+            // 发模型时按需生成；确实只有 dataUrl 的（未落盘）才退回原样保存。
+            val hasOnDiskPath = !base["path"]?.toString().isNullOrBlank() ||
+                !base["workspacePath"]?.toString().isNullOrBlank()
+            val historyAttachment = if (hasOnDiskPath) {
+                LinkedHashMap(base)
+            } else {
+                LinkedHashMap(modelAttachment)
+            }
+            return modelAttachment to historyAttachment
         }
 
         return base to base

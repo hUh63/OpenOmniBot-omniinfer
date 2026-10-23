@@ -142,6 +142,9 @@ object AppUpdateManager {
     private const val WORK_NAME = "app_update_periodic_check"
     private const val PERIODIC_CHECK_HOURS = 12L
     private const val SILENT_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+    /** 静默检查失败后的最小重试间隔（弱网/离线设备避免每次启动都发一次请求）。 */
+    private const val SILENT_RETRY_BACKOFF_MS = 30 * 60 * 1000L
+    private const val SILENT_ATTEMPT_KEY = "app_update_silent_attempt_at"
     private const val CLOUD_SERVICE_POLICY_MAX_AGE_MS = 24 * 60 * 60 * 1000L
     private const val USER_AGENT = "OpenOmniBot-App"
     private const val EDITION_STANDARD = "standard"
@@ -178,9 +181,19 @@ object AppUpdateManager {
 
     fun requestSilentCheckIfDue(context: Context) {
         schedulePeriodicChecks(context)
+        val appContext = context.applicationContext
         CoroutineScope(Dispatchers.IO).launch {
+            // force = true 会把 checkNow 里的 6 小时节流直接绕过（方法名是 IfDue，
+            // 实际每次启动都真发请求）；而失败路径不写 checkedAt，所以离线设备每次
+            // 启动都会发一次注定失败的请求。这里尊重节流，并对失败加 30 分钟退避。
+            val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val lastAttempt = prefs.getLong(SILENT_ATTEMPT_KEY, 0L)
+            if (System.currentTimeMillis() - lastAttempt < SILENT_RETRY_BACKOFF_MS) {
+                return@launch
+            }
+            prefs.edit().putLong(SILENT_ATTEMPT_KEY, System.currentTimeMillis()).apply()
             runCatching {
-                checkNow(context.applicationContext, force = true)
+                checkNow(appContext, force = false)
             }.onFailure {
                 OmniLog.w(TAG, "Silent app update check failed: ${it.message}")
             }

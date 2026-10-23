@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.mcp
 
 import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.agent.runtime.withMcpRequestTimeout
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,11 @@ object RemoteMcpClient {
     internal const val DEFAULT_PROTOCOL_VERSION = "2025-11-25"
     internal const val MODERN_PROTOCOL_VERSION = "2026-07-28"
     private const val SESSION_ID_HEADER = "Mcp-Session-Id"
+    /** 请求级整体超时：SSE 的 readTimeout 是空闲超时，会被 keepalive 无限续上。 */
+    private const val MCP_LIST_TOOLS_TIMEOUT_MS = 30_000L
+    private const val MCP_CALL_TOOL_TIMEOUT_MS = 120_000L
+    /** AUTO -> SSE 回退结果的保鲜期；过期后重新按 AUTO 探测。 */
+    private const val SSE_FALLBACK_TTL_MS = 60_000L
     private const val PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
     private val gson = Gson()
     private val mapType = object : TypeToken<Map<String, Any?>>() {}.type
@@ -61,6 +67,8 @@ object RemoteMcpClient {
         val initialized: Boolean = false,
         val initializeResult: Map<String, Any?> = emptyMap(),
         val effectiveTransport: RemoteMcpTransport? = null,
+        /** effectiveTransport 记录的时刻：AUTO 回退到 SSE 只在短时间内生效。 */
+        val effectiveTransportAt: Long = 0L,
         val protocolEra: ProtocolEra = ProtocolEra.UNKNOWN,
     )
 
@@ -127,7 +135,17 @@ object RemoteMcpClient {
         }
     }
 
-    suspend fun listTools(config: RemoteMcpServerConfig): List<RemoteMcpToolDescriptor> = try {
+    suspend fun listTools(config: RemoteMcpServerConfig): List<RemoteMcpToolDescriptor> =
+        // SSE 传输下的 readTimeout 是「空闲」超时：服务器每隔几十秒发一行 keepalive
+        // 就能把它无限续上，readLine() 永不返回，工具列表/工具调用会永久挂住整轮
+        // agent（界面一直「运行中」，只能手动停）。这里加请求级整体 deadline。
+        withMcpRequestTimeout(MCP_LIST_TOOLS_TIMEOUT_MS, "tools/list") {
+            listToolsWithRetry(config)
+        }
+
+    private suspend fun listToolsWithRetry(
+        config: RemoteMcpServerConfig,
+    ): List<RemoteMcpToolDescriptor> = try {
         listToolsOnce(config)
     } catch (error: HttpStatusException) {
         val hasStatefulSession = sessions[config.id]?.sessionId != null
@@ -208,6 +226,18 @@ object RemoteMcpClient {
         toolName: String,
         arguments: Map<String, Any?>,
         meta: Map<String, Any?> = emptyMap()
+    ): RemoteMcpCallResult = withMcpRequestTimeout(
+        MCP_CALL_TOOL_TIMEOUT_MS,
+        "tools/call:$toolName"
+    ) {
+        callToolWithRetry(config, toolName, arguments, meta)
+    }
+
+    private suspend fun callToolWithRetry(
+        config: RemoteMcpServerConfig,
+        toolName: String,
+        arguments: Map<String, Any?>,
+        meta: Map<String, Any?>,
     ): RemoteMcpCallResult = try {
         callToolOnce(config, toolName, arguments, meta)
     } catch (error: HttpStatusException) {
@@ -300,14 +330,14 @@ object RemoteMcpClient {
     fun invalidateSession(serverId: String? = null) {
         if (serverId == null) {
             sessions.clear()
-            initializationLocks.clear()
-            protocolProbeLocks.clear()
             modernHeaderBindings.clear()
             return
         }
+        // 不要在这里移除 initializationLocks / protocolProbeLocks：正在持锁或在
+        // 排队等锁的调用方会继续用旧锁，而下一个调用方 getOrPut 拿到的是**新的**
+        // Mutex —— 同一服务器的初始化互斥直接失效，可能并发跑出两个会话（一个
+        // 成为孤儿），并与 404 重试互相放大成重连风暴。锁对象很小，常驻无害。
         sessions.remove(serverId)
-        initializationLocks.remove(serverId)
-        protocolProbeLocks.remove(serverId)
         modernHeaderBindings.keys.removeAll { it.startsWith("$serverId\u0000") }
     }
 
@@ -739,6 +769,11 @@ object RemoteMcpClient {
                 initialized = initialized ?: current?.initialized ?: false,
                 initializeResult = initializeResult ?: current?.initializeResult.orEmpty(),
                 effectiveTransport = effectiveTransport ?: current?.effectiveTransport,
+                effectiveTransportAt = if (effectiveTransport != null) {
+                    System.currentTimeMillis()
+                } else {
+                    current?.effectiveTransportAt ?: 0L
+                },
                 protocolEra = protocolEra ?: current?.protocolEra ?: ProtocolEra.UNKNOWN,
             )
         }
@@ -756,8 +791,16 @@ object RemoteMcpClient {
     }
 
     private fun usesSseTransport(config: RemoteMcpServerConfig): Boolean {
+        // AUTO 回退到 SSE 的结果原来会永久写进 session（只有 close/invalidate 能清）：
+        // 服务器某次瞬时 404/405 之后就永远走 legacy SSE（每次调用先开一条 SSE 长连接
+        // 再 POST），即使它早就恢复正常，表现为「某些服务器突然变慢/偶尔卡」。
+        // 这里给回退结果加一个短 TTL，过期后自动回到 AUTO 重新探测。
+        val sseFallbackFresh = sessions[config.id]?.let { session ->
+            session.effectiveTransport == RemoteMcpTransport.SSE &&
+                System.currentTimeMillis() - session.effectiveTransportAt < SSE_FALLBACK_TTL_MS
+        } == true
         return config.transport == RemoteMcpTransport.SSE ||
-            sessions[config.id]?.effectiveTransport == RemoteMcpTransport.SSE ||
+            sseFallbackFresh ||
             (
                 config.transport == RemoteMcpTransport.AUTO &&
                     looksLikeSseEndpoint(config.endpointUrl)

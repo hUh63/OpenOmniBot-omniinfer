@@ -142,6 +142,8 @@ class HttpAgentLlmClient(
     private companion object {
         const val REASONING_UPDATE_INTERVAL_MS =
             ReasoningStreamUpdatePolicy.DEFAULT_INTERVAL_MS
+        /** 正文流式刷新最小间隔：避免每个分片都做一次全量快照（O(n²)）。 */
+        const val CONTENT_UPDATE_INTERVAL_MS = 30L
         const val DEFAULT_CLOSED_STREAM_ERROR =
             "chat completion stream closed before completion signal"
         val TRANSIENT_STREAM_FAILURE_MARKERS = listOf(
@@ -444,6 +446,8 @@ class HttpAgentLlmClient(
         var reasoningEmitJob: Job? = null
         val reasoningLock = Any()
         var lastContent = ""
+        var lastContentBufferLength = 0
+        var lastContentEmitAt = 0L
         var lastToolInputEmitAt = 0L
         val lastToolInputs = mutableMapOf<String, AssistantToolCall>()
         var eventSource: EventSource? = null
@@ -529,7 +533,18 @@ class HttpAgentLlmClient(
             }
         }
 
-        fun emitContent() {
+        fun emitContent(force: Boolean = false) {
+            // 原来每收到一个分片就 accumulator.currentContent()（toString + 全量
+            // sanitize，都是 O(n)），长回复累计成 O(n²)：越到后面越卡、发热。
+            // 先用 O(1) 的长度判断有没有新内容，再按最小间隔取快照；收尾路径
+            // （completeStream）带 force，保证最后一段一定发出去。
+            val bufferLength = accumulator.currentContentLength()
+            if (bufferLength <= 0) return
+            val now = System.currentTimeMillis()
+            if (!force) {
+                if (bufferLength == lastContentBufferLength) return
+                if (now - lastContentEmitAt < CONTENT_UPDATE_INTERVAL_MS) return
+            }
             val content = accumulator.currentContent()
             if (content.isEmpty() || content == lastContent) return
             synchronized(emissionLock) {
@@ -545,6 +560,8 @@ class HttpAgentLlmClient(
                     dispatchReasoningSnapshot(reasoningSnapshot)
                 }
                 lastContent = content
+                lastContentBufferLength = bufferLength
+                lastContentEmitAt = now
                 if (onContentUpdate != null) {
                     enqueueEmission {
                         onContentUpdate.invoke(content)
@@ -576,7 +593,7 @@ class HttpAgentLlmClient(
                 )
                 enforceReasoningEchoIfRequired(turn, routeInfo)
                 emitReasoning(force = true)
-                emitContent()
+                emitContent(force = true)
                 emitToolInputs(force = true)
                 turn
             }.onSuccess { turn ->

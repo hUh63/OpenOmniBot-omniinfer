@@ -234,6 +234,9 @@ class AgentLlmStreamAccumulator(
 
     fun currentContent(): String = AgentTextSanitizer.sanitizeUtf16(contentBuffer.toString())
 
+    /** O(1) 的内容长度，用于「内容有没有变化」的快速判断（避免每次都 toString+sanitize）。 */
+    fun currentContentLength(): Int = contentBuffer.length
+
     /** Partial input is display-only. Never invent an identity or parse it for execution. */
     fun currentToolCalls(): List<AssistantToolCall> = toolCallBuilders.values.mapNotNull { builder ->
         val id = builder.id?.takeIf(String::isNotBlank) ?: return@mapNotNull null

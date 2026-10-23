@@ -13,6 +13,10 @@ object RemoteMcpConfigStore {
     private val mmkv: MMKV?
         get() = MMKV.defaultMMKV()
     private val persistedListType = object : TypeToken<List<Map<String, Any?>>>() {}.type
+    // MMKV 里只有一份 JSON：所有「读整表 → 改 → 写整表」都必须串行化，否则并发
+    // 发现（刷新时对所有服务器并行打请求）会把用户刚新增/删除的服务器、健康状态
+    // 和工具数整表覆盖回去（表现是「刚加的服务器刷一下就消失」）。
+    private val writeLock = Any()
 
     fun listServers(): List<RemoteMcpServerConfig> {
         ensureMigrated()
@@ -28,7 +32,7 @@ object RemoteMcpConfigStore {
         return listServers().filter { it.enabled }
     }
 
-    fun upsertServer(config: RemoteMcpServerConfig): RemoteMcpServerConfig {
+    fun upsertServer(config: RemoteMcpServerConfig): RemoteMcpServerConfig = synchronized(writeLock) {
         val normalized = normalize(config)
         val current = listServers().toMutableList()
         val index = current.indexOfFirst { it.id == normalized.id }
@@ -53,12 +57,12 @@ object RemoteMcpConfigStore {
         return merged
     }
 
-    fun deleteServer(serverId: String) {
+    fun deleteServer(serverId: String) = synchronized(writeLock) {
         val current = listServers().filterNot { it.id == serverId }
         saveServers(current)
     }
 
-    fun setServerEnabled(serverId: String, enabled: Boolean): RemoteMcpServerConfig? {
+    fun setServerEnabled(serverId: String, enabled: Boolean): RemoteMcpServerConfig? = synchronized(writeLock) {
         val current = listServers().toMutableList()
         val index = current.indexOfFirst { it.id == serverId }
         if (index < 0) return null
@@ -74,7 +78,7 @@ object RemoteMcpConfigStore {
         toolCount: Int,
         lastError: String?,
         lastSyncedAt: Long = System.currentTimeMillis()
-    ): RemoteMcpServerConfig? {
+    ): RemoteMcpServerConfig? = synchronized(writeLock) {
         val current = listServers().toMutableList()
         val index = current.indexOfFirst { it.id == serverId }
         if (index < 0) return null

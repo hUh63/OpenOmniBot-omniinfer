@@ -42,10 +42,16 @@ internal class AgentHistoryToolOutputProjection(
             (payload[key] as? com.google.gson.JsonPrimitive)?.asString?.takeIf { it.isNotBlank() }
         }.firstOrNull()
         val assistant = (payload["modelAssistantMessageJson"] as? com.google.gson.JsonPrimitive)?.asString
-        if (!assistant.isNullOrBlank() && callId != null) {
-            payload["modelToolCallId"] = callId
+        if (!assistant.isNullOrBlank()) {
+            // 白名单保留了 assistant 消息（带 tool_calls），就必须同时补上配对的
+            // tool 结果，否则重放出来的历史是「assistant.tool_calls 后面没有 tool
+            // 消息」的非法序列，provider 会直接 400（tool_calls must be followed by
+            // tool messages），这一轮对话永久失败。历史里 callId 为空的老条目也
+            // 存在（写库时缺失会被落成空串），用 entry.id 合成一个确定性 id。
+            val resolvedCallId = callId ?: "restored_${entry.id}"
+            payload["modelToolCallId"] = resolvedCallId
             payload["modelToolResultMessageJson"] = gson.toJson(mapOf(
-                "role" to "tool", "tool_call_id" to callId, "content" to notice,
+                "role" to "tool", "tool_call_id" to resolvedCallId, "content" to notice,
             ))
         }
         return entry.copy(payloadJson = gson.toJson(payload))
