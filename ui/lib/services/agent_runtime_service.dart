@@ -1946,6 +1946,12 @@ class AgentRuntimeService {
           },
         });
       },
+      // 原生侧关掉这条流（引擎重建 / 通道被清）时订阅会 done。这里原来是
+      // 只在 `_nativeEventSubscription == null` 时才接线，done 之后引用还在，
+      // 于是这条流永久不会再连——agent 运行状态在 App 内再也不更新。
+      onDone: () {
+        _nativeEventSubscription = null;
+      },
     );
   }
 
