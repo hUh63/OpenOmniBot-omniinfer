@@ -492,7 +492,9 @@ class _ScheduleTaskSheetState extends State<ScheduleTaskSheet> {
           : null,
       countdownMinutes: _selectedTabIndex == 1 ? _countdownMinutes : null,
       repeatDaily: _repeatDaily,
-      isEnabled: true,
+      // 编辑已有任务时保留它原来的启用状态：硬写成 true 会把已停用的任务
+      // 悄悄重新启用（还立刻排上闹钟）。
+      isEnabled: widget.existingTask.isEnabled,
       createdAt: widget.existingTask.createdAt,
     );
 

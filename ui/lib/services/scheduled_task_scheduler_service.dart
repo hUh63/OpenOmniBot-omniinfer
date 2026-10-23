@@ -124,7 +124,12 @@ class ScheduledTaskSchedulerService {
       _reminderTimers[task.id]?.cancel();
       _reminderTimers.remove(task.id);
       if (!task.isEnabled) {
-        unawaited(AssistsMessageService.deleteWorkspaceScheduledTask(task.id));
+        // 停用不能实现成删除：原生 deleteTask 会连 Flutter 侧的记录一起清掉，
+        // 任务重启后就彻底消失、无法再启用。upsert 会让原生走「enabled=false →
+        // 取消闹钟 + nextExecutionTime=null」的正确分支，记录保留。
+        unawaited(
+          AssistsMessageService.upsertWorkspaceScheduledTask(task.toJson()),
+        );
         return;
       }
       unawaited(

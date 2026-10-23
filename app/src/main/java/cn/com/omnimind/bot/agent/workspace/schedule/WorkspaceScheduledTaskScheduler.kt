@@ -181,6 +181,17 @@ class WorkspaceScheduledTaskScheduler(
                 nextMap[task.taskId] = task.copy(nextExecutionTime = null)
                 return@forEach
             }
+            val existingNext = task.nextExecutionTime
+            if (!task.repeatDaily && existingNext != null && existingNext <= now) {
+                // 一次性任务的触发时间已经在 App 未运行/被强杀/关机期间错过。
+                // 原来会被重新算成「将来」，于是用户下次打开 App 半小时后突然
+                // 被执行一次（repeatDaily=false 形同虚设）。错过即失效更符合预期。
+                cancelAlarm(task.taskId)
+                val expired = task.copy(enabled = false, nextExecutionTime = null)
+                nextMap[task.taskId] = expired
+                upsertTaskInFlutterStorage(expired)
+                return@forEach
+            }
             val nextExecution = resolveNextExecutionAt(
                 task = task,
                 nowMillis = now,
@@ -208,11 +219,11 @@ class WorkspaceScheduledTaskScheduler(
         }
 
         var executedTask = current
-        runCatching {
+        val executeFailed = runCatching {
             executedTask = executeTask(current)
         }.onFailure {
             OmniLog.e(TAG, "execute scheduled task failed: ${it.message}")
-        }
+        }.isFailure
 
         if (executedTask.repeatDaily && executedTask.enabled) {
             val nextExecution = resolveNextExecutionAt(
@@ -227,6 +238,14 @@ class WorkspaceScheduledTaskScheduler(
             if (nextExecution != null) {
                 scheduleAlarm(updated)
             }
+        } else if (executeFailed) {
+            // 一次性任务执行失败时不能走「成功即删除」那段：任务会凭空消失、
+            // 没有任何通知，用户完全查不到发生过什么。保留记录并置为停用。
+            val failed = executedTask.copy(enabled = false, nextExecutionTime = null)
+            taskMap[normalizedId] = failed
+            persistTaskMap(taskMap)
+            cancelAlarm(normalizedId)
+            upsertTaskInFlutterStorage(failed)
         } else {
             taskMap.remove(normalizedId)
             persistTaskMap(taskMap)

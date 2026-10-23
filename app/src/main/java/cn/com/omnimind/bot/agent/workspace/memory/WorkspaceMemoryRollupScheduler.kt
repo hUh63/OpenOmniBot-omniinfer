@@ -47,8 +47,14 @@ class WorkspaceMemoryRollupScheduler(
     }
 
     fun onAlarmTriggered() {
-        memoryService.rollupDay()
-        scheduleNext()
+        // 一次性闹钟已经被消费掉，必须无条件排下一次：原来 rollupDay() 抛异常
+        // （断网 / 模型不可用 / 写索引失败）就跳过 scheduleNext()，夜间整理从此
+        // 永久停摆，设置页的「下次整理」还一直停在过去那个时间点。
+        try {
+            memoryService.rollupDay()
+        } finally {
+            scheduleNext()
+        }
     }
 
     private fun scheduleNext() {

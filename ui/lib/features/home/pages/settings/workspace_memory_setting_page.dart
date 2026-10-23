@@ -72,6 +72,9 @@ class _WorkspaceMemorySettingPageState
         _rollupEnabled = rollup.enabled;
       });
     } catch (e) {
+      // await 期间可能已经离开这个页面，dispose 后再用 context 查
+      // ScaffoldMessenger 会触发 "deactivated widget's ancestor" 断言。
+      if (!mounted) return;
       showToast(context.l10n.workspaceMemoryLoadFailed, type: ToastType.error);
     } finally {
       if (mounted) {
@@ -90,6 +93,7 @@ class _WorkspaceMemorySettingPageState
       _soulController.text = saved;
       showToast(context.l10n.agentSoulSaved, type: ToastType.success);
     } catch (e) {
+      if (!mounted) return;
       showToast(context.l10n.agentSoulSaveFailed, type: ToastType.error);
     } finally {
       if (mounted) {
@@ -108,6 +112,7 @@ class _WorkspaceMemorySettingPageState
       _chatController.text = saved;
       showToast(context.l10n.chatPromptSaved, type: ToastType.success);
     } catch (e) {
+      if (!mounted) return;
       showToast(context.l10n.chatPromptSaveFailed, type: ToastType.error);
     } finally {
       if (mounted) {
@@ -126,6 +131,7 @@ class _WorkspaceMemorySettingPageState
       _memoryController.text = saved;
       showToast(context.l10n.workspaceMemorySaved, type: ToastType.success);
     } catch (e) {
+      if (!mounted) return;
       showToast(context.l10n.workspaceMemorySaveFailed, type: ToastType.error);
     } finally {
       if (mounted) {
