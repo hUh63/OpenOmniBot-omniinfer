@@ -101,7 +101,6 @@ class Mem0MemoryService {
         .map((line) => line.substring(2).trim())
         .where((line) => line.isNotEmpty)
         .toList();
-    final now = DateTime.now();
     return lines.asMap().entries.map((entry) {
       final index = entry.key;
       final memory = entry.value;
@@ -110,8 +109,11 @@ class Mem0MemoryService {
         id: id,
         memory: memory,
         score: null,
-        createdAt: now,
-        updatedAt: now,
+        // 持久化文件里只有「- 内容」行，没有时间戳。原来硬写 DateTime.now()，
+        // 于是所有记忆的相对时间永远显示「刚刚」，还随每次刷新往后跳——用户没法
+        // 判断哪条是旧偏好。留空让卡片显示占位文案。
+        createdAt: null,
+        updatedAt: null,
         topLevelCategories: const [],
         metadata: const {},
         userId: 'workspace',

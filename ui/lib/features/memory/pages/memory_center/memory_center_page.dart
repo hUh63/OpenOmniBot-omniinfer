@@ -610,7 +610,10 @@ class MemoryCenterPageState extends State<MemoryCenterPage>
         _shortMemoryItems
           ..clear()
           ..addAll(entries);
+        // 卡片 id 是本地自增的，刷新后旧 id 全部失效：只清勾选而不退出选择态，
+        // 界面会停在「已选 0」的死状态（批量删除点了没反应）。
         _selectedCardIds.clear();
+        _isSelectionMode = false;
         localMemoryTags = [
           AppTag(
             id: 'all',

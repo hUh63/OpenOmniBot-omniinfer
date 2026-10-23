@@ -745,7 +745,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       (item) => item.id == binding.providerProfileId,
     );
     final profileName = profile.isEmpty
-        ? 'Provider unavailable'
+        ? context.trLegacy('提供方不可用')
         : profile.first.name;
     return '$profileName / ${binding.modelId}';
   }
@@ -866,7 +866,9 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       builder: (context, _) {
         final bound = coordinator.isVoiceSceneBound;
         final statusColor = bound ? Colors.green.shade600 : _tertiaryTextColor;
-        final status = bound ? '已连接' : '未连接模型';
+        final status = bound
+            ? context.trLegacy('已连接')
+            : context.trLegacy('未连接模型');
         return _buildCard(
           child: Container(
             padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
@@ -1160,7 +1162,7 @@ class _SceneSelectionPopupEntryState extends State<_SceneSelectionPopupEntry> {
               ),
               decoration: InputDecoration(
                 isDense: true,
-                hintText: 'Filter model ID',
+                hintText: context.trLegacy('筛选模型 ID'),
                 hintStyle: TextStyle(
                   fontSize: 13,
                   color: _tertiaryTextColor,

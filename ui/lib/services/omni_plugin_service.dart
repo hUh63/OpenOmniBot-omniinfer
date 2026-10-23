@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:ui/models/omni_plugin_item.dart';
 
@@ -90,7 +92,12 @@ class OmniPluginService {
   );
 
   static Future<List<OmniPluginItem>> listPlugins() async {
-    final raw = await _channel.invokeListMethod<dynamic>('list');
+    // 原生不回调 result 时（引擎未 attach / handler 协程已死），invokeMethod 的
+    // Future 永远不完成：执行中心页的 loading 卡在 true，连刷新按钮都被置灰，
+    // 整页死锁只能强杀。服务层兜一个超时，让上层能显示错误并允许重试。
+    final raw = await _channel
+        .invokeListMethod<dynamic>('list')
+        .timeout(const Duration(seconds: 8));
     return raw
             ?.whereType<Map>()
             .map(OmniPluginItem.fromMap)
