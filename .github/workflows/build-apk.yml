@@ -178,6 +178,9 @@ jobs:
             - 抽屉缩略图按需加载 + 12 秒节流，并修掉“在飞标记泄漏”（流式输出中签名变化会让该会话缩略图永久不更新）。
 
             全部改动只经过编译门（verify-omniinfer）验证，尚未做真机回归；安装后如遇异常请反馈具体操作路径。
+          files: apk-out/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Push APK chunks to artifacts branch
         run: |
           git config user.email "hUh63@users.noreply.github.com"
