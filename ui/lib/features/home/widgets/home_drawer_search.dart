@@ -366,10 +366,25 @@ extension _HomeDrawerSearch on HomeDrawerState {
     // 搜索交给后端 SQL（标题 / 摘要 / 上下文摘要 / 最后一条消息）。
     // 原实现在 Dart 侧遍历全部会话、对每条不命中的会话再去拉「全部消息」建索引，
     // 代价是 O(会话数 × 全部消息)，输入一次可能要跑很久。
-    final matched = await ConversationService.searchConversations(
-      trimmedQuery,
-      limit: 80,
-    );
+    final List<ConversationModel> matched;
+    try {
+      matched = await ConversationService.searchConversations(
+        trimmedQuery,
+        limit: 80,
+      );
+    } catch (error) {
+      // 没有 try/catch 时异常会让 _isSearching 永远停在 true（抽屉一直显示
+      // 搜索中），并且残留上一次的关键字结果，只有清空输入才能恢复。
+      debugPrint('[HomeDrawer] search failed: $error');
+      if (!mounted || generation != _searchGeneration) {
+        return;
+      }
+      setState(() {
+        _searchResults = <_ConversationSearchResult>[];
+        _isSearching = false;
+      });
+      return;
+    }
     if (!mounted || generation != _searchGeneration) {
       return;
     }

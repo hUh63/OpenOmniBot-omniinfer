@@ -84,16 +84,23 @@ private class SkillRegistryStore(
         registryFile.writeText(gson.toJson(ordered))
     }
 
+    // 读全表 → 改 → 写全表必须和 seedBuiltinSkillsIfNeeded 等批量改写共用一把锁：
+    // 之前只有批量那边持锁，用户切换技能开关（setSkillEnabled）时会被并发写回，
+    // 开关看起来「自己打开了」，removed_builtin 记录也会被复活。
     fun set(skillId: String, entry: SkillRegistryEntry) {
-        val updated = read()
-        updated[skillId] = entry
-        write(updated)
+        synchronized(SKILL_INDEX_LOCK) {
+            val updated = read()
+            updated[skillId] = entry
+            write(updated)
+        }
     }
 
     fun remove(skillId: String) {
-        val updated = read()
-        if (updated.remove(skillId) != null) {
-            write(updated)
+        synchronized(SKILL_INDEX_LOCK) {
+            val updated = read()
+            if (updated.remove(skillId) != null) {
+                write(updated)
+            }
         }
     }
 }
@@ -131,7 +138,19 @@ private class BuiltinSkillAssetStore(
             if (registryEntry?.source == USER_SOURCE) {
                 return@forEach
             }
-            installBuiltinInternal(builtin)
+            val installedOk = runCatching { installBuiltinInternal(builtin) }
+                .onFailure { error ->
+                    // 单个内置 asset 拷贝失败（渠道包裁剪 / 磁盘满 / 文件被占用）
+                    // 既不能让整个技能列表刷不出来，也不能把它记成「已安装」。
+                    android.util.Log.w(
+                        "SkillIndexService",
+                        "install builtin skill failed: ${builtin.id} / ${error.message}"
+                    )
+                }
+                .isSuccess
+            if (!installedOk) {
+                return@forEach
+            }
             if (registryEntry?.source == BUILTIN_SOURCE &&
                 registryEntry.installState == INSTALL_STATE_INSTALLED
             ) {
@@ -411,8 +430,14 @@ class SkillIndexService(
             return true
         }
         val deleted = !targetDir.exists() || targetDir.deleteRecursively()
+        if (!deleted && targetDir.exists()) {
+            // 删除失败时不要把 registry 条目也抹掉：否则下次扫描会把「磁盘还在、
+            // registry 无记录」的技能按默认 enabled = true 重新列出来，用户以为
+            // 删掉的技能会带着启用状态复活，Agent 还会继续加载它。
+            return false
+        }
         registryStore().remove(entry.id)
-        return deleted
+        return true
     }
 
     fun installBuiltinSkill(skillId: String): SkillIndexEntry {

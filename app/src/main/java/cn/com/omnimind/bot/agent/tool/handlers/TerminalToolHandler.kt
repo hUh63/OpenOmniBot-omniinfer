@@ -709,6 +709,11 @@ class TerminalToolHandler(
         return session
     }
 
+    companion object {
+        /** 未显式指定超时的命令兜底上限（秒）。 */
+        private const val DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
+    }
+
     private suspend fun executeDirectCommandInSession(
         manager: TerminalManager,
         sessionId: String,
@@ -758,9 +763,12 @@ class TerminalToolHandler(
         collectorReady.await()
         manager.sendCommandToSession(sessionId = sessionId, command = command, commandId = commandId)
 
-        val completedOutput = if (timeoutSeconds != null) {
-            withTimeoutOrNull(timeoutSeconds * 1000L) { completionOutput.await() }
-        } else {
+        // timeoutSeconds 为 null 时原来直接 await，完全依赖底层一定发出 isCompleted
+        // 事件。shell 卡住 / 事件漏发 / 会话被切走时这一等就是永久，整轮 agent 挂死。
+        // 会话初始化命令本来就是按 null 传的，所以这条分支非常容易踩到。
+        val effectiveTimeoutSeconds = timeoutSeconds?.takeIf { it > 0 }
+            ?: DEFAULT_COMMAND_TIMEOUT_SECONDS
+        val completedOutput = withTimeoutOrNull(effectiveTimeoutSeconds * 1000L) {
             completionOutput.await()
         }
         collectorJob.cancelAndJoin()

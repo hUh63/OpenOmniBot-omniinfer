@@ -12,9 +12,15 @@ class NotificationToolHandler(private val context: Context, private val helper: 
         args: JsonObject, runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor,
         env: AgentExecutionEnvironment, callback: AgentCallback,
         toolHandle: AgentToolExecutionHandle): ToolExecutionResult = try {
+        // schema 里写的是 1..120，但执行侧原来直接透传：模型给 3600/86400 就真的
+        // 阻塞那么久（该工具是串行批次，整轮 agent 一直被占着）。这里按声明收敛，
+        // 同时用 intOrNull 容忍模型传字符串/浮点。
+        val waitTimeoutSeconds = args["timeoutSeconds"]?.jsonPrimitive?.intOrNull
+            ?.coerceIn(1, 120)
+            ?: 60
         val data = if (toolCall.function.name == "notifications_wait") NotificationAccess.awaitChange(context,
             args["applicationId"]?.jsonPrimitive?.content.orEmpty(),
-            args["timeoutSeconds"]?.jsonPrimitive?.int ?: 60)
+            waitTimeoutSeconds)
         else NotificationAccess.read(context,
             args["applicationId"]?.jsonPrimitive?.content.orEmpty(),
             args["since"]?.jsonPrimitive?.long ?: 0L,
