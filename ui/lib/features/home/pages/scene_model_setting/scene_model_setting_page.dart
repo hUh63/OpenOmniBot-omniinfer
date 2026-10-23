@@ -70,6 +70,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
   static const String _embeddingCapability = 'embedding';
 
   bool _isLoading = true;
+
+  /// 加载失败信息：有值时列表区渲染错误态 + 重试，而不是「暂无场景」。
+
+  String? _loadError;
   bool _isRefreshingModels = false;
   Completer<void>? _providerRefreshCompleter;
   Map<String, Future<void>> _officialCapabilityRefreshes = {};
@@ -233,6 +237,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
         _voiceConfig = voiceConfig;
         _providerModelsByProfileId = enriched;
         _officialProviderModelsByCapability = {};
+        _loadError = null;
       });
       _scheduleMetadataRefresh(
         profiles: profilesPayload.profiles,
@@ -240,8 +245,11 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       );
       // Show saved bindings and manual IDs while querying the remote catalogs.
       unawaited(_refreshProviderModelsInBackground());
-    } catch (_) {
+    } catch (error) {
       if (!mounted) return;
+      // 记下失败：空列表 + 无错误态会让用户以为「本机没有可配置的场景」，
+      // 而页面既没有下拉刷新也没有刷新按钮，只能退出重进才可能恢复。
+      setState(() => _loadError = '$error');
       showToast(context.l10n.sceneModelLoadFailed, type: ToastType.error);
     } finally {
       if (showLoading && mounted) {
@@ -987,7 +995,29 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
                           ),
                         ),
                         const SizedBox(height: 12),
-                        if (_orderedCatalog.isEmpty)
+                        if (_orderedCatalog.isEmpty && _loadError != null)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    context.l10n.sceneModelLoadFailed,
+                                    style: TextStyle(
+                                      color: _secondaryTextColor,
+                                      fontSize: 12,
+                                      fontFamily: 'PingFang SC',
+                                    ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () => _loadData(),
+                                  child: Text(context.trLegacy('重试')),
+                                ),
+                              ],
+                            ),
+                          )
+                        else if (_orderedCatalog.isEmpty)
                           Padding(
                             padding: EdgeInsets.symmetric(vertical: 12),
                             child: Text(
