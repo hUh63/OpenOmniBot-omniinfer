@@ -5,7 +5,9 @@ import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.resolveAgentToolPayloadStatus
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
+import cn.com.omnimind.baselib.util.OmniLog
 import com.google.gson.Gson
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -83,6 +85,10 @@ internal class WebAgentRunBridge(
     // 先建的那份 run 状态永远等不到完成（hasActiveRun 一直为 true）。
     listenerKey: String = "webchat",
 ) {
+    companion object {
+        private const val TAG = "WebAgentRunBridge"
+    }
+
     private val appContext = context.applicationContext
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val conversationService = ConversationDomainService(appContext)
@@ -104,7 +110,17 @@ internal class WebAgentRunBridge(
         ) { event -> events.trySend(event) }
         scope.launch {
             for (event in events) {
-                handleEvent(event)
+                // 单条事件处理失败（脏数据、数据库异常、JSON 结构变化）不能让消费
+                // 协程退出：一旦退出，后续所有 agent 事件都再没人处理，run 状态
+                // 永远等不到完成——网页端会一直显示「正在运行」，停止按钮也失效，
+                // 只能重启进程恢复。
+                try {
+                    handleEvent(event)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    OmniLog.e(TAG, "handleEvent failed: ${error.message}")
+                }
             }
         }
     }
