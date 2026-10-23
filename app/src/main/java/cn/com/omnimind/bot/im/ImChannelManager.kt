@@ -142,7 +142,22 @@ object ImChannelManager {
                 if (appContext == null) {
                     val applicationContext = context.applicationContext
                     appContext = applicationContext
-                    store = ImChannelStore(applicationContext)
+                    val createdStore = ImChannelStore(applicationContext)
+                    store = createdStore
+                    // 进程刚起来（首次初始化）：任何持久化的 activeTaskId 都不可能
+                    // 还有活着的 run。不清掉的话，该 peer 之后发的每条普通消息都会
+                    // 被回「当前会话已有任务运行中」，只能手动 /cancel 解开。
+                    runCatching {
+                        createdStore.listSessions()
+                            .filter { !it.activeTaskId.isNullOrBlank() || it.awaitingInput }
+                            .forEach { session ->
+                                createdStore.saveSession(
+                                    session.copy(activeTaskId = null, awaitingInput = false)
+                                )
+                            }
+                    }.onFailure { error ->
+                        OmniLog.w(TAG, "reset stale im sessions failed: ${error.message}")
+                    }
                     processor = ImCommandProcessor(
                         applicationContext,
                         requireStore(),
@@ -329,11 +344,19 @@ object ImChannelManager {
     ) {
         val entryState = taskState.byEntry[entryId] ?: return
         if (entryState.done) return
-        entryState.done = true
         val text = entryState.latestText
-        if (text.isNotEmpty()) {
-            sendChunked(pending.channel, pending.peerId, text)
+        if (text.isEmpty()) {
+            entryState.done = true
+            return
+        }
+        // 原来在发送之前就 done = true、且无论发送成功与否都 hasSentAny = true。
+        // 发送失败（网络瞬断、限流）时既不会重试，也没有任何失败提示，用户只看到
+        // 回答被截断、结尾永久丢失。现在按结果置位：成功才标完成。
+        if (sendChunked(pending.channel, pending.peerId, text)) {
+            entryState.done = true
             taskState.hasSentAny = true
+        } else {
+            OmniLog.w(TAG, "finalize ${pending.channel.id} entry failed, kept for retry: $entryId")
         }
     }
 
@@ -414,24 +437,30 @@ object ImChannelManager {
         var hasSentAny: Boolean = false
     )
 
+    /** 分片发送；返回是否**每一片**都发成功（调用方据此决定要不要重试/提示）。 */
     private suspend fun sendChunked(
         channel: ImChannelType,
         peerId: String,
         text: String
-    ) {
-        val connector = connectors[channel] ?: return
+    ): Boolean {
+        val connector = connectors[channel] ?: return false
         val chunkSize = requireStore().loadSettings().chunkSizeFor(channel)
         val chunks = splitForIm(text, chunkSize)
+        var allSent = true
         chunks.forEachIndexed { index, chunk ->
-            runCatching {
+            val sent = runCatching {
                 connector.sendText(peerId, chunk)
             }.onFailure { error ->
                 OmniLog.e(TAG, "send ${channel.id} chunk failed: ${error.message}")
+            }.isSuccess
+            if (!sent) {
+                allSent = false
             }
             if (index < chunks.lastIndex) {
                 delay(250)
             }
         }
+        return allSent && chunks.isNotEmpty()
     }
 
     private fun splitForIm(text: String, maxChars: Int): List<String> {

@@ -61,11 +61,18 @@ class VoicePlaybackCoordinator extends ChangeNotifier {
     if (_initialized) {
       return;
     }
-    _initialized = true;
-    await _reloadConfig();
-    _playbackSubscription = VoicePlaybackChannelService.events.listen(
-      _handlePlaybackEvent,
-    );
+    // _initialized 原来是先置位再 await：冷启动时平台通道还没就绪、_reloadConfig
+    // 抛异常的话，它已经变成 true，事件订阅永远建立不起来——之后所有播放事件都
+    // 收不到，按钮状态停在「播放中/合成中」直到杀进程。改成成功后才置位。
+    try {
+      await _reloadConfig();
+      _playbackSubscription ??= VoicePlaybackChannelService.events.listen(
+        _handlePlaybackEvent,
+      );
+      _initialized = true;
+    } catch (error) {
+      debugPrint('[VoicePlaybackCoordinator] init failed: $error');
+    }
   }
 
   Future<void> refreshConfiguration() async {

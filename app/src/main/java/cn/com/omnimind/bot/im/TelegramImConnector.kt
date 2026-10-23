@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -83,6 +84,12 @@ internal class TelegramImConnector : ImConnector {
         activeConfig: TelegramImConfig,
         onMessage: suspend (ImInboundMessage) -> Unit
     ) {
+        // 判定「本循环是否还有效」必须看自己这个 Job。原来读的是共享字段
+        // pollingJob：stop() 把字段置 null、start() 又给它赋了新 Job 之后，
+        // 旧循环会认为「还是 active」继续跑下去（cancel 对阻塞中的
+        // HttpURLConnection 无效），于是两个循环同时 getUpdates —— 同一条消息
+        // 被处理两次，Telegram 那边还会持续返回 409 Conflict。
+        val pollingToken = currentCoroutineContext()[Job]
         var offset: Long? = null
         runCatching {
             postTelegram(
@@ -108,16 +115,18 @@ internal class TelegramImConnector : ImConnector {
             )
             registerBotCommands(activeConfig)
         }.onFailure { error ->
-            status = ImConnectorStatus(
-                channel = channel,
-                enabled = true,
-                running = true,
-                connected = false,
-                lastError = error.message ?: error.javaClass.simpleName
-            )
+            if (pollingToken?.isActive == true) {
+                status = ImConnectorStatus(
+                    channel = channel,
+                    enabled = true,
+                    running = true,
+                    connected = false,
+                    lastError = error.message ?: error.javaClass.simpleName
+                )
+            }
         }
 
-        while (scope.coroutineContext.isActive && pollingJob?.isActive == true) {
+        while (pollingToken?.isActive == true) {
             try {
                 val payload = JSONObject()
                     .put("timeout", 50)
@@ -148,7 +157,7 @@ internal class TelegramImConnector : ImConnector {
                     updatedAt = System.currentTimeMillis()
                 )
             } catch (error: Throwable) {
-                if (pollingJob?.isActive != true) return
+                if (pollingToken?.isActive != true) return
                 status = status.copy(
                     enabled = true,
                     running = true,
