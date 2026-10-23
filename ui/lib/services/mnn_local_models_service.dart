@@ -295,8 +295,17 @@ class MnnLocalModelsService {
     _nativeEventsWired = true;
     _events.receiveBroadcastStream().listen(
       (dynamic event) => _eventController.add(MnnLocalEvent.fromDynamic(event)),
-      // A flavour without the bundled server never registers the channel.
-      onError: (Object _) {},
+      // 原生 handler 可能还没注册（引擎初始化晚于页面首帧），这会在 Dart 侧
+      // 立刻报 MissingPlugin/相关错误。以前这里静默吞掉并把 _nativeEventsWired
+      // 留在 true，等于这条流永久失效——下载进度、排队中提示再也不刷新。
+      // 出错/结束时复位标记，下次访问 eventStream 会重新接线。
+      onError: (Object _) {
+        _nativeEventsWired = false;
+      },
+      onDone: () {
+        _nativeEventsWired = false;
+      },
+      cancelOnError: true,
     );
   }
 
