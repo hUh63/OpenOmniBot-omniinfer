@@ -161,7 +161,17 @@ object ImChannelManager {
         if (realtimeJob?.isActive == true) return
         realtimeJob = scope.launch {
             RealtimeHub.stream().collect { event ->
-                handleRealtimeEvent(event)
+                // 单条事件处理失败（发送消息时网络异常、协议错误）不能让订阅协程
+                // 退出：一旦退出，之后所有 agent 事件都不会再推给 IM，用户发消息
+                // 后永远收不到回复，而这层没有任何「自动重启订阅」的路径（
+                // ensureRealtimeCollection 只在有 IPC 调用时才被顺带触发）。
+                try {
+                    handleRealtimeEvent(event)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    OmniLog.e(TAG, "handleRealtimeEvent failed: ${error.message}")
+                }
             }
         }
     }
