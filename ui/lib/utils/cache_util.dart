@@ -51,10 +51,21 @@ class CacheUtil {
     String key, {
     String defaultValue = "",
   }) async {
-    return await cacheEvent.invokeMethod("doMMKVDecodeString", {
-      "key": key,
-      "defaultValue": defaultValue,
-    });
+    // 原生 MMKV channel 未注册（引擎重建 / 启动早期）时会把
+    // MissingPluginException 直接抛给调用方，而这些读取大多发生在 build 阶段
+    // —— 结果不是回退默认值而是整页红屏。getStringList / getJson 一直有兜底，
+    // 这里补齐（顺带加超时，避免原生不回调时 await 永久挂起）。
+    try {
+      final result = await cacheEvent
+          .invokeMethod<String>("doMMKVDecodeString", {
+            "key": key,
+            "defaultValue": defaultValue,
+          })
+          .timeout(const Duration(seconds: 3));
+      return result ?? defaultValue;
+    } catch (_) {
+      return defaultValue;
+    }
   }
 
   /// 从MMKV获取布尔值
@@ -62,10 +73,17 @@ class CacheUtil {
   /// [defaultValue] 默认值，当键不存在时返回
   /// 返回对应的布尔值或默认值
   static Future<bool> getBool(String key, {bool defaultValue = false}) async {
-    return await cacheEvent.invokeMethod("doMMKVDecodeBoole", {
-      "key": key,
-      "defaultValue": defaultValue,
-    });
+    try {
+      final result = await cacheEvent
+          .invokeMethod<bool>("doMMKVDecodeBoole", {
+            "key": key,
+            "defaultValue": defaultValue,
+          })
+          .timeout(const Duration(seconds: 3));
+      return result ?? defaultValue;
+    } catch (_) {
+      return defaultValue;
+    }
   }
 
   /// 从MMKV获取整数值
@@ -73,17 +91,23 @@ class CacheUtil {
   /// [defaultValue] 默认值，当键不存在时返回
   /// 返回对应的整数值或默认值
   static Future<int> getInt(String key, {int defaultValue = 0}) async {
-    final result = await cacheEvent.invokeMethod("doMMKVDecodeInt", {
-      "key": key,
-      "defaultValue": defaultValue,
-    });
-    if (result is int) {
-      return result;
+    try {
+      final result = await cacheEvent
+          .invokeMethod<dynamic>("doMMKVDecodeInt", {
+            "key": key,
+            "defaultValue": defaultValue,
+          })
+          .timeout(const Duration(seconds: 3));
+      if (result is int) {
+        return result;
+      }
+      if (result is num) {
+        return result.toInt();
+      }
+      return defaultValue;
+    } catch (_) {
+      return defaultValue;
     }
-    if (result is num) {
-      return result.toInt();
-    }
-    return defaultValue;
   }
 
   /// 从MMKV获取双精度浮点数值
@@ -94,10 +118,17 @@ class CacheUtil {
     String key, {
     double defaultValue = 0.0,
   }) async {
-    return await cacheEvent.invokeMethod("doMMKVDecodeDouble", {
-      "key": key,
-      "defaultValue": defaultValue,
-    });
+    try {
+      final result = await cacheEvent
+          .invokeMethod<String>("doMMKVDecodeDouble", {
+            "key": key,
+            "defaultValue": defaultValue,
+          })
+          .timeout(const Duration(seconds: 3));
+      return result ?? defaultValue.toString();
+    } catch (_) {
+      return defaultValue.toString();
+    }
   }
 
   // AppIcons相关方法

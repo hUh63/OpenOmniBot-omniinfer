@@ -968,6 +968,8 @@ class AgentRuntimeService {
   static final StreamController<Set<String>> _agentPreparationController =
       StreamController<Set<String>>.broadcast();
   static StreamSubscription<dynamic>? _nativeEventSubscription;
+  static Timer? _nativeEventResubscribeTimer;
+  static int _nativeEventResubscribeBackoffSeconds = 1;
 
   static Stream<Map<String, dynamic>> get events {
     _ensureEventSubscription();
@@ -1930,14 +1932,20 @@ class AgentRuntimeService {
 
   static void _ensureEventSubscription() {
     if (_nativeEventSubscription != null) return;
-    _nativeEventSubscription = _eventChannel.receiveBroadcastStream().listen(
+    late final StreamSubscription<dynamic> subscription;
+    subscription = _eventChannel.receiveBroadcastStream().listen(
       (event) {
+        // 收到事件说明通道是通的，把退避计数复位。
+        _nativeEventResubscribeBackoffSeconds = 1;
         final normalized = _normalizeMap(event);
         if (normalized != null) {
           _eventController.add(normalized);
         }
       },
       onError: (Object error, StackTrace stackTrace) {
+        // error 同样会终结这条订阅，原来这里不复位引用 —— 之后
+        // `_nativeEventSubscription != null` 一直成立，永远不会重连。
+        _handleNativeEventStreamClosed(subscription);
         _eventController.add({
           'method': 'error',
           'message': {
@@ -1946,13 +1954,33 @@ class AgentRuntimeService {
           },
         });
       },
-      // 原生侧关掉这条流（引擎重建 / 通道被清）时订阅会 done。这里原来是
-      // 只在 `_nativeEventSubscription == null` 时才接线，done 之后引用还在，
-      // 于是这条流永久不会再连——agent 运行状态在 App 内再也不更新。
-      onDone: () {
-        _nativeEventSubscription = null;
-      },
+      // 原生侧关掉这条流（引擎重建 / 通道被清）时订阅会 done。
+      onDone: () => _handleNativeEventStreamClosed(subscription),
     );
+    _nativeEventSubscription = subscription;
+  }
+
+  /// 订阅终结（error / done）时复位引用并延迟重连。
+  ///
+  /// 只复位不重连的话，要等下一次有人访问 `events` getter 才会重新接线，而已经
+  /// 持有 `_eventController.stream` 的页面不会再读 getter —— 这段时间 agent 运行
+  /// 状态彻底静默。这里做一次带指数退避的重连（上限 30s），避免原生持续报错时
+  /// 形成重连风暴。
+  static void _handleNativeEventStreamClosed(StreamSubscription<dynamic> closed) {
+    if (!identical(_nativeEventSubscription, closed)) {
+      return;
+    }
+    _nativeEventSubscription = null;
+    if (_nativeEventResubscribeTimer != null) {
+      return;
+    }
+    final backoffSeconds = _nativeEventResubscribeBackoffSeconds;
+    _nativeEventResubscribeBackoffSeconds =
+        (backoffSeconds * 2).clamp(1, 30).toInt();
+    _nativeEventResubscribeTimer = Timer(Duration(seconds: backoffSeconds), () {
+      _nativeEventResubscribeTimer = null;
+      _ensureEventSubscription();
+    });
   }
 
   /// 原生不回调 result 时 invokeMethod 的 await 会永久挂起：页面 loading 永真、

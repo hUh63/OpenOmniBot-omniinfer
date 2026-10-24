@@ -511,7 +511,14 @@ class ConversationService {
     final localRestored = await updateConversation(
       conversation.copyWith(isArchived: false),
     );
-    return localRestored || agentRestored;
+    final restored = localRestored || agentRestored;
+    if (restored && conversation.mode == ConversationMode.agent) {
+      // Agent 会话的「删除」在本工程里是「归档 + 打隐藏标记」，而隐藏标记此前
+      // 只增不减：一旦走过删除流程，即使从归档页恢复，它也会被
+      // _filterHiddenAgentConversations 永久过滤掉（数据还在却再也看不见）。
+      await _clearAgentConversationHidden(conversation.id);
+    }
+    return restored;
   }
 
   static Future<bool> _setAgentSessionArchivedBestEffort({
@@ -653,6 +660,21 @@ class ConversationService {
       _hiddenAgentConversationIdsCache = hiddenIds;
     } catch (e) {
       debugPrint('[ConversationService] 保存 Agent 隐藏会话失败: $e');
+    }
+  }
+
+  static Future<void> _clearAgentConversationHidden(int conversationId) async {
+    try {
+      final hiddenIds = <int>{...await _getHiddenAgentConversationIds()};
+      if (!hiddenIds.remove(conversationId)) {
+        return;
+      }
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = hiddenIds.map((id) => id.toString()).toList()..sort();
+      await prefs.setStringList(_hiddenAgentConversationIdsKey, encoded);
+      _hiddenAgentConversationIdsCache = hiddenIds;
+    } catch (e) {
+      debugPrint('[ConversationService] 清除 Agent 隐藏会话失败: $e');
     }
   }
 
