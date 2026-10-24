@@ -4456,7 +4456,13 @@ private class AcpProcessConnection(
                         )
                     }
                 }
-            } catch (error: IOException) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // 原来只兜 IOException：扩展通知的宿主回调（onExtensionNotification）
+                // 或 harnessAdapter.normalizeStdioLine 抛任何 RuntimeException 都会
+                // 直接终止这个读协程 —— stdout 从此不再被消费，子进程写满管道后阻塞，
+                // 该会话的所有请求（含 session/prompt）永久无响应，异常还没人观察。
                 handleStreamReadFailure(
                     streamName = "stdout",
                     error = error,
@@ -4475,7 +4481,9 @@ private class AcpProcessConnection(
                         }
                     }
                 }
-            } catch (error: IOException) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
                 handleStreamReadFailure(
                     streamName = "stderr",
                     error = error,
@@ -4512,7 +4520,7 @@ private class AcpProcessConnection(
 
     private fun handleStreamReadFailure(
         streamName: String,
-        error: IOException,
+        error: Throwable,
         started: Process,
         terminateProcess: Boolean
     ) {

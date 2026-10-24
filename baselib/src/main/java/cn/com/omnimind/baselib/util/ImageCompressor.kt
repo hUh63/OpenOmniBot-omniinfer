@@ -268,12 +268,26 @@ object ImageCompressor {
             // 去除 data:image/xxx;base64, 前缀
             val cleanBase64 = extractNormalizedBase64Payload(base64String)
             val imageBytes = Base64.decode(cleanBase64, Base64.DEFAULT)
-            val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-                ?: return parseAndReturnOriginal(base64String)
-
-            val originalWidth = bitmap.width
-            val originalHeight = bitmap.height
+            // 先只读尺寸、再按目标大小采样解码。原来直接全尺寸 decodeByteArray：
+            // 一张 8000x6000 的相机原图按 ARGB_8888 就要 ~192MB，这个「为了省内存」
+            // 的函数自己先 OOM（随后 createScaledBitmap 还要再申请一份）。
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, bounds)
+            val originalWidth = bounds.outWidth
+            val originalHeight = bounds.outHeight
+            if (originalWidth <= 0 || originalHeight <= 0) {
+                return parseAndReturnOriginal(base64String)
+            }
             val pixelCount = originalWidth.toLong() * originalHeight.toLong()
+            val decodeOptions = BitmapFactory.Options().apply {
+                inSampleSize = calculateInSampleSize(
+                    sourceWidth = originalWidth,
+                    sourceHeight = originalHeight,
+                    targetScale = scale
+                )
+            }
+            val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, decodeOptions)
+                ?: return parseAndReturnOriginal(base64String)
 
             // 像素数低于阈值时跳过缩放
             if (pixelCount < bypassThreshold) {
@@ -292,7 +306,11 @@ object ImageCompressor {
             val newWidth = (originalWidth * scale).toInt().coerceAtLeast(1)
             val newHeight = (originalHeight * scale).toInt().coerceAtLeast(1)
 
-            val resized = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+            val resized = if (bitmap.width == newWidth && bitmap.height == newHeight) {
+                bitmap
+            } else {
+                Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+            }
             val outputStream = ByteArrayOutputStream()
             resized.compress(Bitmap.CompressFormat.JPEG, quality, outputStream)
             val resizedBytes = outputStream.toByteArray()
@@ -341,6 +359,21 @@ object ImageCompressor {
     /**
      * 解析原始图片尺寸并返回未压缩的结果
      */
+    /** 采样倍率：让解码后的像素刚好覆盖 scale 之后的目标尺寸（2 的幂，BitmapFactory 要求）。 */
+    private fun calculateInSampleSize(
+        sourceWidth: Int,
+        sourceHeight: Int,
+        targetScale: Float
+    ): Int {
+        if (targetScale <= 0f || targetScale >= 1f) return 1
+        val targetWidth = (sourceWidth * targetScale).toInt().coerceAtLeast(1)
+        var sample = 1
+        while (sourceWidth / (sample * 2) >= targetWidth) {
+            sample *= 2
+        }
+        return sample
+    }
+
     private fun parseAndReturnOriginal(base64String: String): CompressResult {
         var width = 0
         var height = 0

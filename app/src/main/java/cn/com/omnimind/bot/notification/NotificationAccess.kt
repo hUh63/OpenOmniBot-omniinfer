@@ -8,6 +8,7 @@ import android.content.Intent
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import cn.com.omnimind.baselib.util.OmniLog
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -53,15 +54,28 @@ object NotificationAccess {
         require(packageName.matches(Regex("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+"))) { "Invalid applicationId" }
         val packages = allowed(context).toMutableSet()
         if (enabled) packages.add(packageName) else packages.remove(packageName)
-        check(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putStringSet(ALLOWED, packages).commit())
+        persistAllowed(context, packages)
     }
 
     /** Bulk selection is a snapshot: newly installed apps still require consent. */
     @Synchronized fun setAllAllowed(context: Context, enabled: Boolean) {
         val packages = if (enabled) context.packageManager.getInstalledApplications(0)
             .map { it.packageName }.filter { it != context.packageName }.toSet() else emptySet()
-        check(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putStringSet(ALLOWED, packages).commit())
+        persistAllowed(context, packages)
+    }
+
+    /**
+     * 写盘失败（存储满 / 文件损坏）时不要用 check() 把 IO 失败升级成崩溃：
+     * 这只是一个开关设置，记日志后交由调用方重新读取即可。
+     */
+    private fun persistAllowed(context: Context, packages: Set<String>) {
+        val committed = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(ALLOWED, packages)
+            .commit()
+        if (!committed) {
+            OmniLog.w("NotificationAccess", "Failed to persist allowed packages")
+        }
     }
 
     fun settings(context: Context): Map<String, Any> {
@@ -98,7 +112,15 @@ object NotificationAccess {
         check(granted(context)) { "notification_access_required: Enable notification access in Settings > Notification access" }
         check(applicationId in allowed(context)) { "application_not_allowed: Enable this app in Settings > Notification access" }
         val service = checkNotNull(OmniNotificationListener.connected) { "notification_listener_not_connected: Wait for Android to connect the service" }
-        val notifications = service.activeNotifications.orEmpty().filter {
+        // activeNotifications 是跨进程调用：system_server 重启 / NLS binder 死亡时抛
+        // DeadObjectException（RuntimeException），原来会直接把工具调用打崩。
+        val notifications = runCatching { service.activeNotifications.orEmpty() }
+            .getOrElse {
+                OmniNotificationListener.connected = null
+                throw IllegalStateException(
+                    "notification_listener_not_connected: Wait for Android to connect the service"
+                )
+            }.filter {
             it.packageName == applicationId && it.postTime >= since
         }.sortedByDescending { it.postTime }
         val results = notifications.take(limit).map { sbn ->
@@ -107,7 +129,9 @@ object NotificationAccess {
             val messages = (messageBundles?.let {
                 Notification.MessagingStyle.Message.getMessagesFromBundleArray(it)
             } ?: emptyList()).takeLast(50).map { message ->
-                mapOf("text" to message.text.toString().take(4000), "timestamp" to message.timestamp,
+                // Message.getText() 对纯图片/音频消息返回 null（平台类型，Kotlin 不会拦），
+                // 原来直接 .toString() 就是 NPE，整个通知读取工具挂掉。
+                mapOf("text" to message.text?.toString().orEmpty().take(4000), "timestamp" to message.timestamp,
                     "sender" to message.senderPerson?.name?.toString().orEmpty().take(512))
             }
             val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.joinToString("\n")
