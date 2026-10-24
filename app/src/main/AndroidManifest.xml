@@ -197,6 +197,17 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/quick_log_widget_info" />
         </receiver>
+        <!-- 开机/升级后恢复 IM 渠道连接（ImChannelBootReceiver 此前也未声明，
+             其 onReceive 永远不会被调用）。 -->
+        <receiver
+            android:name="cn.com.omnimind.bot.im.ImChannelBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <service android:name=".notification.OmniNotificationListener"
             android:label="通知访问 · 小万"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
@@ -225,6 +236,14 @@
             android:foregroundServiceType="mediaPlayback" />
         <service
             android:name="cn.com.omnimind.bot.task.runtime.TaskRuntimeService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!-- IM 渠道常驻：ImChannelManager.ensureState() 在开关渠道/启动恢复时会
+             startForegroundService 这个类，但此前从未在此声明过 —— 启动未注册的
+             Service 会直接抛异常，渠道永远连不上。 -->
+        <service
+            android:name="cn.com.omnimind.bot.im.ImChannelForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

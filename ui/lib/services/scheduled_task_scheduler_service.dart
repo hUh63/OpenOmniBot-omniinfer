@@ -81,39 +81,59 @@ class ScheduledTaskSchedulerService {
 
   /// 处理原生层取消任务
   static Future<void> _handleNativeCancel(String taskId) async {
-    if (_currentCountdownTask?.id == taskId) {
-      cancelTask(taskId);
-
-      // 如果不是重复任务，删除
-      if (!_currentCountdownTask!.repeatDaily) {
-        await ScheduledTaskStorageService.deleteScheduledTask(taskId);
-      } else {
-        // 重复任务，重新调度到下一次
-        final updatedTask = _currentCountdownTask!.copyWith(
-          nextExecutionTime: _currentCountdownTask!
-              .calculateNextExecutionTime(),
-        );
-        await ScheduledTaskStorageService.updateScheduledTask(updatedTask);
-        scheduleTask(updatedTask);
+    // native 模式下 scheduleTask 直接交给原生闹钟、不建本地 Timer，
+    // 于是 _showCountdownReminder（唯一给 _currentCountdownTask 赋值的地方）
+    // 永远不会被调用。原来这里用 `_currentCountdownTask?.id == taskId` 做前置判断，
+    // 结果倒计时浮层上点「取消」是纯空操作：任务不删、不重排，5 秒后照常执行。
+    // 改为按 taskId 从存储反查。
+    final task = await ScheduledTaskStorageService.getScheduledTaskById(taskId);
+    if (task == null) {
+      if (_currentCountdownTask?.id == taskId) {
+        _currentCountdownTask = null;
+        _isShowingReminder = false;
       }
-
-      _currentCountdownTask = null;
-      _isShowingReminder = false;
-      onTaskCancelled?.call();
+      return;
     }
+    cancelTask(taskId);
+
+    // 如果不是重复任务，删除
+    if (!task.repeatDaily) {
+      await ScheduledTaskStorageService.deleteScheduledTask(taskId);
+    } else {
+      // 重复任务，重新调度到下一次
+      final updatedTask = task.copyWith(
+        nextExecutionTime: task.calculateNextExecutionTime(),
+      );
+      await ScheduledTaskStorageService.updateScheduledTask(updatedTask);
+      scheduleTask(updatedTask);
+    }
+
+    if (_currentCountdownTask?.id == taskId) {
+      _currentCountdownTask = null;
+    }
+    _isShowingReminder = false;
+    onTaskCancelled?.call();
   }
 
   /// 处理原生层立即执行
   static Future<void> _handleNativeExecuteNow(String taskId) async {
-    if (_currentCountdownTask?.id == taskId) {
-      final task = _currentCountdownTask!;
-      cancelTask(taskId);
-      _currentCountdownTask = null;
-      _isShowingReminder = false;
-
-      await _executeScheduledTask(task);
-      onTaskExecuteNow?.call();
+    // 同 _handleNativeCancel：不能依赖 _currentCountdownTask（native 模式下恒为 null）。
+    final task = await ScheduledTaskStorageService.getScheduledTaskById(taskId);
+    if (task == null) {
+      if (_currentCountdownTask?.id == taskId) {
+        _currentCountdownTask = null;
+        _isShowingReminder = false;
+      }
+      return;
     }
+    cancelTask(taskId);
+    if (_currentCountdownTask?.id == taskId) {
+      _currentCountdownTask = null;
+    }
+    _isShowingReminder = false;
+
+    await _executeScheduledTask(task);
+    onTaskExecuteNow?.call();
   }
 
   /// 调度一个定时任务

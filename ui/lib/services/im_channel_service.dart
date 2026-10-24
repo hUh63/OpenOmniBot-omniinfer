@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -216,59 +218,74 @@ class ImChannelService {
     'cn.com.omnimind.bot/ImChannel',
   );
 
-  static Future<ImChannelState?> state() async {
+  /// 统一的原生调用入口。
+  ///
+  /// 这些方法大多数要原生做网络 I/O（refresh 探活 connector、requestWechatQr 向
+  /// 微信服务器取二维码、save* 会先校验 token），原来既没有 timeout 也没有 catch：
+  /// 原生一旦不回调，IM 设置页的 await 就永不返回（弹窗永久 loading、按钮点不动），
+  /// 原生返回 error 时异常还会直接冲进 UI 事件处理。
+  static Future<Map<dynamic, dynamic>?> _invoke(
+    String method, [
+    Map<String, Object?>? arguments,
+    Duration timeout = const Duration(seconds: 20),
+  ]) async {
     try {
-      final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('state');
-      return ImChannelState.fromMap(raw);
+      return await _channel
+          .invokeMethod<Map<dynamic, dynamic>>(method, arguments)
+          .timeout(timeout);
+    } on TimeoutException {
+      debugPrint('IM $method timed out');
+      return null;
     } on PlatformException catch (e) {
-      debugPrint('IM state failed: ${e.message}');
+      debugPrint('IM $method failed: ${e.message}');
+      return null;
+    } on MissingPluginException catch (e) {
+      debugPrint('IM $method unavailable: ${e.message}');
       return null;
     }
   }
 
+  static Future<ImChannelState?> state() async {
+    final raw = await _invoke('state');
+    return raw == null ? null : ImChannelState.fromMap(raw);
+  }
+
   static Future<ImChannelState?> refresh() async {
-    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('refresh');
-    return ImChannelState.fromMap(raw);
+    final raw = await _invoke('refresh');
+    return raw == null ? null : ImChannelState.fromMap(raw);
   }
 
   static Future<ImChannelState?> saveTelegram(
     TelegramImSettings settings,
   ) async {
-    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'saveTelegram',
-      settings.toMap(),
-    );
-    return ImChannelState.fromMap(raw);
+    final raw = await _invoke('saveTelegram', settings.toMap());
+    return raw == null ? null : ImChannelState.fromMap(raw);
   }
 
   static Future<ImChannelState?> saveWechat(WechatImSettings settings) async {
-    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'saveWechat',
-      settings.toMap(),
-    );
-    return ImChannelState.fromMap(raw);
+    final raw = await _invoke('saveWechat', settings.toMap());
+    return raw == null ? null : ImChannelState.fromMap(raw);
   }
 
   static Future<ImChannelState?> setChannelEnabled(
     String channel,
     bool enabled,
   ) async {
-    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'setChannelEnabled',
-      {'channel': channel, 'enabled': enabled},
-    );
-    return ImChannelState.fromMap(raw);
+    final raw = await _invoke('setChannelEnabled', {
+      'channel': channel,
+      'enabled': enabled,
+    });
+    return raw == null ? null : ImChannelState.fromMap(raw);
   }
 
+  /// 二维码要等微信服务器返回，给更长的超时。
   static Future<Map<dynamic, dynamic>?> requestWechatQr() async {
-    return _channel.invokeMethod<Map<dynamic, dynamic>>('requestWechatQr');
+    return _invoke('requestWechatQr', null, const Duration(seconds: 40));
   }
 
   static Future<ImChannelState?> clearPeerSessions() async {
-    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'clearPeerSessions',
-    );
-    return ImChannelState.fromMap(raw);
+    final raw = await _invoke('clearPeerSessions');
+    return raw == null ? null : ImChannelState.fromMap(raw);
   }
 }
 

@@ -156,6 +156,11 @@ class AgentMusicPlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 服务一律经 startForegroundService 拉起（见 startServiceCompat），系统要求 5 秒内
+        // 必须 startForeground，否则抛 ForegroundServiceDidNotStartInTimeException 崩掉进程。
+        // 而 pause/resume/stop/seek 这几个分支原来只在本地处理、不升级前台 —— 播放服务被
+        // 系统回收后，Agent 调一次「暂停音乐」就会把 App 直接崩掉（stopInternal 随后会撤回）。
+        startForeground(NOTIFICATION_ID, buildNotification())
         when (intent?.action) {
             ACTION_PLAY -> {
                 val source = intent.getStringExtra(EXTRA_SOURCE).orEmpty()

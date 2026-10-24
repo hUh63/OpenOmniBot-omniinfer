@@ -68,11 +68,30 @@ class VoicePlaybackCoordinator extends ChangeNotifier {
       await _reloadConfig();
       _playbackSubscription ??= VoicePlaybackChannelService.events.listen(
         _handlePlaybackEvent,
+        // EventChannel 抛 error 或原生 EndOfStream 会终结这条订阅。不复位的话
+        // _initialized 永远是 true，_playbackSubscription 也非空，于是
+        // ensureInitialized() 直接 return、再也不会重连 —— 语音播放状态永久失聪
+        // （卡片停在「播放中」/永远 idle，手动重试也无反应）。
+        onError: (Object error, StackTrace stackTrace) {
+          debugPrint('[VoicePlaybackCoordinator] event stream error: $error');
+          _resetPlaybackSubscription();
+        },
+        onDone: () {
+          debugPrint('[VoicePlaybackCoordinator] event stream closed');
+          _resetPlaybackSubscription();
+        },
+        cancelOnError: true,
       );
       _initialized = true;
     } catch (error) {
       debugPrint('[VoicePlaybackCoordinator] init failed: $error');
     }
+  }
+
+  /// 订阅已终止（error / done）时复位，让下一次 ensureInitialized 重新接线。
+  void _resetPlaybackSubscription() {
+    _playbackSubscription = null;
+    _initialized = false;
   }
 
   Future<void> refreshConfiguration() async {
