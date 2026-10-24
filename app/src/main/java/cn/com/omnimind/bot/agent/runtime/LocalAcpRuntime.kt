@@ -3556,7 +3556,12 @@ internal class LocalAcpRuntime(
                         )
                     )
                 )
-                val selected = pending.response.await()
+                // 原来是无超时的 await()：用户切后台/关掉聊天页又不触发 turn 取消时，
+                // agent 侧的 session/request_permission 会永久 pending，整轮卡死。
+                // 超时按 Cancelled 回包（下面已经有 null → Cancelled 的分支）。
+                val selected = withTimeoutOrNull(PERMISSION_REQUEST_TIMEOUT_MS) {
+                    pending.response.await()
+                }
                 return RequestPermissionResponse(
                     outcome = selected?.let {
                         RequestPermissionOutcome.Selected(it.optionId)
@@ -4146,6 +4151,8 @@ internal class LocalAcpRuntime(
         private const val DEFAULT_ACP_TERMINAL_OUTPUT_LIMIT_BYTES = 8L * 1024L * 1024L
         private const val READER_JOIN_TIMEOUT_MS = 2_000L
         private const val WAVE_FOR_EXIT_TIMEOUT_MS = 30L * 60L * 1000L
+        /** 权限确认等待上限：等不到用户回答就按 Cancelled 回包，不能让 agent 永久挂住。 */
+        private const val PERMISSION_REQUEST_TIMEOUT_MS = 10L * 60L * 1000L
         private const val CONNECT_CANCEL_TIMEOUT_MS = 2_000L
         private const val CANCEL_REQUEST_TIMEOUT_MS = 2_000L
         private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L

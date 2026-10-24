@@ -81,6 +81,8 @@ object McpServerManager {
     private const val WEBCHAT_SESSION_TTL_MS = 7L * 24L * 60L * 60L * 1000L
     /** bootstrap 只要一个 token，64KB 已经远超实际需要（见 handleWebChatSessionBootstrap）。 */
     private const val MAX_BOOTSTRAP_BODY_BYTES = 64L * 1024L
+    /** 其余 JSON 接口的 body 上限（见 buildServer 里的 intercept）。 */
+    private const val MAX_JSON_BODY_BYTES = 32L * 1024L * 1024L
     private val TOKEN_QUERY_PATTERN = Regex("token=[^&\\s]+")
 
     internal val gson by lazy { Gson() }
@@ -472,6 +474,20 @@ object McpServerManager {
                 }
             }
             intercept(ApplicationCallPipeline.Plugins) {
+                // 所有 JSON 写接口都是直接 call.receive<Map<...>>()，没有任何长度上限：
+                // 局域网客户端（或用户浏览的任意网页，配合宽松的 CORS/预检）发一个
+                // 几百 MB 的 body，会在反序列化阶段把整个 App 进程 OOM —— runCatching
+                // 只能兜异常，兜不住内存分配。这里统一在路由之前卡住。
+                // 32MB 足够覆盖图片附件这类大 payload，同时挡住恶意超大 body。
+                val declaredLength = call.request.contentLength() ?: -1L
+                if (declaredLength > MAX_JSON_BODY_BYTES) {
+                    call.respond(
+                        HttpStatusCode.PayloadTooLarge,
+                        mapOf("error" to "Request body too large")
+                    )
+                    finish()
+                    return@intercept
+                }
                 if (call.request.path() == "/mcp") {
                     if (!isAllowedMcpRequestAuthority(
                             host = call.request.headers[HttpHeaders.Host].orEmpty(),

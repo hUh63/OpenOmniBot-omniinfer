@@ -494,28 +494,17 @@ class AgentRunService(
 
     suspend fun cancelTask(taskId: String?): Map<String, Any?> {
         val normalizedTaskId = taskId?.trim().takeUnless { it.isNullOrEmpty() }
-        val runContext = normalizedTaskId?.let(runContexts::get)
-        when (resolveWebConversationRunKind(runContext?.conversationMode)) {
-            WebConversationRunKind.OMNIAI -> {
-                if (normalizedTaskId != null) {
-                    agentRunBridge.cancelRun(normalizedTaskId)
-                }
-            }
-            WebConversationRunKind.CHAT_ONLY -> {
-                if (normalizedTaskId != null) {
-                    agentRunBridge.cancelRun(normalizedTaskId)
-                }
-            }
-            WebConversationRunKind.AGENT -> {
-                if (normalizedTaskId != null) {
-                    agentRunBridge.cancelRun(normalizedTaskId)
-                }
-            }
-        }
-        normalizedTaskId?.let(runContexts::remove)
+            ?: return mapOf("taskId" to null, "status" to "invalid_task")
+        // 三个 run kind 的处理本来完全一样（同一个 bridge.cancelRun），没必要按
+        // conversationMode 分支。更重要的是：原来无论 cancelRun 成功与否都回
+        // "cancelled"，而 runContexts 是进程内状态 —— 进程重启后、或 run 由计划任务/
+        // IM/MCP 另起（不写这个 map）时，前端显示「已停止」，后端 turn 却在继续烧模型。
+        val hadContext = runContexts.containsKey(normalizedTaskId)
+        val cancelled = agentRunBridge.cancelRun(normalizedTaskId)
+        runContexts.remove(normalizedTaskId)
         return mapOf(
             "taskId" to normalizedTaskId,
-            "status" to "cancelled"
+            "status" to if (cancelled || hadContext) "cancelled" else "not_running"
         )
     }
 

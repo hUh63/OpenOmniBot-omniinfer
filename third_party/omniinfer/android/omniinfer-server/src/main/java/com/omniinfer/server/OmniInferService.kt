@@ -111,6 +111,14 @@ class OmniInferService : Service() {
             // propagating to the Android framework as FATAL EXCEPTION.
             val handler = CoroutineExceptionHandler { _, throwable ->
                 Log.e(TAG, "Server engine error on port $port: ${throwable.message}")
+                // CIO 的 BindException 是异步抛的（同步 catch 兜不到）：如果保留非 null 的
+                // server 字段，onStartCommand 的 `server == null` 守卫会让之后每次启动都
+                // 被跳过 —— 服务永久不再监听，UI 却一直显示运行中。这里清空以便重试。
+                if (throwable is java.net.BindException ||
+                    throwable.message?.contains("Address already in use") == true
+                ) {
+                    server = null
+                }
             }
             val config = serverConfig {
                 parentCoroutineContext = handler
@@ -150,11 +158,16 @@ class OmniInferService : Service() {
                                 handleChatCompletion(call)
                             } catch (e: Exception) {
                                 Log.e(TAG, "chat/completions error", e)
-                                call.respondText(
-                                    buildJsonObject { put("error", e.message ?: "internal error") }.toString(),
-                                    ContentType.Application.Json,
-                                    HttpStatusCode.InternalServerError
-                                )
+                                // SSE 已经开写（客户端中途断连、写 channel 失败）时响应
+                                // 已 commit，再 respondText 会抛 "Response has already been
+                                // sent"，把真实错误盖掉并把连接异常掐断。
+                                if (!call.response.isCommitted) {
+                                    call.respondText(
+                                        buildJsonObject { put("error", e.message ?: "internal error") }.toString(),
+                                        ContentType.Application.Json,
+                                        HttpStatusCode.InternalServerError
+                                    )
+                                }
                             }
                         }
 
@@ -172,10 +185,29 @@ class OmniInferService : Service() {
                     }
                 }
             }
-            server = embeddedServer(CIO, config) {
+            val engine = embeddedServer(CIO, config) {
                 connector { this.port = port; this.host = "127.0.0.1" }
-            }.also { it.start(wait = false) }
+            }
+            server = engine
+            engine.start(wait = false)
             Log.i(TAG, "Server started on port $port")
+            // start(wait = false) 只表示「已提交启动」，不代表真的绑上了端口。
+            // 做一次自检，失败就停掉并清空，让下一次启动能重试（否则同 handler 的注释）。
+            Thread {
+                runCatching {
+                    Thread.sleep(600L)
+                    val bound = runCatching {
+                        java.net.Socket("127.0.0.1", port).use { true }
+                    }.getOrDefault(false)
+                    if (!bound) {
+                        Log.e(TAG, "Server self-check failed on port $port; resetting for retry")
+                        runCatching { engine.stop(100, 300) }
+                        if (server === engine) {
+                            server = null
+                        }
+                    }
+                }
+            }.start()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start server on port $port: ${e.message}")
             server = null
@@ -333,7 +365,9 @@ class OmniInferService : Service() {
                 var inReasoning = false
                 val thinkEndBuf = StringBuilder()
                 val hasTools = toolsJson != null
-                var connectionAlive = true
+                // 这个标记在 native 回调线程里写、在 respondTextWriter 协程里读，
+                // 普通 var 没有 happens-before 保证，可能读到旧值继续往已断开的连接写。
+                val connectionAlive = java.util.concurrent.atomic.AtomicBoolean(true)
                 var inToolCall = false  // true once tool call marker detected in stream
                 val contentBuf = StringBuilder()  // small lookback buffer for marker detection
 
@@ -359,7 +393,7 @@ class OmniInferService : Service() {
                     repeatLastN = repeatLastN,
                     callback = OmniInferStreamCallback(
                         onTokenHandler = { token ->
-                            if (connectionAlive) {
+                            if (connectionAlive.get()) {
                                 try { runBlocking {
                                     if (isFirst) {
                                         val initChunk = buildChunk(completionId, requestModel, created) {
@@ -441,7 +475,7 @@ class OmniInferService : Service() {
                                     flush()
                                 } } catch (_: Exception) {
                                     // Client disconnected — cancel backend generation.
-                                    connectionAlive = false
+                                    connectionAlive.set(false)
                                     OmniInferBridge.cancel(handle)
                                 }
                             }
@@ -455,11 +489,11 @@ class OmniInferService : Service() {
                     // Client disconnected or write failed — cancel the running generate.
                     Log.w(TAG, "Stream interrupted: ${e.message}")
                     OmniInferBridge.cancel(handle)
-                    connectionAlive = false
+                    connectionAlive.set(false)
                     ""
                 }
 
-                if (!connectionAlive) return@respondTextWriter
+                if (!connectionAlive.get()) return@respondTextWriter
 
                 // Check for backend error (e.g. prompt too long).
                 if (result.startsWith("{\"error\":")) {
