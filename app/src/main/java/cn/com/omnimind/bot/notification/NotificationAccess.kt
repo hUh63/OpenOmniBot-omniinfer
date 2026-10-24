@@ -10,6 +10,7 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import cn.com.omnimind.baselib.util.OmniLog
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -31,7 +32,13 @@ class OmniNotificationListener : NotificationListenerService() {
         super.onDestroy()
     }
     companion object {
-        internal val changes = MutableSharedFlow<String>(extraBufferCapacity = 64)
+        // 原来是默认的 SUSPEND 溢出策略 + tryEmit：缓冲满（群聊/下载进度等高频率
+        // 通知）时 tryEmit 返回 false，事件被静默丢掉 —— awaitChange 等不到目标包，
+        // 用户看到的是「等通知超时」但其实通知早到了。DROP_OLDEST 保留最近的即可。
+        internal val changes = MutableSharedFlow<String>(
+            extraBufferCapacity = 256,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
         @Volatile internal var connected: OmniNotificationListener? = null
     }
 }

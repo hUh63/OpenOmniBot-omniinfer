@@ -6,6 +6,9 @@ import java.io.File
 object FileUtil {
     const val TAG = "FileUtil"
 
+    /** clearDirectory 的递归深度上限（防止符号链接环）。 */
+    private const val MAX_CLEAR_DEPTH = 32
+
     /**
      * 确保目录存在
      * @param dirFile 目标目录
@@ -57,6 +60,16 @@ object FileUtil {
      * @param dir 目标目录的File对象
      */
     fun clearDirectory(dir: File) {
+        clearDirectory(dir, depth = 0)
+    }
+
+    private fun clearDirectory(dir: File, depth: Int) {
+        // File.isDirectory 会跟随符号链接：一个指向祖先目录的软链就能让这个递归
+        // 永不终止（StackOverflowError）。用深度上限兜住（Files.isSymbolicLink 只在
+        // API 26+ 可用，这里保持全版本安全）。
+        if (depth > MAX_CLEAR_DEPTH) {
+            throw RuntimeException("目录层级过深或存在符号链接环：${dir.absolutePath}")
+        }
         val files = dir.listFiles() ?: return
         for (file in files) {
             if (file.isFile) {
@@ -65,7 +78,7 @@ object FileUtil {
                     throw RuntimeException("删除文件失败：${file.absolutePath}")
                 }
             } else if (file.isDirectory) {
-                clearDirectory(file)
+                clearDirectory(file, depth + 1)
                 val isDeleted = file.delete()
                 if (!isDeleted) {
                     throw RuntimeException("删除子目录失败：${file.absolutePath}")
