@@ -23,7 +23,16 @@ data class McpFileRecord(
     val createdAt: Long,
     @Volatile var downloadToken: String,
     @Volatile var tokenExpiresAt: Long,
-)
+) {
+    /**
+     * 同一文件当前所有仍未过期的下载 token（token -> 过期时刻）。
+     *
+     * 原来 [downloadToken] 只存一个值：Agent 拿到下载 URL 之后才真正去下载，期间只要
+     * 再触发一次取附件（换会话、重试、并发两个工具调用），新 token 就会把旧 token 顶掉，
+     * 那个已经在手上的 URL 立刻 403 —— 表现为「文件明明在收件箱里，下载却偶发失败」。
+     */
+    val activeTokens: MutableMap<String, Long> = ConcurrentHashMap()
+}
 
 object McpFileInbox {
     private const val TAG = "[McpFileInbox]"
@@ -31,6 +40,8 @@ object McpFileInbox {
     /** 收件箱记录的文件保留 24 小时，并对条数设上限（见 cleanupLocked）。 */
     private const val RECORD_TTL_MS = 24 * 60 * 60 * 1000L
     private const val MAX_RECORDS = 20
+    /** 单个文件同时有效的下载 token 上限（见 McpFileRecord.activeTokens）。 */
+    private const val MAX_ACTIVE_TOKENS = 8
 
     private val lock = Any()
     private val records = ConcurrentHashMap<String, McpFileRecord>()
@@ -105,15 +116,31 @@ object McpFileInbox {
 
     fun issueDownloadToken(record: McpFileRecord): McpFileRecord {
         val now = System.currentTimeMillis()
-        record.downloadToken = generateToken()
-        record.tokenExpiresAt = now + TOKEN_TTL_MS
+        val expiresAt = now + TOKEN_TTL_MS
+        val token = generateToken()
+        synchronized(lock) {
+            record.activeTokens.entries.removeAll { it.value < now }
+            record.activeTokens[token] = expiresAt
+            // 正常情况下并发下载只有个位数，超出上限时丢最早过期的那个。
+            while (record.activeTokens.size > MAX_ACTIVE_TOKENS) {
+                val oldest = record.activeTokens.entries.minByOrNull { it.value }?.key
+                    ?: break
+                record.activeTokens.remove(oldest)
+            }
+            record.downloadToken = token
+            record.tokenExpiresAt = expiresAt
+        }
         return record
     }
 
     fun isTokenValid(record: McpFileRecord, token: String?): Boolean {
         if (token.isNullOrBlank()) return false
-        if (token != record.downloadToken) return false
-        return System.currentTimeMillis() <= record.tokenExpiresAt
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            record.activeTokens.entries.removeAll { it.value < now }
+            val expiresAt = record.activeTokens[token] ?: return false
+            return now <= expiresAt
+        }
     }
 
     private fun cleanupLocked() {

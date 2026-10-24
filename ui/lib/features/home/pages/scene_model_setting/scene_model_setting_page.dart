@@ -202,18 +202,31 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       setState(() => _isLoading = true);
     }
     try {
-      final results = await Future.wait<dynamic>([
-        SceneModelConfigService.getSceneCatalog(),
-        SceneModelConfigService.getSceneModelBindings(),
-        ModelProviderConfigService.listProfiles(),
-        SceneModelConfigService.getSceneVoiceConfig(),
-      ]);
+      // 场景目录与绑定是页面的核心数据，缺了整页就没有意义；provider 列表与语音配置
+      // 只影响候选模型下拉和语音卡片，属于次要数据。原来四个 RPC 一起塞进 Future.wait
+      // 全成全败：任一次要调用抛异常，整页就退回「暂无场景」，核心数据明明取到了也白搭。
+      final catalog = await SceneModelConfigService.getSceneCatalog();
+      final bindings = await SceneModelConfigService.getSceneModelBindings();
+      var degraded = false;
+      ModelProviderProfilesPayload profilesPayload;
+      try {
+        profilesPayload = await ModelProviderConfigService.listProfiles();
+      } catch (_) {
+        degraded = true;
+        profilesPayload = const ModelProviderProfilesPayload(
+          profiles: <ModelProviderProfileSummary>[],
+          editingProfileId: '',
+        );
+      }
+      SceneVoiceConfig voiceConfig;
+      try {
+        voiceConfig = await SceneModelConfigService.getSceneVoiceConfig();
+      } catch (_) {
+        degraded = true;
+        voiceConfig = const SceneVoiceConfig();
+      }
       if (!mounted) return;
 
-      final catalog = results[0] as List<SceneCatalogItem>;
-      final bindings = results[1] as List<SceneModelBindingEntry>;
-      final profilesPayload = results[2] as ModelProviderProfilesPayload;
-      final voiceConfig = results[3] as SceneVoiceConfig;
       final providerModelsByProfileId = <String, List<ProviderModelOption>>{};
       for (final profile in profilesPayload.profiles) {
         providerModelsByProfileId[profile.id] = _isOfficialProfile(profile)
@@ -245,6 +258,9 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       );
       // Show saved bindings and manual IDs while querying the remote catalogs.
       unawaited(_refreshProviderModelsInBackground());
+      if (degraded) {
+        showToast(context.trLegacy('部分配置加载失败，可下拉重试'), type: ToastType.error);
+      }
     } catch (error) {
       if (!mounted) return;
       // 记下失败：空列表 + 无错误态会让用户以为「本机没有可配置的场景」，
@@ -971,7 +987,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
         bottom: false,
         child: _isLoading
             ? const Center(child: CircularProgressIndicator())
-            : ListView(
+            : RefreshIndicator(
+                onRefresh: () => _loadData(showLoading: false),
+                child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: edgeToEdgeScrollPadding(
                   context,
                   const EdgeInsets.fromLTRB(18, 12, 18, 24),
@@ -1055,6 +1074,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
                   ),
                   _buildVoiceCard(),
                 ],
+              ),
               ),
       ),
     );

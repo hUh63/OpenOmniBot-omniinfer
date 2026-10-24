@@ -358,7 +358,6 @@ internal object AgentWorkspaceAttachmentSupport {
             return null
         }
         val meta = dataUrl.substring(5, commaIndex)
-        val payload = dataUrl.substring(commaIndex + 1).replace(Regex("\\s+"), "")
         val isBase64 = meta.split(';').any { it.equals("base64", ignoreCase = true) }
         if (!isBase64) {
             return null
@@ -366,8 +365,31 @@ internal object AgentWorkspaceAttachmentSupport {
         val mimeType = meta.substringBefore(';').trim().ifEmpty {
             "application/octet-stream"
         }
-        val bytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull()
-            ?: return null
+        // 原来 substring(commaIndex + 1)（全量副本）+ replace(Regex("\\s+"), "")（再一份副本，
+        // 且每次现编译正则）+ Base64.decode（0.75 份）三份内存同时驻留：一张 8MB 的
+        // dataUrl 图片峰值要 30MB+，批量附件直接 OOM。改为按 byte 偏移原地解码，
+        // 只在真的含空白字符（极罕见）时才做一次字符过滤。
+        val payloadStart = commaIndex + 1
+        val bytes = runCatching {
+            var hasWhitespace = false
+            for (index in payloadStart until dataUrl.length) {
+                if (dataUrl[index].isWhitespace()) {
+                    hasWhitespace = true
+                    break
+                }
+            }
+            if (!hasWhitespace) {
+                val raw = dataUrl.toByteArray(Charsets.US_ASCII)
+                Base64.decode(raw, payloadStart, raw.size - payloadStart, Base64.DEFAULT)
+            } else {
+                val filtered = StringBuilder(dataUrl.length - payloadStart)
+                for (index in payloadStart until dataUrl.length) {
+                    val char = dataUrl[index]
+                    if (!char.isWhitespace()) filtered.append(char)
+                }
+                Base64.decode(filtered.toString(), Base64.DEFAULT)
+            }
+        }.getOrNull() ?: return null
         return DecodedDataUrl(mimeType, ByteArrayInputStream(bytes))
     }
 
