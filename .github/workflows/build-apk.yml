@@ -113,69 +113,46 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.5
+          tag_name: v0.6.3-omniinfer-v6.5.6
           # Without this the tag lands on the default branch's HEAD (which is how
           # v1/v2/v3 all ended up pointing at the same old commit) instead of the
           # commit this build actually checked out. Mirrors release.yml:302.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 稳定性专项 40 项修复（事件流/定时任务/浏览器会话/自动刷新） (v0.6.3-omniinfer-v6.5.5)"
+          name: "OmniInfer 版 · IM 渠道声明 / 历史与技能写入 / MCP 文件令牌 (v0.6.3-omniinfer-v6.5.6)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6.5.5)：稳定性专项，共 40 处修复。来自对聊天、agent 运行时、存储与 DAO、IM/终端/浏览器、记忆与定时任务、工具与技能、webchat 七个域的逐行审计。
+            本轮 (v6.5.6)：27 处修复，来自对 IM / 后台任务、持久化与缓存、Dart 服务层（语音 / 终端 / 渠道）、会话历史与技能的又一轮逐行审计。
 
-            一、一次失败就永久坏掉（本类最多）
-            - 事件消费协程无保护：webchat 的 agent 事件循环、IM 的实时事件订阅，单条事件处理失败（脏数据 / DB / 网络发送异常）就让协程永久退出 —— 网页端一直显示“运行中”、停止按钮失效；IM 用户发消息后再也收不到回复。已加异常隔离。
-            - 本地模型事件通道：Dart 侧吞掉 onError 却把“已接线”标记留成 true，一次错误后下载进度 / 排队提示永久不刷新。
-            - agent 运行时事件通道：订阅 done 后引用不复位，引擎重建后运行状态再也不更新。
-            - 语音播放：_initialized 先置位再 await，首次配置读取失败就再也订阅不上事件，按钮永远停在“播放中”。
-            - 夜间记忆整理：排下一次闹钟写在整理之后，一次失败（断网 / 模型不可用）夜间整理永久停摆，“下次整理”时间一直停在过去。
-            - 抽屉搜索：异常后仍显示“搜索中”并残留上一次结果。
-            - 归档页“加载更多”：_isLoadingMore 只在成功分支复位，刷新抢跑或失败后永远翻不了页。
-            - 终端命令：未指定超时就无限等待（会话初始化正是这样传的），整轮 agent 挂死 —— 现在 120 秒兜底。
+            一、装不上的功能（声明缺失 / 必崩路径）
+            - IM 渠道的前台服务 ImChannelForegroundService 从未在 AndroidManifest 声明：打开微信 / Telegram 渠道时启动的是一个未注册的 Service，渠道永远连不上（且可能直接抛异常）。
+            - IM 的开机恢复 ImChannelBootReceiver 同样未声明，其 onReceive 永远不会被调用 —— 重启或升级后渠道静默失效。
+            - 音乐播放服务用 startForegroundService 拉起所有动作，但只有播放 / 继续会调 startForeground：播放服务被系统回收后，Agent 调一次「暂停音乐」就会因 ForegroundServiceDidNotStartInTime 崩掉进程。现在所有动作先升级前台，停止时再撤回。
 
-            二、定时任务的语义被写反了
-            - “停用任务”原来实现成 deleteTask（连 Flutter 存储一起删），任务消失且不可恢复；改为 upsert（原生取消闹钟、清空下次执行时间、保留记录）。
-            - 编辑弹窗恒写 isEnabled=true：编辑一个停用任务会悄悄重新启用并排上闹钟。
-            - 错过时间的一次性任务被顺延到将来，第二天打开 App 突然执行一次；改为过期即失效。
-            - 一次性任务执行失败也照样删除，既无通知也查不到记录；改为保留并停用。
-            - 原生与 Flutter 双写 scheduled_tasks，而 Dart 侧 SharedPreferences 是进程级内存缓存且从不 reload：列表长期显示旧的“下次执行时间”，已执行的一次性任务被整表写回“复活”并重复执行。现在读取前按 2 秒节流 reload。
+            二、会话历史与技能的文件写入
+            - 技能注册表整表 writeText 不是原子的，而读取遇到截断会静默返回空表 —— 一次异常退出就抹掉所有技能开关与「已删除内置技能」墓碑，随后 seeder 把内置技能重新种回来（用户关掉的技能自己又打开了）。改为临时文件 + rename，保留 .bak 并在解析失败时回退。
+            - 超过 8KB 的工具 payload 落盘写在 exists() 判断之后、直接写最终路径：写一半被杀就留下截断文件，且永远不会重写，之后每次打开这段历史拿到的都是半截 JSON。
+            - 读历史时把「还在运行」的工具条目无条件改写成「已中断」并落库，还把 updatedAt 推到现在：正在跑的工具显示成中断，会话列表排序被顶乱。现在 2 分钟内的条目不再动，更早的残留照旧自愈。
 
-            三、状态被旧快照覆盖
-            - 更新会话时整行写回 lastMessage / messageCount，而 Flutter 传来的是几秒前的列表快照 —— 抽屉里最后一条消息回退、会话莫名跳到顶部。现在只有 messageCount 确实更靠前才采用。
-            - 本地模型页 3 秒轮询的旧快照晚于“启动服务”结果落地，刚起来的服务被刷回“未启动”（加代际号）。
-            - 归档 / 删除一条会话后分页游标不退格，删一条就永久少一条更早的会话。
-            - 技能开关被整表 seed 覆盖（刚关掉的技能自己打开、removed_builtin 复活）；删除技能失败却删掉 registry 条目，技能以启用状态复活。
+            三、会话元数据被旧快照覆盖
+            - 刷新会话元数据走的是「读整行快照 → 5 次聚合查询 → 整行写回」，这期间用户改名 / 置顶 / 归档 / 切换状态都会被旧快照覆盖回去。改为只更新由条目派生的聚合列（lastMessage / messageCount / createdAt / updatedAt）。
 
-            四、分页与列表
-            - 消息分页 offset 改用 SQL 实际消费行数（组装阶段会丢掉 transport / 空内容条目，用消息条数推进会反复重读同一段；整页被过滤时 offset 原地不动、向上翻历史卡死）。
-            - 消息分页按 id 去重（删消息 / 合并会让 offset 窗口错位，出现重复消息）。
-            - getConversationsByPage 由“全表取回再内存切片”改成真正的 SQL 分页，并移出 Default 调度器。
-            - webchat 会话分页返回 scanned 供游标推进。
+            四、MCP 文件传输
+            - 同一个文件再签发一次下载 token 会把上一个顶掉：Agent 拿到 URL 之后才真正下载，期间换会话 / 重试 / 并发两个工具调用都会让它在手的链接立刻 403。现在同一文件保留多个未过期 token（上限 8 个）。
+            - 附件 dataUrl 解码原本 substring + 正则替换 + Base64.decode 三份全量副本同时驻留，一张 8MB 的图片峰值 30MB+，批量附件容易 OOM。改为按字节偏移原地解码，仅在真的含空白时才做一次过滤。
 
-            五、卡死与资源泄漏
-            - ACP 权限请求没有 try/finally，pending 登记在 emit 失败 / 取消时永久残留；同 id 的后续响应打在已死的 Deferred 上却返回 ok=true。
-            - 终端会话关闭失败仍删掉所有权登记，shell 既停不掉也回收不了（该登记同时是鉴权依据）。
-            - 工作区文件读取不论请求多少字符都先整份 readText，上百 MB 文件预览直接 OOM；改为流式切片。
-            - 浏览器会话每个 workspace 一个常驻 WebView 引擎且只增不减；改为最多保活 2 个（LRU 淘汰，销毁在锁外执行）。
-            - WebAgentRunBridge / AgentRunService 每份实例各持一套事件通道与协程作用域（MCP 每次启停都新建一份）；改为进程级共享，runContexts 按会话收敛。
-            - RealtimeHub 无订阅者时 emit 挂起 + 无界队列导致内存持续增长；改有界缓冲 + 丢弃最旧。
-            - 通知等待工具不按 schema 收敛超时，模型给 86400 就真阻塞 24 小时；按 1~120 秒收敛。
+            五、定时任务与语音
+            - native 闹钟模式下本地 Timer 从不创建，_currentCountdownTask 恒为 null，于是倒计时浮层上的「取消」「立即执行」全是空操作：任务不删、不重排、5 秒后照常执行。改为按 taskId 从存储反查。
+            - 语音播放协调器的 EventChannel 订阅没有 onError / onDone：通道报错或原生 EndOfStream 之后订阅终结，但「已初始化」标记留着，于是永久不重连 —— 播放状态卡住、手动重试也没反应。
 
-            六、安全
-            - webchat 的局域网判定优先信任 X-Forwarded-For / X-Real-IP（客户端可任意伪造），改为真实 TCP 对端地址。
+            六、页面加载与降级
+            - IM 设置页的 refresh / 保存 / 开关 / 取二维码等一系列原生调用既没有超时也没有异常保护，原生不回调就永久 loading（二维码要走微信服务器，单独给 40 秒）。统一加了超时与异常兜底。
+            - 场景模型页四个 RPC 走 Future.wait 全成全败：provider 列表或语音配置任一次失败，整页就退回「暂无场景」，核心的目录 / 绑定明明取到了也白搭。现在核心先加载、次要降级，并补了下拉刷新与错误态 + 重试按钮（原来失败只弹一个 toast，页面连刷新入口都没有）。
 
-            七、IM
-            - Telegram 轮询循环判断的是共享字段而非自身 Job：改配置重启后旧循环仍在跑，同一条消息被处理两次并持续返回 409。
-            - 分片发送失败被吞、done 先置位、hasSentAny 无条件置真：长回答结尾永久丢失且无提示。已改为按结果置位。
-            - 进程重启后残留的 activeTaskId 让该 peer 所有消息都被回“已有任务运行中”；首次初始化统一清理。
-
-            八、webchat
-            - /events 空闲时不发任何数据，手机锁屏 / 路由 NAT 会静默掐断连接而前端以为还连着（页面不再自动刷新）；加 15 秒心跳，写失败即断开以触发重连。
-
-            九、长会话性能
-            - 时间线分组每个 run 都全表过滤一次（O(消息数 × 轮次数)），长会话每新增一张卡片都在 UI 线程重算几十万次比较；改为单遍按 taskId 分组。
-            - 抽屉缩略图按需加载 + 12 秒节流，并修掉“在飞标记泄漏”（流式输出中签名变化会让该会话缩略图永久不更新）。
+            七、其他
+            - 记忆中心的长期记忆时间戳原本硬写 now，所有条目永远显示「刚刚」且随刷新往前跳；改为无时间戳时显示「长期记忆」占位。
+            - 静默更新检查用 force=true 绕过了自己的 6 小时节流，失败又不写 checkedAt，弱网设备每次启动都发一次注定失败的请求；改为遵守节流 + 30 分钟退避。
+            - 插件列表调用无超时，原生不回调时执行中心永久转圈且刷新按钮被置灰。
 
             全部改动只经过编译门（verify-omniinfer）验证，尚未做真机回归；安装后如遇异常请反馈具体操作路径。
           files: apk-out/*.apk
