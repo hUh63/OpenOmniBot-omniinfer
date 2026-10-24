@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -12,6 +13,23 @@ import 'package:ui/widgets/app_background_widgets.dart';
 import 'package:ui/widgets/image_preview_overlay.dart';
 import 'package:ui/widgets/omnibot_markdown_body.dart';
 import 'package:ui/widgets/omnibot_resource_widgets.dart';
+
+/// 内联文本预览的单文件上限（见 _WorkspaceInlineFilePreview._loadIfNeeded）。
+const int _kMaxInlineTextPreviewBytes = 512 * 1024;
+
+/// 只读文件开头 [maxBytes] 字节。截断点可能落在 UTF-8 多字节字符中间，用
+/// allowMalformed 兜住，避免预览因为一个断字符直接抛异常。
+Future<String> _readFileHead(File file, int maxBytes) async {
+  final handle = await file.open();
+  try {
+    final length = await handle.length();
+    final toRead = length < maxBytes ? length : maxBytes;
+    final bytes = await handle.read(toRead);
+    return utf8.decode(bytes, allowMalformed: true);
+  } finally {
+    await handle.close();
+  }
+}
 
 class _WorkspaceBreadcrumbSegment {
   const _WorkspaceBreadcrumbSegment({
@@ -173,6 +191,9 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
         mounted &&
         generation == _directoryLoadGeneration &&
         directory.path == _directory.path;
+    // 这个 _refresh 会被「删除 / 移动 / 重命名 / 卸载挂载」等 await 之后调用，
+    // 页面已经 pop 时第一句 setState 就抛 setState() called after dispose()。
+    if (!mounted) return;
     setState(() {
       _isLoadingDirectory = true;
       _directoryLoadError = null;
@@ -547,11 +568,13 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
       return true;
     }
 
-    final children =
-        _directoryChildrenCache[path] ??
-        (Directory(path).existsSync()
-            ? _sortedEntriesFor(Directory(path))
-            : const <FileSystemEntity>[]);
+    // 构建期绝不能落盘：原来是 cache miss 时 existsSync() + listSync() 递归列目录，
+    // 多选并把目录展开着滚动时，每帧都做一次同步 IO（目录越多越卡）。cache 未命中
+    // 就按「已选中」处理，真正的全选校验走异步加载后的路径。
+    final children = _directoryChildrenCache[path];
+    if (children == null) {
+      return true;
+    }
     for (final child in children) {
       if (!_isEntrySelected(child)) {
         return false;
@@ -796,25 +819,6 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
     );
   }
 
-  List<FileSystemEntity> _sortedEntriesFor(Directory directory) {
-    final entries = directory.listSync(followLinks: false).toList();
-    for (final entry in entries.whereType<Link>()) {
-      if (FileSystemEntity.typeSync(entry.path) ==
-          FileSystemEntityType.directory) {
-        _directoryLikePaths.add(entry.path);
-      } else {
-        _directoryLikePaths.remove(entry.path);
-      }
-    }
-    return entries..sort((a, b) {
-      final aIsDirectoryLike = _isDirectoryLikeEntry(a);
-      final bIsDirectoryLike = _isDirectoryLikeEntry(b);
-      if (aIsDirectoryLike && !bIsDirectoryLike) return -1;
-      if (!aIsDirectoryLike && bIsDirectoryLike) return 1;
-      return a.path.toLowerCase().compareTo(b.path.toLowerCase());
-    });
-  }
-
   bool _isDirectoryLikeEntry(FileSystemEntity entry) {
     if (entry is Directory) {
       return true;
@@ -854,7 +858,10 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
     });
   }
 
-  void _toggleDirectoryExpansion(Directory directory, {required int depth}) {
+  Future<void> _toggleDirectoryExpansion(
+    Directory directory, {
+    required int depth,
+  }) async {
     if (depth >= _maxInlineExpansionDepth) {
       _openDirectory(directory);
       return;
@@ -864,7 +871,23 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
       _collapseDirectory(path);
       return;
     }
-    final children = _sortedEntriesFor(directory);
+    // 原来是 _sortedEntriesFor()：在 UI 线程 listSync 列目录，而且没有 try/catch ——
+    // 权限被拒或目录刚被删除时异常直接从点击回调冒出去，用户只看到「点了没反应」，
+    // 也绕过了 _refresh 里的错误态和重试入口。
+    List<FileSystemEntity> children;
+    try {
+      final loaded = await _readSortedEntries(directory);
+      children = loaded.entries;
+      _directoryLikePaths.addAll(loaded.directories);
+    } on FileSystemException catch (error) {
+      if (!mounted) return;
+      showToast(
+        '无法读取该文件夹：${error.osError?.message ?? error.message}',
+        type: ToastType.error,
+      );
+      return;
+    }
+    if (!mounted) return;
     setState(() {
       _expandedDirectoryPaths.add(path);
       _directoryChildrenCache[path] = children;
@@ -1045,7 +1068,7 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
         if (isDirectory) {
           final directory = Directory(entry.path);
           if (canExpandInline) {
-            _toggleDirectoryExpansion(directory, depth: depth);
+            unawaited(_toggleDirectoryExpansion(directory, depth: depth));
           } else {
             _openDirectory(directory);
           }
@@ -2044,7 +2067,14 @@ class _WorkspaceInlineFilePreviewState
       });
     }
     try {
-      final text = await File(widget.metadata.path).readAsString();
+      final file = File(widget.metadata.path);
+      final length = await file.length();
+      // 无上限 readAsString 会把几十 MB 的日志整串读进内存，再塞进
+      // TextEditingController 放大好几倍 —— 页面直接卡死或 OOM。超过阈值只读头部。
+      final text = length > _kMaxInlineTextPreviewBytes
+          ? '${await _readFileHead(file, _kMaxInlineTextPreviewBytes)}\n\n'
+                '（文件过大，仅显示前 ${_kMaxInlineTextPreviewBytes ~/ 1024}KB）'
+          : await file.readAsString();
       if (!mounted) return;
       setState(() {
         _textContent = text;
@@ -2115,7 +2145,9 @@ class _WorkspaceInlineFilePreviewState
     });
     try {
       final savedText = _editorController.text;
-      File(widget.metadata.path).writeAsStringSync(savedText);
+      // 同步写盘会卡住 UI 线程，spinner 根本没机会绘制，用户以为「点了没反应」
+      // 而连点或直接退出丢掉改动。
+      await File(widget.metadata.path).writeAsString(savedText);
       if (!mounted) return;
       setState(() {
         _textContent = savedText;

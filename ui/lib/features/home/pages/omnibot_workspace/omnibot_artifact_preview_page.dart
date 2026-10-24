@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -23,6 +24,9 @@ enum _ArtifactPreviewAction {
 bool shouldOpenOmnibotArtifactInFullPage(String previewKind) {
   return previewKind == 'html';
 }
+
+/// 文本类 artifact 预览的单文件上限（见 _loadIfNeeded）。
+const int _kMaxArtifactTextPreviewBytes = 512 * 1024;
 
 class OmnibotArtifactPreviewPage extends StatefulWidget {
   final String path;
@@ -125,7 +129,23 @@ class _OmnibotArtifactPreviewPageState
       setState(() => _loadingText = true);
     }
     try {
-      final text = await File(widget.path).readAsString();
+      final file = File(widget.path);
+      final length = await file.length();
+      // 无上限 readAsString：几十 MB 的日志/JSON 整串进内存，再塞进
+      // TextEditingController 放大数倍，页面直接卡死或 OOM。超阈值只读头部。
+      final String text;
+      if (length > _kMaxArtifactTextPreviewBytes) {
+        final handle = await file.open();
+        try {
+          final bytes = await handle.read(_kMaxArtifactTextPreviewBytes);
+          text = '${utf8.decode(bytes, allowMalformed: true)}\n\n'
+              '（文件过大，仅显示前 ${_kMaxArtifactTextPreviewBytes ~/ 1024}KB）';
+        } finally {
+          await handle.close();
+        }
+      } else {
+        text = await file.readAsString();
+      }
       if (!mounted) return;
       final keepDraft = _isEditing && _isDirty;
       if (!keepDraft) {

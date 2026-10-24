@@ -49,16 +49,37 @@ class OmnibotPdfPreviewService {
 
   static Future<OmnibotPdfDocumentInfo> getDocumentInfo(String path) {
     final key = path.trim();
-    return _infoCache.putIfAbsent(key, () async {
-      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-        'getPdfInfo',
-        <String, dynamic>{'path': key},
-      );
+    // putIfAbsent 缓存的是 Future 本身：失败的那次也会被永久留下，之后同一路径
+    // 永远返回同一个已失败的 Future（重试永远失败，只能重启进程）。
+    // 失败时把条目摘掉，让下一次调用重新请求。
+    final cached = _infoCache[key];
+    if (cached != null) {
+      return cached;
+    }
+    final future = () async {
+      final result = await _channel
+          .invokeMethod<Map<dynamic, dynamic>>(
+            'getPdfInfo',
+            <String, dynamic>{'path': key},
+          )
+          .timeout(const Duration(seconds: 30));
       if (result == null) {
         throw StateError('PDF 信息为空');
       }
       return OmnibotPdfDocumentInfo.fromMap(result);
-    });
+    }();
+    _infoCache[key] = future;
+    // 失败时摘掉缓存条目（这里不 rethrow，避免产生未捕获的异步错误；
+    // 调用方拿到的还是同一个失败 Future）。
+    future.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        if (identical(_infoCache[key], future)) {
+          _infoCache.remove(key);
+        }
+      },
+    );
+    return future;
   }
 
   static Future<Uint8List> renderPage({

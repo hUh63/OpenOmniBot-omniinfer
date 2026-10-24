@@ -1955,11 +1955,29 @@ class AgentRuntimeService {
     );
   }
 
+  /// 原生不回调 result 时 invokeMethod 的 await 会永久挂起：页面 loading 永真、
+  /// 按钮 busy 态卡住，用户只能杀进程。所有原生调用统一走超时。
+  static const Duration _defaultInvokeTimeout = Duration(seconds: 60);
+
+  /// 安装 / 握手 / 编译这类长任务给更宽的窗口，其余保持 60s。
+  static Duration _invokeTimeoutFor(String method) {
+    final normalized = method.toLowerCase();
+    if (normalized.contains('prepare') ||
+        normalized.contains('install') ||
+        normalized.contains('connect') ||
+        normalized.contains('login')) {
+      return const Duration(minutes: 10);
+    }
+    return _defaultInvokeTimeout;
+  }
+
   static Future<Map<String, dynamic>> _invokeMap(
     String method, [
     Map<String, dynamic> args = const <String, dynamic>{},
   ]) async {
-    final result = await _methodChannel.invokeMethod<dynamic>(method, args);
+    final result = await _methodChannel
+        .invokeMethod<dynamic>(method, args)
+        .timeout(_invokeTimeoutFor(method));
     return _normalizeMap(result) ?? <String, dynamic>{};
   }
 
@@ -1977,7 +1995,9 @@ class AgentRuntimeService {
     String method, [
     Map<String, dynamic> args = const <String, dynamic>{},
   ]) async {
-    final result = await _methodChannel.invokeMethod<dynamic>(method, args);
+    final result = await _methodChannel
+        .invokeMethod<dynamic>(method, args)
+        .timeout(_invokeTimeoutFor(method));
     return _normalizeValue(result);
   }
 }

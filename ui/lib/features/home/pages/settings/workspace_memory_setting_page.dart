@@ -27,6 +27,7 @@ class _WorkspaceMemorySettingPageState
   bool _savingSoul = false;
   bool _savingChat = false;
   bool _savingMemory = false;
+  bool _runningRollup = false;
   bool _embeddingEnabled = true;
   bool _rollupEnabled = false;
   WorkspaceMemoryEmbeddingConfig? _embeddingConfig;
@@ -175,6 +176,9 @@ class _WorkspaceMemorySettingPageState
   }
 
   Future<void> _runRollupNow() async {
+    // 没有 in-flight 守卫时连点会并发触发多次 rollup。
+    if (_runningRollup) return;
+    setState(() => _runningRollup = true);
     try {
       final result = await WorkspaceMemoryService.runRollupNow();
       if (!mounted) return;
@@ -183,16 +187,24 @@ class _WorkspaceMemorySettingPageState
       );
       await _loadAll();
     } on PlatformException catch (e) {
+      // 两个 catch 分支原来直接用 context.l10n —— 页面已 dispose 时查
+      // ScaffoldMessenger 会断言失败（本文件 75 行注释里自己警告过这一点）。
+      if (!mounted) return;
       final message = e.message?.trim();
       final errorText = (message == null || message.isEmpty)
           ? context.l10n.workspaceRollupFailed
           : '${context.l10n.workspaceRollupFailed}：$message';
       showToast(errorText, type: ToastType.error);
     } catch (e) {
+      if (!mounted) return;
       showToast(
         '${context.l10n.workspaceRollupFailed}：$e',
         type: ToastType.error,
       );
+    } finally {
+      if (mounted) {
+        setState(() => _runningRollup = false);
+      }
     }
   }
 

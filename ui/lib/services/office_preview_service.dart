@@ -35,12 +35,32 @@ class OmnibotOfficePreviewSection {
   bool get hasTable => tableRows.isNotEmpty;
 }
 
+/// Office 预览的文件大小上限（见 loadPreview）。
+const int _kMaxOfficePreviewBytes = 24 * 1024 * 1024;
+
 class OmnibotOfficePreviewService {
   static Future<OmnibotOfficePreviewData> loadPreview({
     required String path,
     required String previewKind,
   }) async {
-    final bytes = await File(path).readAsBytes();
+    // 先看大小再接进内存：readAsBytes 把整个 Office 文件读进来，紧接着
+    // ZipDecoder 又会把解压后的全部条目展开一份 —— 一个 100MB 的 pptx（内含高清图）
+    // 解压后能吃掉数百 MB，直接 OOM 闪退。超阈值时明确告知而不是硬试。
+    final file = File(path);
+    int length;
+    try {
+      length = await file.length();
+    } catch (_) {
+      length = -1;
+    }
+    if (length > _kMaxOfficePreviewBytes) {
+      throw StateError(
+        LegacyTextLocalizer.isEnglish
+            ? 'File is too large to preview (${length ~/ (1024 * 1024)}MB); open it with an external app'
+            : '文件过大无法预览（${length ~/ (1024 * 1024)}MB），请用外部应用打开',
+      );
+    }
+    final bytes = await file.readAsBytes();
     final archive = ZipDecoder().decodeBytes(bytes, verify: false);
     try {
       return switch (previewKind) {

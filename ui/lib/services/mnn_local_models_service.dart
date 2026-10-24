@@ -327,12 +327,15 @@ class MnnLocalModelsService {
     String marketQuery = '',
     String marketCategory = 'llm',
   }) async {
+    // 原生不回调时 await 会永久挂起，本地模型页 loading 永真。这个调用要扫已安装
+    // 模型目录 + 市场索引，是页面上最重的一次原生调用，给 30s 上限。
     final result = await _channel
         .invokeMethod<Map<dynamic, dynamic>>('getOverview', {
           'installedQuery': installedQuery,
           'marketQuery': marketQuery,
           'marketCategory': marketCategory.trim().toLowerCase(),
-        });
+        })
+        .timeout(const Duration(seconds: 30));
     return MnnLocalOverviewPayload.fromMap(result);
   }
 
@@ -360,9 +363,9 @@ class MnnLocalModelsService {
   }
 
   static Future<List<MnnLocalModel>> refreshInstalledModels() async {
-    final result = await _channel.invokeMethod<List<dynamic>>(
-      'refreshInstalledModels',
-    );
+    final result = await _channel
+        .invokeMethod<List<dynamic>>('refreshInstalledModels')
+        .timeout(const Duration(seconds: 30));
     return (result ?? const [])
         .map((item) => MnnLocalModel.fromMap(item as Map?))
         .toList();
@@ -373,14 +376,16 @@ class MnnLocalModelsService {
     String category = 'llm',
     bool refresh = false,
   }) async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'listMarketModels',
-      {
-        'query': query,
-        'category': category.trim().toLowerCase(),
-        'refresh': refresh,
-      },
-    );
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>(
+          'listMarketModels',
+          {
+            'query': query,
+            'category': category.trim().toLowerCase(),
+            'refresh': refresh,
+          },
+        )
+        .timeout(const Duration(seconds: 40));
     return MnnLocalMarketPayload.fromMap(result);
   }
 
@@ -466,9 +471,12 @@ class MnnLocalModelsService {
   static Future<Map<dynamic, dynamic>?> preloadModel({
     required String modelId,
   }) {
-    return _channel.invokeMethod<Map<dynamic, dynamic>>('preloadModel', {
-      'modelId': modelId,
-    });
+    // 真正加载模型可能比较久，但仍然要有上限：挂住的 future 会让调用方永远等下去。
+    return _channel
+        .invokeMethod<Map<dynamic, dynamic>>('preloadModel', {
+          'modelId': modelId,
+        })
+        .timeout(const Duration(minutes: 5));
   }
 
   static Future<MnnLocalConfig> stopApiService() async {
@@ -492,12 +500,17 @@ class MnnLocalModelsService {
     return (result ?? {}).cast<String, dynamic>();
   }
 
+  /// 这两个只做「下指令」，原生不回调时按钮的 busy 态会永久卡住，给 20s 上限。
   static Future<void> startDownload(String modelId) {
-    return _channel.invokeMethod('startDownload', {'modelId': modelId});
+    return _channel
+        .invokeMethod('startDownload', {'modelId': modelId})
+        .timeout(const Duration(seconds: 20));
   }
 
   static Future<void> pauseDownload(String modelId) {
-    return _channel.invokeMethod('pauseDownload', {'modelId': modelId});
+    return _channel
+        .invokeMethod('pauseDownload', {'modelId': modelId})
+        .timeout(const Duration(seconds: 20));
   }
 
   static Future<List<MnnLocalModel>> deleteModel(String modelId) async {
