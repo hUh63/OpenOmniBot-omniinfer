@@ -23,6 +23,8 @@ class PermissionRequest : Activity() {
     companion object {
         private const val PERMISSION_REQUEST_CODE = 1001
         private const val EXTRA_PERMISSIONS = "extra_permissions"
+        /** 每个启动请求分配到的 requestCode，必须随 Intent 传进来，不能读全局静态值。 */
+        private const val EXTRA_REQUEST_CODE = "extra_request_code"
 
         private val requestCallbacks = SparseArray<(Map<String, Boolean>) -> Unit>()
         private var requestCode = 0
@@ -58,11 +60,22 @@ class PermissionRequest : Activity() {
             permissions: Array<String>,
             callback: (Map<String, Boolean>) -> Unit
         ) {
-            requestCode++
-            requestCallbacks.put(requestCode, callback)
+            if (permissions.isEmpty()) {
+                // 原来是 requestCode++ 并把 callback 塞进静态 map，然后 Activity 里
+                // 「permissions 为空 → finish()」那条分支既不回调也不移除 —— 调用方
+                // 永远等不到结果，静态 SparseArray 还会长期持有它的闭包。
+                callback(emptyMap())
+                return
+            }
+            val code = ++requestCode
+            requestCallbacks.put(code, callback)
 
             val intent = Intent(context, PermissionRequest::class.java)
                 .putExtra(EXTRA_PERMISSIONS, permissions)
+                // requestCode 是 companion 里的全局静态计数器。原来 Activity 在
+                // onCreate 里读「当时」的全局值：连续两次请求会把第一次的结果回调到
+                // 第二个 callback 上，第一个回调永远不会被调用也永不释放。
+                .putExtra(EXTRA_REQUEST_CODE, code)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
         }
@@ -96,7 +109,7 @@ class PermissionRequest : Activity() {
             return
         }
 
-        currentRequestCode = requestCode
+        currentRequestCode = intent.getIntExtra(EXTRA_REQUEST_CODE, requestCode)
 
         // 检查是否已经拥有权限
         val permissionsToRequest = permissions.filter { permission ->
@@ -164,8 +177,16 @@ class PermissionRequest : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         val resultMap = mutableMapOf<String, Boolean>()
-        permissions.forEachIndexed { index, permission ->
-            resultMap[permission] = grantResults[index] == PackageManager.PERMISSION_GRANTED
+        if (grantResults.isEmpty()) {
+            // 系统权限弹窗被打断（旋转、被其他弹窗覆盖、Activity 被回收）时，
+            // Android 会返回空的 permissions 与 grantResults。原来直接取
+            // grantResults[index] 就 ArrayIndexOutOfBounds 崩在透明 Activity 里。
+            permissions.forEach { permission -> resultMap[permission] = false }
+        } else {
+            permissions.forEachIndexed { index, permission ->
+                resultMap[permission] =
+                    grantResults.getOrNull(index) == PackageManager.PERMISSION_GRANTED
+            }
         }
 
         // 回调结果

@@ -29,7 +29,10 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.origin
+import io.ktor.server.request.contentLength
 import io.ktor.server.request.host
+import io.ktor.server.request.httpMethod
+import io.ktor.server.request.uri
 import io.ktor.server.request.path
 import io.ktor.server.request.receive
 import io.ktor.server.response.header
@@ -76,6 +79,9 @@ object McpServerManager {
     private const val PORT_SEARCH_ATTEMPTS = 100
     private const val WEBCHAT_SESSION_COOKIE = "omnibot_webchat_session"
     private const val WEBCHAT_SESSION_TTL_MS = 7L * 24L * 60L * 60L * 1000L
+    /** bootstrap 只要一个 token，64KB 已经远超实际需要（见 handleWebChatSessionBootstrap）。 */
+    private const val MAX_BOOTSTRAP_BODY_BYTES = 64L * 1024L
+    private val TOKEN_QUERY_PATTERN = Regex("token=[^&\\s]+")
 
     internal val gson by lazy { Gson() }
     internal val serverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -208,9 +214,26 @@ object McpServerManager {
             call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Access denied"))
             return
         }
-        val body = runCatching { call.receive<Map<String, Any?>>() }.getOrDefault(emptyMap())
-        val token = body["token"]?.toString()
-            ?: call.request.headers["Authorization"]?.removePrefix("Bearer ")?.trim()
+        // 这是唯一免鉴权的 POST，而原来的 call.receive<Map<...>>() 没有任何大小限制：
+        // 局域网内一份几百 MB 的 body 在反序列化阶段就能把整个进程 OOM（runCatching
+        // 只能兜异常，兜不住内存）。先卡长度；header 里带 token 时干脆不读 body。
+        val declaredLength = call.request.contentLength() ?: -1L
+        if (declaredLength < 0L || declaredLength > MAX_BOOTSTRAP_BODY_BYTES) {
+            call.respond(
+                HttpStatusCode.PayloadTooLarge,
+                mapOf("error" to "Request body too large")
+            )
+            return
+        }
+        val headerToken = call.request.headers["Authorization"]
+            ?.removePrefix("Bearer ")
+            ?.trim()
+        val body = if (!headerToken.isNullOrBlank()) {
+            emptyMap<String, Any?>()
+        } else {
+            runCatching { call.receive<Map<String, Any?>>() }.getOrDefault(emptyMap())
+        }
+        val token = body["token"]?.toString() ?: headerToken
         if (token.isNullOrBlank() || !timingSafeEquals(token, ensureToken())) {
             call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Authentication failed"))
             return
@@ -241,6 +264,12 @@ object McpServerManager {
      * 文件下载端点处理（支持文件 token 和 Bearer token）。
      */
     suspend fun handleFileDownload(call: io.ktor.server.application.ApplicationCall) {
+        // 这是唯一没有做局域网判定的出口：服务 bind 在 0.0.0.0，只要 token 泄漏
+        // （见上面 CallLogging 的 query 脱敏）就等于公网可下载。补上来源校验。
+        if (!isLanRequest(call)) {
+            call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Access denied"))
+            return
+        }
         val fileId = call.parameters["fileId"]
         if (fileId.isNullOrBlank()) {
             call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid request"))
@@ -420,7 +449,15 @@ object McpServerManager {
         val allowedMcpOrigins = allowedMcpHosts.map { host -> "http://$host" }
 
         return embeddedServer(CIO, host = "0.0.0.0", port = port) {
-            install(CallLogging)
+            install(CallLogging) {
+                // 默认格式是 "METHOD - URI"，而文件下载把 token 放在 query 里
+                // （/mcp/file/{id}?token=...），于是这枚 token 会明文写进 logcat、
+                // 崩溃上报和第三方日志采集。这里统一脱敏。
+                format { call ->
+                    val sanitized = call.request.uri.replace(TOKEN_QUERY_PATTERN, "token=***")
+                    "${call.request.httpMethod.value} - $sanitized"
+                }
+            }
             install(ContentNegotiation) {
                 json(McpJson)
                 gson()

@@ -92,6 +92,8 @@ private const val PREVIEW_FRAME_JPEG_QUALITY = 72
 private const val PREVIEW_FRAME_MAX_WIDTH = 420
 private const val TYPE_INPUT_CHUNK_SIZE = 3
 private const val TYPE_INPUT_CHUNK_DELAY_MS = 35L
+/** userscript 下载的硬上限（见 downloadUserscriptText）。 */
+private const val MAX_USERSCRIPT_BYTES = 2 * 1024 * 1024
 
 enum class BrowserUserAgentProfile(
     val wireName: String,
@@ -2907,14 +2909,51 @@ class BrowserUseEngine(
         require(sourceUrl.startsWith("http://") || sourceUrl.startsWith("https://")) {
             "Userscript 安装地址仅支持 http(s)"
         }
-        val source = withContext(Dispatchers.IO) {
-            URL(sourceUrl).openStream().bufferedReader().use { it.readText() }
-        }
+        val source = downloadUserscriptText(sourceUrl)
         prepareUserscriptInstallFromSource(
             source = source,
             sourceName = sourceUrl.substringAfterLast('/'),
             sourceUrl = sourceUrl
         )
+    }
+
+    /**
+     * 带超时与大小上限的 userscript 下载。
+     *
+     * 原来直接 `URL(url).openStream()`：openStream 的 connectTimeout / readTimeout 都是 0
+     * （无限等待），一个慢速或黑洞地址就会把这次工具调用永久挂住（同文件的 fetch 反而
+     * 设了 30s 超时，说明这里是漏配），而且会把任意大小的远端内容整读进内存。
+     */
+    private suspend fun downloadUserscriptText(url: String): String = withContext(Dispatchers.IO) {
+        val connection = (URL(url).openConnection() as? HttpURLConnection)
+            ?: throw IllegalStateException("仅支持 http(s) 地址")
+        try {
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 30_000
+            connection.instanceFollowRedirects = true
+            connection.requestMethod = "GET"
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                throw IllegalStateException("下载脚本失败：HTTP $status")
+            }
+            val buffer = ByteArrayOutputStream()
+            connection.inputStream.use { input ->
+                val chunk = ByteArray(16 * 1024)
+                while (true) {
+                    val read = input.read(chunk)
+                    if (read <= 0) break
+                    if (buffer.size() + read > MAX_USERSCRIPT_BYTES) {
+                        throw IllegalStateException(
+                            "脚本过大：超过 ${MAX_USERSCRIPT_BYTES / 1024}KB"
+                        )
+                    }
+                    buffer.write(chunk, 0, read)
+                }
+            }
+            buffer.toString(Charsets.UTF_8.name())
+        } finally {
+            runCatching { connection.disconnect() }
+        }
     }
 
     private suspend fun prepareUserscriptInstallFromSource(
@@ -2988,9 +3027,7 @@ class BrowserUseEngine(
             ?: throw IllegalArgumentException("未找到 userscript=$resolvedScriptId")
         val updateUrl = BrowserUserscriptSupport.downloadUrlForUpdate(current)
             ?: throw IllegalStateException("当前脚本没有可用的 updateURL/downloadURL/sourceUrl")
-        val source = withContext(Dispatchers.IO) {
-            URL(updateUrl).openStream().bufferedReader().use { it.readText() }
-        }
+        val source = downloadUserscriptText(updateUrl)
         val preview = BrowserUserscriptSupport.parseSource(source = source, sourceUrl = updateUrl)
         val pendingRecord = BrowserUserscriptSupport.toRecord(
             preview = preview,

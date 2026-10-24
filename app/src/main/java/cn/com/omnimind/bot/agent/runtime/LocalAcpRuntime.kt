@@ -3597,11 +3597,18 @@ internal class LocalAcpRuntime(
                 redirectErrorStream = true
             )
             val output = StringBuilder()
+            // outputByteLimit 原来只在 terminal/output 读取时用 tailByBytes 截断，写入侧
+            // 完全不限：一条 `yes` / `cat /dev/urandom` / `find /` 就能把内存涨到 OOM。
+            val hardLimit = outputByteLimit?.toLong()?.takeIf { it > 0L }
+                ?: DEFAULT_ACP_TERMINAL_OUTPUT_LIMIT_BYTES
             val readerJob = scope.launch(Dispatchers.IO) {
                 process.inputStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
                     lines.forEach { line ->
                         synchronized(output) {
                             output.append(line).append('\n')
+                            if (output.length > hardLimit * 2) {
+                                output.delete(0, (output.length - hardLimit).toInt())
+                            }
                         }
                     }
                 }
@@ -3622,7 +3629,11 @@ internal class LocalAcpRuntime(
             val terminal = terminalProcesses[terminalId]
                 ?: throw IllegalArgumentException("Unknown ACP terminal: $terminalId")
             val finished = !terminal.process.isAlive
-            if (finished) terminal.readerJob.join()
+            if (finished) {
+                // 主进程退出后管道可能仍被后台孙进程（`cmd &`）持有，useLines 不结束，
+                // join() 无超时会让 terminal/output 请求永久挂住。
+                withTimeoutOrNull(READER_JOIN_TIMEOUT_MS) { terminal.readerJob.join() }
+            }
             val output = synchronized(terminal.output) { terminal.output.toString() }
             val limited = tailByBytes(output, terminal.outputByteLimit)
             return TerminalOutputResponse(
@@ -3653,8 +3664,20 @@ internal class LocalAcpRuntime(
         ): WaitForTerminalExitResponse {
             val terminal = terminalProcesses[terminalId]
                 ?: throw IllegalArgumentException("Unknown ACP terminal: $terminalId")
-            withContext(Dispatchers.IO) { terminal.process.waitFor() }
-            terminal.readerJob.join()
+            // 原来是无超时的 process.waitFor()：agent 自己起了挂死的命令再来
+            // wait_for_exit，客户端就永不返回，整轮 session/prompt 卡住只能杀进程。
+            // 注意不能用 withTimeoutOrNull { process.waitFor() } —— waitFor 是阻塞调用，
+            // 协程超时无法中断它，等它自然返回才发现超时（等于没超时）。这里改轮询。
+            val deadline = System.currentTimeMillis() + WAVE_FOR_EXIT_TIMEOUT_MS
+            while (terminal.process.isAlive && System.currentTimeMillis() < deadline) {
+                delay(200L)
+            }
+            if (terminal.process.isAlive) {
+                throw IllegalStateException(
+                    "terminal/wait_for_exit timed out after ${WAVE_FOR_EXIT_TIMEOUT_MS / 1000}s"
+                )
+            }
+            withTimeoutOrNull(READER_JOIN_TIMEOUT_MS) { terminal.readerJob.join() }
             return WaitForTerminalExitResponse(
                 exitCode = terminal.process.exitValue().toUInt()
             )
@@ -4119,6 +4142,10 @@ internal class LocalAcpRuntime(
         private const val TAG = "LocalAcpRuntime"
         private const val INITIALIZE_TIMEOUT_MS = 90_000L
         private const val PROCESS_CLOSE_TIMEOUT_MS = 1_500L
+        /** ACP 终端输出在写入侧的硬上限（未指定 outputByteLimit 时使用）。 */
+        private const val DEFAULT_ACP_TERMINAL_OUTPUT_LIMIT_BYTES = 8L * 1024L * 1024L
+        private const val READER_JOIN_TIMEOUT_MS = 2_000L
+        private const val WAVE_FOR_EXIT_TIMEOUT_MS = 30L * 60L * 1000L
         private const val CONNECT_CANCEL_TIMEOUT_MS = 2_000L
         private const val CANCEL_REQUEST_TIMEOUT_MS = 2_000L
         private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L

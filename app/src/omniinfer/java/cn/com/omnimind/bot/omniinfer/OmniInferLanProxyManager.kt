@@ -4,6 +4,8 @@ import android.content.Context
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.mcp.McpNetworkUtils
 import com.tencent.mmkv.MMKV
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -13,6 +15,7 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.origin
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.header
@@ -222,17 +225,28 @@ object OmniInferLanProxyManager {
         }
         call.request.headers["x-api-key"]?.let { requestBuilder.header("x-api-key", it) }
 
-        val response = httpClient.newCall(requestBuilder.build()).execute()
+        // execute() 和上游 body 的 copyTo 都是阻塞调用。直接摆在这里会占住 CIO 的
+        // 事件循环线程：并发几个请求、或上游卡住不吐数据，线程池就被占满，
+        // 连 /health 都不再响应（readTimeout 是 0，等不到超时）。
+        val response = withContext(Dispatchers.IO) {
+            httpClient.newCall(requestBuilder.build()).execute()
+        }
         response.use { upstream ->
             val status = HttpStatusCode.fromValue(upstream.code)
             upstream.header(HttpHeaders.ContentType)?.let { raw ->
                 val contentType = runCatching { ContentType.parse(raw) }
                     .getOrDefault(ContentType.Application.OctetStream)
                 call.respondOutputStream(contentType = contentType, status = status) {
-                    upstream.body?.byteStream()?.use { input -> input.copyTo(this) }
+                    val sink = this
+                    withContext(Dispatchers.IO) {
+                        upstream.body?.byteStream()?.use { input -> input.copyTo(sink) }
+                    }
                 }
             } ?: call.respondOutputStream(status = status) {
-                upstream.body?.byteStream()?.use { input -> input.copyTo(this) }
+                val sink = this
+                withContext(Dispatchers.IO) {
+                    upstream.body?.byteStream()?.use { input -> input.copyTo(sink) }
+                }
             }
         }
     }
@@ -250,7 +264,15 @@ object OmniInferLanProxyManager {
     }
 
     private fun isAuthorized(call: ApplicationCall): Boolean {
-        if (!OmniInferLocalRuntime.isAuthEnabled()) return true
+        // 这个代理 bind 在 0.0.0.0 上，原来「未启用鉴权」直接 return true，而
+        // isAuthEnabled() 的默认值就是 false —— 同网段任何设备（甚至用户浏览器里
+        // 打开的任意网页，因为预检回 Access-Control-Allow-Origin: *）都能无凭证
+        // 调用 /v1/chat/completions，把手机当免费 LLM 端点烧 NPU 和电量。
+        // 现在：来源必须是私网/回环，且必须持有 token（ensureToken 会自动生成一枚，
+        // state 里的 lanToken 就是它）。
+        if (!McpNetworkUtils.isLanAddress(call.request.origin.remoteHost)) {
+            return false
+        }
         val raw = call.request.headers[HttpHeaders.Authorization]?.trim().orEmpty()
         val token = if (raw.length > 6 && raw.regionMatches(0, "bearer", 0, 6, ignoreCase = true)) {
             raw.substring(6).trim()

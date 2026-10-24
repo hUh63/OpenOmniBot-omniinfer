@@ -41,27 +41,53 @@ final List<md.InlineSyntax> _kInlineSyntaxesWithTrailing =
       _kOmnibotTrailingInlineSyntax,
     ]);
 
+/// 预检窗口最多取这么多行（见 _omnibotMarkdownPreflightWindow）。
+const int _kPreflightWindowMaxLines = 400;
+
 const List<md.BlockSyntax> _kBlockSyntaxes = <md.BlockSyntax>[
   OmnibotTableSyntax(),
   OmnibotMathBlockSyntax(),
 ];
 
-bool _omnibotMarkdownNeedsSafetyPreflight(String source) {
-  final lines = source.split('\n');
+/// 返回需要做安全预检的最小片段；不含表格分隔行/数学块时返回 null。
+///
+/// 原来命中可疑语法就对**整段**源码 parseLines 一遍，而 MarkdownBody 之后还会把
+/// 同一份源码完整解析一次 —— 流式输出时每个 chunk 都要付两遍全文解析，长表格/
+/// 长文档时肉眼可见地卡。这里只把可疑块（及其前后几行上下文）切出来校验。
+String? _omnibotMarkdownPreflightWindow(String source) {
+  final lines = const LineSplitter().convert(source);
+  var first = -1;
+  var last = -1;
   for (var index = 0; index < lines.length; index += 1) {
-    if (OmnibotTableSyntax._tableDividerPattern.hasMatch(lines[index]) ||
-        lines[index].trimLeft().startsWith(r'$$')) {
-      return true;
+    final line = lines[index];
+    if (OmnibotTableSyntax._tableDividerPattern.hasMatch(line) ||
+        line.trimLeft().startsWith(r'$$')) {
+      if (first < 0) {
+        first = index;
+      }
+      last = index;
     }
   }
-  return false;
+  if (first < 0) {
+    return null;
+  }
+  final start = first - 4 < 0 ? 0 : first - 4;
+  var end = last + 4;
+  if (end > lines.length) {
+    end = lines.length;
+  }
+  if (end - start > _kPreflightWindowMaxLines) {
+    end = start + _kPreflightWindowMaxLines;
+  }
+  return lines.sublist(start, end).join('\n');
 }
 
 bool _omnibotMarkdownIsParseable(
   String source, {
   required bool hasTrailingInline,
 }) {
-  if (!_omnibotMarkdownNeedsSafetyPreflight(source)) {
+  final window = _omnibotMarkdownPreflightWindow(source);
+  if (window == null) {
     return true;
   }
   try {
@@ -73,7 +99,7 @@ bool _omnibotMarkdownIsParseable(
       extensionSet: md.ExtensionSet.gitHubFlavored,
       encodeHtml: false,
     );
-    document.parseLines(const LineSplitter().convert(source));
+    document.parseLines(const LineSplitter().convert(window));
     return true;
   } catch (error, stack) {
     // Keep the content visible even if a future Markdown package or custom
@@ -114,10 +140,28 @@ class OmnibotStreamingTableBlock {
 /// Neither form is valid enough for flutter_markdown to recognize reliably,
 /// which used to expose the Markdown source as plain text.  Code fences are
 /// excluded so examples and tool payloads retain their exact contents.
+// normalizeOmnibotMarkdown 会在每次 build 里被调用（同一条消息的滚动、键盘 inset、
+// 锚点栏动画都会触发重建），而它要做 replaceAll + split + 逐行正则再 join 出一份新
+// 字符串：几十 KB 的日志/代码每次重建都整份重算。单槽 memo 覆盖「同一 source 被反复
+// 归一化」这种最常见的情况（6 个调用点都是同一个 source 反复走）。
+String? _lastNormalizedSource;
+String? _lastNormalizedResult;
+
 String normalizeOmnibotMarkdown(String source) {
   if (source.isEmpty) {
     return source;
   }
+  final cached = _lastNormalizedResult;
+  if (cached != null && source == _lastNormalizedSource) {
+    return cached;
+  }
+  final result = _normalizeOmnibotMarkdownUncached(source);
+  _lastNormalizedSource = source;
+  _lastNormalizedResult = result;
+  return result;
+}
+
+String _normalizeOmnibotMarkdownUncached(String source) {
 
   final lines = source.replaceAll('\r\n', '\n').split('\n');
   final normalized = <String>[];
@@ -677,7 +721,21 @@ class OmnibotMarkdownBody extends StatelessWidget {
           if (uri.scheme == 'file') {
             return Image.file(File.fromUri(uri));
           }
-          return Image.network(uri.toString());
+          // data:/javascript:/其它 scheme 交给 Image.network 只会走失败路径，
+          // 抛出未处理异常并留下红屏日志；直接当文本显示更安全。
+          if (uri.scheme != 'http' && uri.scheme != 'https') {
+            return Text(
+              uri.toString(),
+              style: baseStyle,
+            );
+          }
+          return Image.network(
+            uri.toString(),
+            errorBuilder: (context, error, stackTrace) => Text(
+              uri.toString(),
+              style: baseStyle,
+            ),
+          );
         },
         styleSheet: styleSheet,
       ),
