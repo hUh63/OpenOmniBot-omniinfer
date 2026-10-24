@@ -826,18 +826,21 @@ class AgentConversationHistoryRepository(
     }
 
     private suspend fun refreshConversationMetadata(conversationId: Long) {
+        // 原来是「读整行快照 → 5 次聚合查询 → 整行写回」：读取与写回之间用户改名、
+        // 置顶、归档、切换状态都会被那份旧快照覆盖回去（updatePreservingCheckpoint
+        // 只保住了 checkpoint 与 token 字段）。改成只写条目派生的聚合列。
         val conversation = DatabaseHelper.getConversationById(conversationId) ?: return
         val lastEntry = DatabaseHelper.getLatestAgentConversationEntryHeader(conversationId)
         val firstEntry = DatabaseHelper.getEarliestAgentConversationEntryHeader(conversationId)
         val lastUpdate = DatabaseHelper.getLatestAgentConversationUpdateHeader(conversationId)
         val messageCount = DatabaseHelper.countAgentConversationEntries(conversationId)
-        val updatedConversation = conversation.copy(
+        DatabaseHelper.updateConversationAggregates(
+            id = conversationId,
             lastMessage = lastEntry?.let(::conversationLastMessageFromHeader)?.takeIf { it.isNotBlank() },
             messageCount = messageCount,
             createdAt = firstEntry?.createdAt ?: conversation.createdAt,
             updatedAt = lastUpdate?.updatedAt ?: conversation.updatedAt
         )
-        DatabaseHelper.updateConversation(updatedConversation)
     }
 
     private suspend fun resetContextSummary(conversationId: Long) {

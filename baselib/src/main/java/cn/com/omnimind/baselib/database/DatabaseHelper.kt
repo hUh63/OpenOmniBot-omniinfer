@@ -494,6 +494,17 @@ object DatabaseHelper {
         getDatabase().conversationDao().updatePreservingCheckpoint(conversation)
     }
 
+    /** 只更新由条目派生的聚合列（见 ConversationDao.updateAggregates）。 */
+    suspend fun updateConversationAggregates(
+        id: Long,
+        lastMessage: String?,
+        messageCount: Int,
+        createdAt: Long,
+        updatedAt: Long
+    ) {
+        getDatabase().conversationDao().updateAggregates(id, lastMessage, messageCount, createdAt, updatedAt)
+    }
+
     fun observeAgentToolHeadersAfter(conversationId: Long, afterEntryId: Long):
         kotlinx.coroutines.flow.Flow<List<AgentConversationEntryHeader>> =
         getDatabase().agentConversationEntryDao().observeToolHeadersAfter(conversationId, afterEntryId)

@@ -36,6 +36,21 @@ interface ConversationDao {
     @Query("UPDATE conversations SET contextSummary = :summary, contextSummaryCutoffEntryDbId = :cutoff, contextSummaryUpdatedAt = MAX(contextSummaryUpdatedAt + 1, :at), updatedAt = MAX(updatedAt, :at) WHERE id = :id AND contextSummaryUpdatedAt = :expectedRevision")
     suspend fun commitContextCheckpoint(id: Long, summary: String, cutoff: Long, expectedRevision: Long, at: Long): Int
 
+    /**
+     * 只刷新「由条目派生」的聚合列。
+     * 整行 @Update 会把调用方读快照期间用户改过的 title / isPinned / isArchived /
+     * mode / status 一起覆盖回旧值。
+     */
+    @Query(
+        "UPDATE conversations SET " +
+            "lastMessage = :lastMessage, " +
+            "messageCount = :messageCount, " +
+            "createdAt = CASE WHEN createdAt <= 0 OR createdAt > :createdAt THEN :createdAt ELSE createdAt END, " +
+            "updatedAt = MAX(updatedAt, :updatedAt) " +
+            "WHERE id = :id"
+    )
+    suspend fun updateAggregates(id: Long, lastMessage: String?, messageCount: Int, createdAt: Long, updatedAt: Long)
+
     @Query("UPDATE conversations SET promptTokenThreshold = :threshold, updatedAt = MAX(updatedAt, :at) WHERE id = :id")
     suspend fun updatePromptThreshold(id: Long, threshold: Int, at: Long)
 
