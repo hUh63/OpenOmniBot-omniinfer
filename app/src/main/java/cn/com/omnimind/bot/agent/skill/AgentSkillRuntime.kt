@@ -63,11 +63,31 @@ private class SkillRegistryStore(
 
     fun read(): LinkedHashMap<String, SkillRegistryEntry> {
         if (!registryFile.exists()) {
+            return readBackup()
+        }
+        val parsed = runCatching {
+            gson.fromJson<LinkedHashMap<String, SkillRegistryEntry>>(
+                registryFile.readText(),
+                mapType
+            )
+        }.getOrNull()
+        if (parsed != null) {
+            return parsed
+        }
+        // 解析失败以前静默返回空表：下次 write 就会拿这个空表覆盖回去，把所有技能
+        // 开关状态和 removed_builtin 墓碑一起抹掉，随后 seeder 把内置技能重新种回来
+        // （用户手动关掉的技能「自己又打开了」）。这里优先回退到备份。
+        return readBackup()
+    }
+
+    private fun readBackup(): LinkedHashMap<String, SkillRegistryEntry> {
+        val backup = File(registryFile.parentFile, "${registryFile.name}.bak")
+        if (!backup.exists()) {
             return linkedMapOf()
         }
         return runCatching {
             gson.fromJson<LinkedHashMap<String, SkillRegistryEntry>>(
-                registryFile.readText(),
+                backup.readText(),
                 mapType
             ) ?: linkedMapOf()
         }.getOrElse {
@@ -81,7 +101,21 @@ private class SkillRegistryStore(
         entries.toSortedMap().forEach { (key, value) ->
             ordered[key] = value
         }
-        registryFile.writeText(gson.toJson(ordered))
+        // 整表 writeText 不是原子写：写到一半被 kill / 磁盘满会留下截断的 JSON，
+        // 而 read() 遇到截断会解析失败（见上）。改为临时文件 + rename（同目录原子），
+        // 并保留上一版 .bak 作为解析失败时的回退。
+        val json = gson.toJson(ordered)
+        val temp = File(registryFile.parentFile, "${registryFile.name}.tmp")
+        runCatching {
+            temp.writeText(json)
+            if (registryFile.exists()) {
+                runCatching { registryFile.copyTo(File(registryFile.parentFile, "${registryFile.name}.bak"), overwrite = true) }
+            }
+            if (!temp.renameTo(registryFile)) {
+                registryFile.writeText(json)
+                temp.delete()
+            }
+        }
     }
 
     // 读全表 → 改 → 写全表必须和 seedBuiltinSkillsIfNeeded 等批量改写共用一把锁：

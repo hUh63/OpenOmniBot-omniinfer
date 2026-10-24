@@ -35,6 +35,8 @@ class AgentConversationHistoryRepository(
         // window and breaks the next prompt. Keep each native read bounded;
         // the repository still returns the same complete logical snapshot.
         private const val SAFE_HISTORY_PAGE_SIZE = 16
+        /** running 工具条目超过这个年龄才认定为「残留」，见 recentRunningToolEntryIds。 */
+        private const val STALE_RUNNING_GRACE_MS = 2 * 60 * 1000L
 
         const val ENTRY_TYPE_USER_MESSAGE = "user_message"
         const val ENTRY_TYPE_ASSISTANT_MESSAGE = "assistant_message"
@@ -846,12 +848,12 @@ class AgentConversationHistoryRepository(
         entries: List<AgentConversationEntry>
     ): List<AgentConversationEntry> {
         if (entries.isEmpty()) return entries
-        val normalized = AgentConversationHistorySupport.normalizeInterruptedEntries(entries)
-        normalized.forEachIndexed { index, updated ->
-            if (updated != entries[index]) {
-                upsertEntry(updated.copy(updatedAt = System.currentTimeMillis()))
-            }
-        }
+        val recentRunningIds = recentRunningToolEntryIds(entries)
+        val normalized = AgentConversationHistorySupport.normalizeInterruptedEntries(
+            entries = entries,
+            skipToolEntryIds = recentRunningIds
+        )
+        persistNormalizedEntries(entries, normalized, recentRunningIds)
         return normalized
     }
 
@@ -859,16 +861,42 @@ class AgentConversationHistoryRepository(
         entries: List<AgentConversationEntry>
     ): List<AgentConversationEntry> {
         if (entries.isEmpty()) return entries
+        val recentRunningIds = recentRunningToolEntryIds(entries)
         val normalized = AgentConversationHistorySupport.normalizeInterruptedEntries(
             entries = entries,
-            finalizeLatestThinkingEntries = true
+            finalizeLatestThinkingEntries = true,
+            skipToolEntryIds = recentRunningIds
         )
-        normalized.forEachIndexed { index, updated ->
-            if (updated != entries[index]) {
-                upsertEntry(updated.copy(updatedAt = System.currentTimeMillis()))
-            }
-        }
+        persistNormalizedEntries(entries, normalized, recentRunningIds)
         return normalized
+    }
+
+    /**
+     * 仍然「年轻」的 running 工具条目：工具结果是秒级写入的，几分钟后还是 running
+     * 基本只剩下进程被杀留下的残留。读历史时无条件把 running 改成 interrupted 会
+     * 让正在跑的那一个显示成「已中断」，并把 updatedAt 推到现在、打乱会话排序。
+     */
+    private fun recentRunningToolEntryIds(
+        entries: List<AgentConversationEntry>
+    ): Set<Long> {
+        val now = System.currentTimeMillis()
+        return entries.filter { entry ->
+            entry.entryType == ENTRY_TYPE_TOOL_EVENT &&
+                entry.status == STATUS_RUNNING &&
+                now - entry.updatedAt < STALE_RUNNING_GRACE_MS
+        }.map { it.id }.toSet()
+    }
+
+    private suspend fun persistNormalizedEntries(
+        original: List<AgentConversationEntry>,
+        normalized: List<AgentConversationEntry>,
+        skippedIds: Set<Long>
+    ) {
+        normalized.forEachIndexed { index, updated ->
+            if (updated == original[index]) return@forEachIndexed
+            if (original[index].id in skippedIds) return@forEachIndexed
+            upsertEntry(updated.copy(updatedAt = System.currentTimeMillis()))
+        }
     }
 
     private fun entryToMessagePayload(entry: AgentConversationEntry): Map<String, Any?>? {
@@ -896,7 +924,21 @@ class AgentConversationHistoryRepository(
             val digest = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(entry.payloadJson.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
             val file = java.io.File(workspace.offloadsDirectory("history-${entry.conversationId}"), "${entry.id}-$digest.json")
-            if (!file.exists()) file.writeText(entry.payloadJson)
+            if (!file.exists()) {
+                // 直接写最终路径不是原子的：中途被 kill / 磁盘满会留下被截断的文件，
+                // 而 exists() 检查保证它永远不会被重写 —— 之后每次打开这段历史，
+                // 模型和用户拿到的都是半截 JSON（下游 readMap 还会静默变成空 map）。
+                // 写临时文件再 rename（同目录原子）即可。
+                val temp = java.io.File(file.parentFile, "${file.name}.tmp")
+                runCatching {
+                    temp.writeText(entry.payloadJson)
+                    if (!temp.renameTo(file)) {
+                        temp.delete()
+                    }
+                }.onFailure {
+                    runCatching { temp.delete() }
+                }
+            }
             val artifact = workspace.buildArtifactForFile(file, "history", "完整工具记录").toPayload()
             cardData["artifacts"] = (cardData["artifacts"] as? List<*>).orEmpty() + artifact
         }

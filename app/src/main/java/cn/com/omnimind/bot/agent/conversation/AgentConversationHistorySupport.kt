@@ -554,15 +554,23 @@ internal object AgentConversationHistorySupport {
         return rebuilt
     }
 
+    /**
+     * 工具条目"中断"归一化。
+     *
+     * [skipToolEntryIds] 用于排除「此刻仍在执行」的工具条目：读历史时会无条件把
+     * running 改写成 interrupted，正在跑的那一个看起来就像已经中断了。
+     */
     fun normalizeInterruptedEntries(
         entries: List<AgentConversationEntry>,
-        finalizeLatestThinkingEntries: Boolean = false
+        finalizeLatestThinkingEntries: Boolean = false,
+        skipToolEntryIds: Set<Long> = emptySet()
     ): List<AgentConversationEntry> {
         if (entries.isEmpty()) return entries
         val normalized = entries.map { entry ->
             if (
                 entry.entryType != AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT ||
-                entry.status != AgentConversationHistoryRepository.STATUS_RUNNING
+                entry.status != AgentConversationHistoryRepository.STATUS_RUNNING ||
+                entry.id in skipToolEntryIds
             ) {
                 entry
             } else {
