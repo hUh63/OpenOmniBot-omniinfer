@@ -4103,8 +4103,15 @@ object HttpController {
                 "[provider availability openai model=$normalizedModel]",
                 request.headers.toMultimap().mapValues { it.value.joinToString(",") }
             )
-            val response = OkHttpClient().newCall(request).execute()
-            val responseBody = response.body?.string()
+            // Reuse the shared client: a fresh OkHttpClient() per probe leaks a
+            // Dispatcher thread pool + connection pool (never shut down) and redoes
+            // DNS/TCP/TLS every time. Close the response so the connection returns.
+            val response = providerModelsClient.newCall(request).execute()
+            val responseBody = try {
+                response.body?.string()
+            } finally {
+                response.close()
+            }
             if (!response.isSuccessful) {
                 return@withContext ModelAvailabilityCheckResult(
                     available = false,
@@ -4261,8 +4268,15 @@ object HttpController {
         )
 
         return@withContext try {
-            val response = OkHttpClient().newCall(request).execute()
-            val responseBody = response.body?.string()
+            // Reuse the shared client: a fresh OkHttpClient() per probe leaks a
+            // Dispatcher thread pool + connection pool (never shut down) and redoes
+            // DNS/TCP/TLS every time. Close the response so the connection returns.
+            val response = providerModelsClient.newCall(request).execute()
+            val responseBody = try {
+                response.body?.string()
+            } finally {
+                response.close()
+            }
             if (!response.isSuccessful) {
                 return@withContext ModelAvailabilityCheckResult(
                     available = false,

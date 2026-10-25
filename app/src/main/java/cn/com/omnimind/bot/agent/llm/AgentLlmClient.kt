@@ -64,6 +64,13 @@ class AgentStreamIdleTimeoutException(
     val timeoutMillis: Long,
 ) : RuntimeException("chat completion stream idle timeout after ${timeoutMillis}ms")
 
+/**
+ * SSE 空闲判定上限：openAIStreamingClient 的 readTimeout 是 0（无限），上游静默断流
+ * （代理 / NAT 丢 FIN / LB 中途丢弃长连接）时 streamDone 永不完成，agent 回合永久停在
+ * thinking，用户只能手动杀会话。给一个默认值让 watchdog 始终生效。
+ */
+private const val DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000L
+
 class HttpAgentLlmClient(
     private val scope: CoroutineScope,
     modelOverride: AgentModelOverride? = null,
@@ -123,7 +130,7 @@ class HttpAgentLlmClient(
     // text, and potentially tool intent.
     private val maxTransientStreamRetries: Int? = null,
     private val transientStreamRetryDelayMs: Long? = null,
-    private val streamIdleTimeoutMs: Long? = null,
+    private val streamIdleTimeoutMs: Long? = DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     private val json: Json = Json {
         ignoreUnknownKeys = true
         isLenient = true
