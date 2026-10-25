@@ -970,24 +970,32 @@ object EmbeddedTerminalRuntime {
     ): String {
         var completionTranscript: String? = null
         var previousVisibleOutput = ""
+        var lastTranscriptLength = -1
         while (completionTranscript == null) {
             val snapshot = readSnapshot()
                 ?: throw IllegalStateException("终端会话在命令完成前已关闭或被替换")
             val currentTranscript = snapshot.transcript
-            val liveOutput = buildSessionLiveOutputUpdate(
-                previousVisibleOutput = previousVisibleOutput,
-                rawOutput = currentTranscript.safeSubstring(transcriptStart),
-                token = token
-            )
-            if (liveOutput.visibleOutput != previousVisibleOutput) {
-                previousVisibleOutput = liveOutput.visibleOutput
-            }
-            if (liveOutput.outputDelta.isNotBlank()) {
-                onLiveOutput(liveOutput.outputDelta)
-            }
-            if (liveOutput.exitCode != null) {
-                completionTranscript = currentTranscript
-                continue
+            // transcript 只增不减：长度没变就不必重建整份可见文本。buildSessionLiveOutputUpdate
+            // 每次都要 sanitize 一遍再和上一份整串比较，几十万行的输出下每 150ms 一次 O(n)
+            // 分配，终端面板会明显发卡甚至 OOM。进程退出的那一帧无条件重算，否则
+            // 「退出但没有新输出」会漏掉 exitCode。
+            if (currentTranscript.length != lastTranscriptLength || !snapshot.running) {
+                lastTranscriptLength = currentTranscript.length
+                val liveOutput = buildSessionLiveOutputUpdate(
+                    previousVisibleOutput = previousVisibleOutput,
+                    rawOutput = currentTranscript.safeSubstring(transcriptStart),
+                    token = token
+                )
+                if (liveOutput.visibleOutput != previousVisibleOutput) {
+                    previousVisibleOutput = liveOutput.visibleOutput
+                }
+                if (liveOutput.outputDelta.isNotBlank()) {
+                    onLiveOutput(liveOutput.outputDelta)
+                }
+                if (liveOutput.exitCode != null) {
+                    completionTranscript = currentTranscript
+                    continue
+                }
             }
             if (!snapshot.running) {
                 throw IllegalStateException("终端进程在命令完成前已退出（exit=${snapshot.exitCode ?: "unknown"}）")

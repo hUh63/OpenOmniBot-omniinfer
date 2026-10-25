@@ -98,6 +98,19 @@ class McpFileReceiverActivity : ComponentActivity() {
         handleFileTransfer(fileTransferUris, mimeTypeHint)
     }
 
+    /**
+     * 附件 copy 失败会被 mapNotNull 静默过滤掉，原来仍然提示「已填入」——用户以为
+     * 五张图都带上了，实际发出三张，而原 URI 之后也取不回来。
+     */
+    private fun withAttachmentFailures(
+        message: String,
+        expected: Int,
+        actual: Int,
+    ): String {
+        val failed = (expected - actual).coerceAtLeast(0)
+        return if (failed > 0) "$message（$failed 个附件处理失败）" else message
+    }
+
     private fun handleDraftShare(
         sharedText: String?,
         imageUris: List<Uri>,
@@ -121,7 +134,7 @@ class McpFileReceiverActivity : ComponentActivity() {
                     )
                     Toast.makeText(
                         this@McpFileReceiverActivity,
-                        "已填入新对话，请确认后发送",
+                        withAttachmentFailures("已填入新对话，请确认后发送", imageUris.size, draft.attachments.size),
                         Toast.LENGTH_SHORT,
                     ).show()
                 } else {
@@ -159,7 +172,7 @@ class McpFileReceiverActivity : ComponentActivity() {
                     )
                     Toast.makeText(
                         this@McpFileReceiverActivity,
-                        "已添加到 Workspace，请确认后发送",
+                        withAttachmentFailures("已添加到 Workspace，请确认后发送", uris.size, draft.attachments.size),
                         Toast.LENGTH_SHORT,
                     ).show()
                 } else {
@@ -199,13 +212,18 @@ class McpFileReceiverActivity : ComponentActivity() {
                         route = route,
                         needClear = false,
                     )
-                    val message = when {
+                    val baseMessage = when {
                         workspaceUris.isNotEmpty() && receivedFileCount > 0 ->
                             "已添加到 Workspace，并接收 ${receivedFileCount} 个文件"
                         workspaceUris.isNotEmpty() -> "已添加到 Workspace，请确认后发送"
                         receivedFileCount > 0 -> "已填入新对话，并接收 ${receivedFileCount} 个文件"
                         else -> "已填入新对话，请确认后发送"
                     }
+                    val message = withAttachmentFailures(
+                        baseMessage,
+                        imageUris.size + workspaceUris.size,
+                        draft.attachments.size,
+                    )
                     Toast.makeText(
                         this@McpFileReceiverActivity,
                         message,
