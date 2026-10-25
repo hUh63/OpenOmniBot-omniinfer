@@ -298,7 +298,18 @@ internal object AgentConversationHistorySupport {
     fun buildPromptRelevantMessages(
         entries: List<AgentConversationEntry>,
         cutoffEntryDbId: Long? = null
-    ): List<ChatCompletionMessage> {
+    ): List<ChatCompletionMessage> = buildPromptRelevantMessagesWithOrigins(entries, cutoffEntryDbId).first
+
+    /**
+     * [buildPromptRelevantMessages] 的来源版本：除消息外一并给出每条消息来自哪个条目。
+     * 实时压缩要在「摘要覆盖到的最后一个条目」上落检查点，而只有以工具结果结尾的边界
+     * 才能从工具 header 反查；user / assistant 边界以前只能放弃落库，于是摘要白算一次，
+     * 下一回合重新加载全量历史、再次超预算、再调一次摘要模型（会话越长越贵）。
+     */
+    fun buildPromptRelevantMessagesWithOrigins(
+        entries: List<AgentConversationEntry>,
+        cutoffEntryDbId: Long? = null
+    ): Pair<List<ChatCompletionMessage>, List<Long>> {
         val relevantEntries = entries
             .asSequence()
             .filter(::isPromptRelevantEntry)
@@ -306,13 +317,21 @@ internal object AgentConversationHistorySupport {
             .toList()
 
         val replayMessages = mutableListOf<ChatCompletionMessage>()
+        val messageOrigins = mutableListOf<Long>()
         val deferredAssistantEntries = mutableListOf<AgentConversationEntry>()
         val consumedCanonicalToolEntryIds = mutableSetOf<Long>()
+
+        fun emit(entryId: Long, produced: List<ChatCompletionMessage>) {
+            produced.forEach { message ->
+                replayMessages += message
+                messageOrigins += entryId
+            }
+        }
 
         fun flushDeferredAssistantEntries() {
             if (deferredAssistantEntries.isEmpty()) return
             deferredAssistantEntries.forEach { assistantEntry ->
-                replayMessages += buildAssistantPromptMessages(assistantEntry)
+                emit(assistantEntry.id, buildAssistantPromptMessages(assistantEntry))
             }
             deferredAssistantEntries.clear()
         }
@@ -324,7 +343,7 @@ internal object AgentConversationHistorySupport {
             when (entry.entryType) {
                 AgentConversationHistoryRepository.ENTRY_TYPE_USER_MESSAGE -> {
                     flushDeferredAssistantEntries()
-                    replayMessages += buildUserPromptMessages(entry)
+                    emit(entry.id, buildUserPromptMessages(entry))
                 }
 
                 AgentConversationHistoryRepository.ENTRY_TYPE_ASSISTANT_MESSAGE -> {
@@ -335,7 +354,7 @@ internal object AgentConversationHistorySupport {
                         deferredAssistantEntries += entry
                     } else {
                         flushDeferredAssistantEntries()
-                        replayMessages += buildAssistantPromptMessages(entry)
+                        emit(entry.id, buildAssistantPromptMessages(entry))
                     }
                 }
 
@@ -351,11 +370,11 @@ internal object AgentConversationHistorySupport {
                         ?.toString()
                         ?.takeIf { it.isNotBlank() }
                     if (canonicalAssistantJson == null) {
-                        replayMessages += buildToolReplayMessages(entry)
+                        emit(entry.id, buildToolReplayMessages(entry))
                     } else {
                         val canonicalAssistant = decodeCanonicalMessage(canonicalAssistantJson)
                         if (canonicalAssistant == null) {
-                            replayMessages += buildToolReplayMessages(entry)
+                            emit(entry.id, buildToolReplayMessages(entry))
                         } else {
                             val group = relevantEntries
                                 .asSequence()
@@ -379,16 +398,22 @@ internal object AgentConversationHistorySupport {
                                 consumedCanonicalToolEntryIds += candidate.id
                                 callId to result
                             }.toMap()
-                            replayMessages += canonicalAssistant
-                            canonicalAssistant.toolCalls.orEmpty().forEach { toolCall ->
-                                resultByCallId[toolCall.id]?.let(replayMessages::add)
-                            }
-                            resultByCallId
-                                .filterKeys { callId ->
-                                    canonicalAssistant.toolCalls.orEmpty().none { it.id == callId }
+                            // 这一组条目共同产出一份 assistant + 若干 tool 结果，检查点应落在
+                            // 组内最大的条目 id 上，否则会把已并入摘要的结果重复留在历史里。
+                            val groupEntryId = group.maxOfOrNull { (candidate, _) -> candidate.id } ?: entry.id
+                            emit(groupEntryId, buildList {
+                                add(canonicalAssistant)
+                                canonicalAssistant.toolCalls.orEmpty().forEach { toolCall ->
+                                    resultByCallId[toolCall.id]?.let(::add)
                                 }
-                                .values
-                                .forEach(replayMessages::add)
+                                addAll(
+                                    resultByCallId
+                                        .filterKeys { callId ->
+                                            canonicalAssistant.toolCalls.orEmpty().none { it.id == callId }
+                                        }
+                                        .values
+                                )
+                            })
                         }
                     }
                 }
@@ -398,7 +423,7 @@ internal object AgentConversationHistorySupport {
         }
 
         flushDeferredAssistantEntries()
-        return replayMessages
+        return replayMessages to messageOrigins
     }
 
     private fun decodeCanonicalMessage(raw: String): ChatCompletionMessage? {

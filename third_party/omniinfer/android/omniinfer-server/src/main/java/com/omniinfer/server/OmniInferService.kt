@@ -31,6 +31,11 @@ private val activeChatReq = java.util.concurrent.atomic.AtomicInteger(0)
 // makes the wait observable so /health can report it and the UI can say "排队中".
 private val queuedChatReq = java.util.concurrent.atomic.AtomicInteger(0)
 private val chatGate = kotlinx.coroutines.sync.Semaphore(1)
+// 排队必须有上限和可观测的失败：单槽位推理会让第 N 个请求无限期挂在 acquire() 上，
+// 客户端既等不到结果也等不到错误，前端只能一直显示「正在思考」。超过上限或等待超时
+// 一律回 429 + Retry-After，调用方立刻知道自己该重试而不是无限等。
+private const val MAX_QUEUED_CHAT_REQUESTS = 8
+private const val CHAT_QUEUE_TIMEOUT_MS = 120_000L
 
 class OmniInferService : Service() {
     companion object {
@@ -222,13 +227,32 @@ class OmniInferService : Service() {
         }
         notifyQueueChanged()
         val startedAt = System.currentTimeMillis()
+        var acquired = false
         try {
-            chatGate.acquire()
+            if (waiting > MAX_QUEUED_CHAT_REQUESTS) {
+                Log.w(TAG, "chatreq#$reqId REJECTED queue_full=$waiting")
+                call.rejectBusy("queue_full", retryAfterSeconds = 5)
+                return
+            }
+            // 用 tryAcquire 轮询而不是 acquire()：acquire 刚成功就被超时取消时 permit
+            // 已经被消耗，没人还回来，单槽位从此永久死锁。
+            val deadline = System.currentTimeMillis() + CHAT_QUEUE_TIMEOUT_MS
+            while (!acquired && System.currentTimeMillis() < deadline) {
+                acquired = chatGate.tryAcquire()
+                if (!acquired) delay(100L)
+            }
         } finally {
             // A request cancelled while it waits (client disconnect, page exit, timeout) must
             // still leave the queue; otherwise the counter only ever grows and /health reports
             // phantom "排队中" entries.
             queuedChatReq.decrementAndGet()
+        }
+        if (!acquired) {
+            Log.w(TAG, "chatreq#$reqId REJECTED queue_timeout waited_ms=" +
+                (System.currentTimeMillis() - startedAt))
+            notifyQueueChanged()
+            call.rejectBusy("queue_timeout", retryAfterSeconds = 30)
+            return
         }
         val active = activeChatReq.incrementAndGet()
         Log.i(TAG, "chatreq#$reqId START active=$active")
@@ -241,6 +265,18 @@ class OmniInferService : Service() {
             chatGate.release()
             notifyQueueChanged()
         }
+    }
+
+    private suspend fun ApplicationCall.rejectBusy(reason: String, retryAfterSeconds: Int) {
+        response.header(HttpHeaders.RetryAfter, retryAfterSeconds.toString())
+        respondText(
+            buildJsonObject {
+                put("error", reason)
+                put("retry_after", retryAfterSeconds)
+            }.toString(),
+            ContentType.Application.Json,
+            HttpStatusCode.TooManyRequests
+        )
     }
 
     /** Publishes (active, queued) so the host app can surface "排队中" in its UI. */

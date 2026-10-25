@@ -346,9 +346,35 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
                 val cutoff = if (cut == latestUser) {
                     historyRepository.getContextCompactionCandidate(conversationId, conversationMode)?.cutoffEntryDbId
                 } else {
+                    // 只有「以工具结果结尾」的边界能从工具 header 反查检查点；切在 user /
+                    // assistant 边界时必须回退到按消息身份重放，否则摘要算完就丢，下一回合
+                    // 重新加载全量历史、再次超预算、再调一次摘要模型 —— 会话越长越贵。
                     historyRepository.findCompactionToolCutoff(conversationId, conversationMode, messages.take(cut))
+                        ?: historyRepository.findCompactionMessageCutoff(
+                            conversationId,
+                            conversationMode,
+                            messages.take(cut)
+                        )
                 }
-                if (cutoff != null) historyRepository.updateContextSummary(conversationId, summary, cutoff, checkpointRevision)
+                if (cutoff != null) {
+                    // 检查点竞争失败（压缩期间历史变了）不该让整轮请求失败：本次请求已经
+                    // 用上了 rebuilt，最坏是下一回合再算一次摘要。原来这里直接把异常抛给
+                    // 用户，表现是「发消息后立刻报错」。
+                    runCatching {
+                        historyRepository.updateContextSummary(
+                            conversationId,
+                            summary,
+                            cutoff,
+                            checkpointRevision
+                        )
+                    }.onFailure { error ->
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        OmniLog.w(
+                            TAG,
+                            "context checkpoint not persisted: ${error.message}"
+                        )
+                    }
+                }
             }
             return rebuilt
         } finally {

@@ -60,6 +60,9 @@ object AiRequestLogStore {
     private const val TAG = "AiRequestLogStore"
     private const val KEY_RECENT_AI_REQUEST_LOGS = "recent_ai_request_logs_v1"
     private const val MAX_LOG_COUNT = 10
+    /** 单条请求/响应正文的落盘上限。整份 prompt + 完整回复可能几 MB，10 条就能
+     *  让 MMKV 的值大到每次读写都要整块 memcpy；排障也不需要全文。 */
+    private const val MAX_FIELD_CHARS = 64_000
 
     private val gson = GsonBuilder()
         .disableHtmlEscaping()
@@ -69,11 +72,18 @@ object AiRequestLogStore {
     @Synchronized
     fun append(entry: AiRequestLogEntry) {
         val mmkv = MMKV.defaultMMKV() ?: return
+        // 落盘前脱敏与截断：日志页是为了排障，不该把带 key 的 URL、整段 prompt、
+        // 整段回复原样存进明文 MMKV。
+        val sanitized = entry.copy(
+            url = redactUrl(entry.url),
+            requestJson = truncateForStore(entry.requestJson),
+            responseJson = truncateForStore(entry.responseJson)
+        )
         val current = readEntriesLocked(mmkv)
         val updated = buildList {
-            add(entry)
+            add(sanitized)
             current.forEach { existing ->
-                if (existing.id != entry.id) {
+                if (existing.id != sanitized.id) {
                     add(existing)
                 }
             }
@@ -125,6 +135,23 @@ object AiRequestLogStore {
                 else -> raw
             }
         }.getOrElse { raw }
+    }
+
+    /** 去掉 URL / query 里的凭据，保留其余部分仍然可用于排障。 */
+    private fun redactUrl(url: String): String {
+        if (url.isEmpty()) return url
+        return url.replace(
+            Regex("(key|api_key|apikey|token|access_token|password|secret)=([^&\\s]+)", RegexOption.IGNORE_CASE)
+        ) { match -> "${match.groupValues[1]}=***" }
+    }
+
+    private fun truncateForStore(value: String): String {
+        if (value.length <= MAX_FIELD_CHARS) return value
+        val head = MAX_FIELD_CHARS * 3 / 4
+        val tail = MAX_FIELD_CHARS - head
+        val omitted = value.length - MAX_FIELD_CHARS
+        return value.substring(0, head) + "\n…[省略 $omitted 字符]…\n" +
+            value.substring(value.length - tail)
     }
 
     private fun readEntriesLocked(mmkv: MMKV): List<AiRequestLogEntry> {

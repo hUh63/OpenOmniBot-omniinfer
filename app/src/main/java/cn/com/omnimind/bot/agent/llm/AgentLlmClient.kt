@@ -54,6 +54,8 @@ class AgentStreamRequestException(
     val responseStarted: Boolean = false,
     cause: Throwable? = null,
     val imageInput: Boolean = false,
+    /** 服务器 Retry-After 换算的毫秒数：429 时重试必须按它等，而不是拍一个 500ms。 */
+    val retryAfterMs: Long? = null,
 ) : RuntimeException(
     "chat completion stream request failed${
         statusCode?.let { "($it)" }.orEmpty()
@@ -375,8 +377,11 @@ class HttpAgentLlmClient(
                     attempt >= retryCount ||
                     !isTransientStreamFailure(error)
                 ) throw error
-                val delayMs = (effectiveTransientStreamRetryDelayMs ?: 500L)
+                val baseDelayMs = (effectiveTransientStreamRetryDelayMs ?: 500L)
                     .coerceAtLeast(0L) * (attempt + 1L)
+                // 429（本地推理单槽位排队）自带 Retry-After：忽略它会让两次重试在
+                // 500ms/1s 内白白用掉，用户看到的仍然是「请求失败」。取两者较大值。
+                val delayMs = maxOf(baseDelayMs, error.retryAfterMs ?: 0L)
                 OmniLog.w(
                     tag,
                     "transient stream failure, retrying attempt=${attempt + 1}/$retryCount " +
@@ -403,6 +408,12 @@ class HttpAgentLlmClient(
     private fun isHttp2ProtocolError(error: AgentStreamRequestException): Boolean {
         return error.reason.contains("PROTOCOL_ERROR", ignoreCase = true)
                 || error.reason.contains("stream was reset", ignoreCase = true)
+    }
+
+    private fun Response?.retryAfterMillisOrNull(): Long? {
+        val raw = runCatching { this?.header("Retry-After") }.getOrNull()?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        return raw.toLongOrNull()?.let { seconds -> (seconds * 1000L).coerceIn(0L, 60_000L) }
     }
 
     private fun isTransientStreamFailure(error: AgentStreamRequestException): Boolean {
@@ -749,15 +760,21 @@ class HttpAgentLlmClient(
                 val reason = extractErrorReason(responseBody)
                     ?: sanitizeReason(t?.message)
                     ?: "unknown stream failure"
+                // 本地推理队列满/等待超时时服务器回 429（error=queue_full / queue_timeout），
+                // 直接把它显示给用户等于什么都没说。
+                val userReason = if (response?.code == 429) {
+                    "本地模型正忙（推理排队中），请稍后重试：$reason"
+                } else reason
                 streamDone.completeExceptionally(
                     AgentStreamRequestException(
                         statusCode = response?.code,
-                        reason = reason,
+                        reason = userReason,
                         responseBody = responseBody,
                         responseStarted = accumulator.hasAssistantPayload(),
                         cause = t,
                         imageInput = requestJson["messages"].containsImageInput() ||
                             requestJson["input"].containsImageInput(),
+                        retryAfterMs = response.retryAfterMillisOrNull(),
                     )
                 )
             }

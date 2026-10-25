@@ -171,7 +171,11 @@ class BrowserDownloadManager(
         val record = snapshot().firstOrNull { it.id == taskId } ?: return false
         activeJobs.remove(taskId)?.cancel()
         if (deleteFile) {
-            runCatching { File(record.destinationPath).delete() }
+            val file = File(record.destinationPath)
+            runCatching { file.delete() }
+            // 分片与 ETag sidecar 也要清，否则删了任务还占着几 GB 空间。
+            runCatching { File(file.parentFile, file.name + ".part").delete() }
+            runCatching { File(file.parentFile, file.name + ".part.etag").delete() }
         }
         store.removeDownload(taskId)
         onChanged()
@@ -192,7 +196,18 @@ class BrowserDownloadManager(
         activeJobs[taskId] = scope.launch {
             val original = snapshot().firstOrNull { it.id == taskId } ?: return@launch
             val targetFile = File(original.destinationPath)
-            val existingSize = if (targetFile.exists()) targetFile.length() else 0L
+            // 先写 <name>.part，完成后再改名：直接写最终路径时，中途杀进程/断网会留下一个
+            // 「看起来完整」的半截文件（用户点开是坏的），而续传又会把两个版本拼在一起。
+            val partFile = File(targetFile.parentFile, targetFile.name + ".part")
+            val etagFile = File(targetFile.parentFile, targetFile.name + ".part.etag")
+            if (!partFile.exists() && targetFile.exists() && targetFile.length() > 0L) {
+                // 旧版本直接写最终文件：把它当作已下载的分片继续，不必从头再下。
+                targetFile.renameTo(partFile)
+            }
+            val existingSize = if (partFile.exists()) partFile.length() else 0L
+            val ifRange = if (existingSize > 0L) {
+                runCatching { etagFile.readText().trim() }.getOrNull().orEmpty()
+            } else 
             update(
                 original.copy(
                     status = STATUS_DOWNLOADING,
@@ -208,6 +223,9 @@ class BrowserDownloadManager(
                 }
                 if (existingSize > 0L) {
                     requestBuilder.header("Range", "bytes=$existingSize-")
+                    // 远端文件换了（ETag 变化）时 If-Range 会让服务器回 200 全量，
+                    // 而不是把新旧两段拼成一个损坏文件。
+                    if (ifRange.isNotEmpty()) requestBuilder.header("If-Range", ifRange)
                 }
                 val response = okHttpClient.newCall(requestBuilder.build()).execute()
                 if (!response.isSuccessful && response.code !in 200..299 && response.code != 206) {
@@ -219,11 +237,15 @@ class BrowserDownloadManager(
                 val responseBody = response.body ?: throw IllegalStateException("empty_response_body")
                 val contentLength = responseBody.contentLength()
                 val append = existingSize > 0L && response.code == 206
-                if (!append && targetFile.exists()) {
-                    targetFile.delete()
+                if (!append && partFile.exists()) {
+                    partFile.delete()
                 }
                 targetFile.parentFile?.mkdirs()
-                val sink = FileOutputStream(targetFile, append).buffered()
+                runCatching {
+                    val etag = response.header("ETag")?.takeIf { it.isNotBlank() }
+                    if (etag != null) etagFile.writeText(etag) else etagFile.delete()
+                }
+                val sink = FileOutputStream(partFile, append).buffered()
                 var downloaded = if (append) existingSize else 0L
                 // 每读一个 8KB 分片就 update() 一次（持久化 + 通知上层）：500MB 文件约
                 // 6 万次写库与 6 万次 UI 通知，写入放大还把列表刷到卡顿。按时间/字节节流，
@@ -266,6 +288,12 @@ class BrowserDownloadManager(
                         }
                     }
                 }
+                // 只有真正写完才把 .part 改名成目标文件：之前半截数据也会被当成完成。
+                if (!partFile.renameTo(targetFile)) {
+                    runCatching { targetFile.delete() }
+                    check(partFile.renameTo(targetFile)) { "download_rename_failed" }
+                }
+                runCatching { etagFile.delete() }
                 update(
                     original.copy(
                         status = STATUS_COMPLETED,

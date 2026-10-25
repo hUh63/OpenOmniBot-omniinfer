@@ -697,6 +697,57 @@ class AgentConversationHistoryRepository(
         awaitCompactionToolCutoff(entries, compactedMessages, afterEntryId)
     }
 
+    /**
+     * Resolve the durable cutoff for a compacted prefix that does **not** end on a
+     * tool result — the common case, because the cut sits on a user or assistant
+     * boundary. Replays the journal through the same projection the request used and
+     * keeps the longest run of messages that also appears, in order, in the compacted
+     * prefix. No match means no durable cutoff yet; the caller then keeps the summary
+     * for this single request, exactly as before.
+     */
+    suspend fun findCompactionMessageCutoff(
+        conversationId: Long,
+        conversationMode: String,
+        compactedMessages: List<ChatCompletionMessage>
+    ): Long? = withContext(Dispatchers.IO) {
+        val conversation = getConversation(conversationId) ?: return@withContext null
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        val afterEntryId = conversation.contextSummaryCutoffEntryDbId ?: 0
+        val entries = AgentConversationHistorySupport.normalizeInterruptedEntries(
+            loadThreadEntriesAscSafePaged(
+                conversationId,
+                effectiveConversationMode,
+                afterEntryId,
+                promptProjection = newPromptProjection()
+            )
+        )
+        val (replayed, origins) = AgentConversationHistorySupport
+            .buildPromptRelevantMessagesWithOrigins(entries)
+        val prefix = compactedMessages.filter {
+            it.role != "system" && !AgentConversationHistorySupport.isContextSummaryMessage(it)
+        }
+        var matched = -1
+        while (matched + 1 < prefix.size && matched + 1 < replayed.size) {
+            val index = matched + 1
+            if (!samePromptMessage(prefix[index], replayed[index])) break
+            matched = index
+        }
+        if (matched < 0) return@withContext null
+        origins.getOrNull(matched)
+    }
+
+    private fun samePromptMessage(
+        left: ChatCompletionMessage,
+        right: ChatCompletionMessage
+    ): Boolean {
+        if (left.role != right.role) return false
+        if (left.toolCallId != right.toolCallId) return false
+        if (left.toolCalls.orEmpty().map { it.id } != right.toolCalls.orEmpty().map { it.id }) return false
+        // Content may be a String or a JSON array of parts; both sides come from the
+        // same builder, so their textual form is comparable and cheap enough here.
+        return left.content?.toString().orEmpty() == right.content?.toString().orEmpty()
+    }
+
     suspend fun updateContextSummary(
         conversationId: Long,
         summary: String,
