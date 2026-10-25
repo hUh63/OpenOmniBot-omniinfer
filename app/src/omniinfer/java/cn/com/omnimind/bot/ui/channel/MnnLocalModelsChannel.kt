@@ -209,8 +209,21 @@ class MnnLocalModelsChannel {
 
             "setBackend" -> {
                 val backend = OmniInferLocalRuntime.normalizeBackend(call.argument<String>("backend"))
-                backendMmkv.encode(MMKV_BACKEND_KEY, backend)
-                OmniInferLocalRuntime.setSelectedBackend(backend)
+                // 切后端必须先停掉已加载的引擎：原来只改一个 MMKV 字符串 —— 正在跑的
+                // 引擎（getLoadedBackend）没变，页面却按新后端显示「运行中、端口一致」，
+                // agent 的请求继续打在旧引擎上，而且没有任何回落。
+                val previous = OmniInferLocalRuntime.getSelectedBackend()
+                if (previous != backend) {
+                    runCatching { OmniInferLocalRuntime.stop() }
+                        .onFailure { error ->
+                            OmniLog.w(
+                                TAG,
+                                "stop before backend switch failed: ${error.message}"
+                            )
+                        }
+                    backendMmkv.encode(MMKV_BACKEND_KEY, backend)
+                    OmniInferLocalRuntime.setSelectedBackend(backend)
+                }
                 result.success(backend)
                 return
             }

@@ -326,18 +326,41 @@ object OmniInferMnnModelsManager {
     }
 
     fun pauseDownload(modelId: String) {
-        val resolved = resolveMarketModel(modelId) ?: return
-        val task = activeDownloads.remove(resolved.downloadId) ?: return
+        val normalizedModelId = normalizeStoredModelId(modelId)
+        // activeDownloads 的 key 带下载源（"$source/$repoPath"），而 resolveMarketModel
+        // 依赖当前首选源：下载过程中用户切换了下载源，这里会解析出另一个 downloadId，
+        // remove 返回 null 就直接 return —— 真正的任务继续跑，Dart 侧却收到「已暂停」。
+        // 先按解析结果找，再按 modelId / repoPath 目录名兜底匹配。
+        val resolved = resolveMarketModel(modelId)
+        val candidateKeys = buildList {
+            resolved?.downloadId?.let { add(it) }
+            activeDownloads.keys
+                .firstOrNull { key ->
+                    key == normalizedModelId ||
+                        key.endsWith("/$normalizedModelId") ||
+                        (resolved != null && key.endsWith("/${resolved.repoPath}"))
+                }
+                ?.let { add(it) }
+        }.distinct()
+        val hitKey = candidateKeys.firstOrNull { activeDownloads.containsKey(it) } ?: return
+        val task = activeDownloads.remove(hitKey) ?: return
         task.cancel()
         val pausedInfo = task.info.copy(downloadState = MnnDownloadState.DOWNLOAD_PAUSED)
-        emitDownloadUpdate(resolved.modelId, pausedInfo)
+        emitDownloadUpdate(resolved?.modelId ?: normalizedModelId, pausedInfo)
         emitEvent("downloads_changed", emptyMap())
         appContext?.let { ModelDownloadForegroundService.stopIfIdle(it) }
     }
 
     suspend fun deleteModel(modelId: String): List<Map<String, Any?>> {
         val normalizedModelId = normalizeStoredModelId(modelId)
-        val target = findInstalledRecord(normalizedModelId) ?: return listInstalledModels()
+        val target = findInstalledRecord(normalizedModelId)
+        if (target == null) {
+            // 下载中断 / 暂停的目录不在 downloadedRecords 里（带 .part 的会被过滤），
+            // 原来这里直接 return、什么都不删 —— 几 GB 的残缺目录在 UI 上看不见也删不掉，
+            // 只能清应用数据。按 repoPath 目录名兜底定位并删除。
+            deleteIncompleteModelDirectory(normalizedModelId)
+            return listInstalledModels()
+        }
         if (target.readOnly) {
             return listInstalledModels()
         }
@@ -580,6 +603,29 @@ object OmniInferMnnModelsManager {
             }
             ?.sortedByDescending { it.downloadedAt }
             .orEmpty()
+    }
+
+    private fun deleteIncompleteModelDirectory(modelId: String) {
+        if (modelId.isBlank()) {
+            return
+        }
+        val context = appContext ?: return
+        val resolved = runCatching { resolveMarketModel(modelId) }.getOrNull()
+        val dirNames = buildList {
+            resolved?.repoPath?.substringAfterLast('/')?.takeIf { it.isNotBlank() }?.let { add(it) }
+            modelId.substringAfterLast('/').takeIf { it.isNotBlank() }?.let { add(it) }
+        }.distinct()
+        val mnnDir = AgentWorkspaceManager.modelsMnnDirectory(context)
+        dirNames.forEach { name ->
+            val dir = File(mnnDir, name)
+            if (!dir.isDirectory) return@forEach
+            runCatching { dir.deleteRecursively() }
+                .onFailure { error ->
+                    OmniLog.w(TAG, "delete incomplete model dir failed: ${error.message}")
+                }
+        }
+        resolved?.downloadId?.let { activeDownloads.remove(it)?.cancel() }
+        emitEvent("downloads_changed", emptyMap())
     }
 
     private fun findInstalledRecord(modelId: String): InstalledModelRecord? {

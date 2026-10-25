@@ -1,6 +1,7 @@
 ﻿package cn.com.omnimind.bot.omniinfer
 
 import android.content.Context
+import android.os.StatFs
 import android.util.Log
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import com.omniinfer.server.OmniInferServer
@@ -31,6 +32,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 object OmniInferModelsManager {
     private const val TAG = "OmniInferModels"
+    /** 下载前要求的额外余量（元数据 / 临时文件）。 */
+    private const val MIN_FREE_SPACE_RESERVE_BYTES = 256L * 1024L * 1024L
     private const val MARKET_URL =
         "https://omnimind-model.oss-cn-beijing.aliyuncs.com/llama.cpp/model_market.json"
     private const val ASSET_NAME = "omniinfer_llama_model_market.json"
@@ -413,11 +416,36 @@ object OmniInferModelsManager {
         val url = buildDownloadUrl(source, resolved.repo, remoteFileName)
         val modelSubDir = File(getModelDir(), modelId)
         modelSubDir.mkdirs()
+        val expectedSize = lookupMarketFileSize(modelId)
+        // 下 4~8GB 的 GGUF 之前先看可用空间：原来四个 manager 都不检查，必然下到
+        // 中途 ENOSPC，只留下一个巨大的 .part（UI 上表现成「失败/暂停」）。
+        if (expectedSize > 0L) {
+            val availableBytes = runCatching {
+                StatFs(modelSubDir.absolutePath).availableBytes
+            }.getOrNull()
+            if (availableBytes != null &&
+                availableBytes < expectedSize + MIN_FREE_SPACE_RESERVE_BYTES
+            ) {
+                Log.e(
+                    TAG,
+                    "[Download] not enough space for $modelId: need=$expectedSize free=$availableBytes"
+                )
+                emitEvent(
+                    "download_error",
+                    mapOf(
+                        "modelId" to modelId,
+                        "error" to "存储空间不足（需要约 ${expectedSize / 1024 / 1024} MB，" +
+                            "可用 ${availableBytes / 1024 / 1024} MB）"
+                    )
+                )
+                return
+            }
+        }
         val destination = File(modelSubDir, "$modelId.gguf")
         val mmprojUrl = if (resolved.needsMmproj) buildDownloadUrl(source, resolved.repo, "mmproj-F16.gguf") else null
         val mmprojDest = if (resolved.needsMmproj) File(modelSubDir, "mmproj-F16.gguf") else null
         val task = DownloadTask(modelId, url, destination, mmprojUrl, mmprojDest)
-        task.initFromPartFile(lookupMarketFileSize(modelId))
+        task.initFromPartFile(expectedSize)
         activeDownloads[modelId] = task
         appContext?.let {
             ModelDownloadForegroundService.start(it, activeDownloads.size, modelId)

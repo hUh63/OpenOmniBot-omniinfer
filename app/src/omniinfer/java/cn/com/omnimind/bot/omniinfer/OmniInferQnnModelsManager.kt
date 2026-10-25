@@ -478,6 +478,13 @@ object OmniInferQnnModelsManager {
 
             val marketModel = OmniInferQnnMarketRepository.findModel(modelDir.name)
             val hasPartFiles = modelDir.walkTopDown().any { it.isFile && it.name.endsWith(".part") }
+            // 与 MNN 侧行为对齐：只要目录里还有 .part，就是未完成的下载，不能当作
+            // 「已安装」暴露出去 —— 原来只是把 downloadInfo 标成 paused，记录照样
+            // 进入 listInstalledModels，startApiService / ensureModelReady 不做完整性
+            // 校验就去加载缺 tokenizer 的模型，失败后静默返回。
+            if (hasPartFiles) {
+                return@mapNotNull null
+            }
 
             val activeState = activeDownloads[modelDir.name]
             val downloadInfo = when {
