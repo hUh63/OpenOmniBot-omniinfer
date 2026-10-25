@@ -172,6 +172,17 @@ private class BuiltinSkillAssetStore(
             if (registryEntry?.source == USER_SOURCE) {
                 return@forEach
             }
+            // registry 说已安装、磁盘上的 SKILL.md 也还在，就完全跳过重新拷贝。
+            // 原来无论是否已安装都会先 installBuiltinInternal：它走
+            // refreshBuiltinSkillAssets → 先 deleteRecursively 再逐个复制，等于每次
+            // 列技能（skills_list / 技能管理页刷新）都把全部内置技能删掉重拷一遍，
+            // 期间并发读取者会看到 SKILL.md 缺失或半写。
+            if (registryEntry?.source == BUILTIN_SOURCE &&
+                registryEntry.installState == INSTALL_STATE_INSTALLED &&
+                File(targetDirFor(builtin), "SKILL.md").isFile
+            ) {
+                return@forEach
+            }
             val installedOk = runCatching { installBuiltinInternal(builtin) }
                 .onFailure { error ->
                     // 单个内置 asset 拷贝失败（渠道包裁剪 / 磁盘满 / 文件被占用）
@@ -550,7 +561,15 @@ class SkillIndexService(
             .toList()
     }
 
-    private fun markOfficialRepositorySkills(repositoryDir: File): List<SkillIndexEntry> {
+    private fun markOfficialRepositorySkills(repositoryDir: File): List<SkillIndexEntry> =
+        // 读全表 → 改 → 写全表必须和 set/remove/seed 共用同一把锁：官方仓库同步
+        // （git 拉取，最长 15 分钟）期间用户切换技能开关，同步结束时会用启动时的
+        // 旧快照整表覆盖回去 —— 开关被回滚、removed_builtin 墓碑丢失。
+        synchronized(SKILL_INDEX_LOCK) {
+            markOfficialRepositorySkillsLocked(repositoryDir)
+        }
+
+    private fun markOfficialRepositorySkillsLocked(repositoryDir: File): List<SkillIndexEntry> {
         val registryStore = registryStore()
         val registry = registryStore.read()
         val builtinAssets = builtinStore().listBuiltins().associateBy { it.id }

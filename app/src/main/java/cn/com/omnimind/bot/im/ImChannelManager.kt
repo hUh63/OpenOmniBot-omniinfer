@@ -144,6 +144,7 @@ object ImChannelManager {
                     appContext = applicationContext
                     val createdStore = ImChannelStore(applicationContext)
                     store = createdStore
+                    telegramConnector.bindStore(createdStore)
                     // 进程刚起来（首次初始化）：任何持久化的 activeTaskId 都不可能
                     // 还有活着的 run。不清掉的话，该 peer 之后发的每条普通消息都会
                     // 被回「当前会话已有任务运行中」，只能手动 /cancel 解开。
@@ -446,7 +447,6 @@ object ImChannelManager {
         val connector = connectors[channel] ?: return false
         val chunkSize = requireStore().loadSettings().chunkSizeFor(channel)
         val chunks = splitForIm(text, chunkSize)
-        var allSent = true
         chunks.forEachIndexed { index, chunk ->
             val sent = runCatching {
                 connector.sendText(peerId, chunk)
@@ -454,13 +454,15 @@ object ImChannelManager {
                 OmniLog.e(TAG, "send ${channel.id} chunk failed: ${error.message}")
             }.isSuccess
             if (!sent) {
-                allSent = false
+                // 立即中断，而不是继续发后面的片：后面的片已经缺了前文，发出去只会
+                // 让用户看到一段从中间开始的错乱回复。调用方按 false 决定重试/提示。
+                return false
             }
             if (index < chunks.lastIndex) {
                 delay(250)
             }
         }
-        return allSent && chunks.isNotEmpty()
+        return chunks.isNotEmpty()
     }
 
     private fun splitForIm(text: String, maxChars: Int): List<String> {

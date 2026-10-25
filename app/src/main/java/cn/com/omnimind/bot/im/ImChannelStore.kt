@@ -167,6 +167,19 @@ class ImChannelStore(context: Context) {
         prefs.edit().putString(KEY_SESSIONS, array.toString()).apply()
     }
 
+    /**
+     * getUpdates 的 offset 必须持久化：offset 是 Telegram 侧的「已确认」标记，
+     * 只存在内存里的话，进程被杀 / 设备重启 / 关一段时间再打开，都会把 24 小时内
+     * 所有未确认的 update 全量重投 —— 整批历史消息被重新处理并逐条重复回复。
+     */
+    fun loadTelegramUpdateOffset(): Long = prefs.getLong(KEY_TELEGRAM_UPDATE_OFFSET, 0L)
+
+    fun saveTelegramUpdateOffset(offset: Long) {
+        if (offset <= 0L) return
+        if (prefs.getLong(KEY_TELEGRAM_UPDATE_OFFSET, 0L) == offset) return
+        prefs.edit().putLong(KEY_TELEGRAM_UPDATE_OFFSET, offset).apply()
+    }
+
     private fun parseList(value: String): Set<String> {
         return value.split(',', '\n', ';', ' ')
             .map { it.trim() }
@@ -181,6 +194,7 @@ class ImChannelStore(context: Context) {
         private const val KEY_TELEGRAM_ALLOWED = "telegram_allowed_chat_ids"
         private const val KEY_TELEGRAM_CHUNK_SIZE = "telegram_chunk_size"
         private const val KEY_TELEGRAM_DROP_PENDING = "telegram_drop_pending_updates"
+        private const val KEY_TELEGRAM_UPDATE_OFFSET = "telegram_update_offset"
 
         private const val KEY_WECHAT_ENABLED = "wechat_enabled"
         private const val KEY_WECHAT_TOKEN = "wechat_token"

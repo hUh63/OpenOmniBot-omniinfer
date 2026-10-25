@@ -158,11 +158,23 @@ class SubagentToolHandler(
     }
 }
 
+/** 并发子 agent 的硬上限：每个子 agent 都是一整套 orchestrator + 多轮 LLM 请求。 */
+internal const val MAX_SUBAGENT_CONCURRENCY = 4
+
+/** 单次 dispatch 的任务数上限（模型很容易一次列出十几个）。 */
+internal const val MAX_SUBAGENT_TASKS = 8
+
 internal fun resolveSubagentConcurrency(requested: Int?, taskCount: Int): Int {
     require(taskCount > 0) { "tasks 不能为空" }
+    // 原来 requested 原样返回、默认等于 taskCount，且 tasks 数量本身也没有上限：
+    // 模型传 concurrency=20 / 20 个 task 就是 20 个 orchestrator 同时各打一轮
+    // 完整 tool catalog + LLM 请求 —— 立刻限流、耗电、OOM。
+    require(taskCount <= MAX_SUBAGENT_TASKS) {
+        "tasks 最多 $MAX_SUBAGENT_TASKS 个，当前 $taskCount 个；请拆成多轮"
+    }
     if (requested != null) {
         require(requested > 0) { "concurrency 必须大于 0" }
-        return requested
+        return requested.coerceAtMost(MAX_SUBAGENT_CONCURRENCY)
     }
-    return taskCount
+    return taskCount.coerceAtMost(MAX_SUBAGENT_CONCURRENCY)
 }

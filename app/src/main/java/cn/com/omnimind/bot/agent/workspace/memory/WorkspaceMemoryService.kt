@@ -202,6 +202,10 @@ class WorkspaceMemoryService(
         const val SCENE_MEMORY_ROLLUP = "scene.memory.rollup"
 
         private const val TAG = "WorkspaceMemoryService"
+        /** 启发式 rollup 单次最多沉淀的长期记忆条数（防止 MEMORY.md 无界膨胀）。 */
+        private const val MAX_HEURISTIC_LONG_TERM_PER_ROLLUP = 20
+        /** rollup 提示词里贴入的长期记忆上限（字符）。 */
+        private const val MAX_ROLLUP_LONG_TERM_PROMPT_CHARS = 8_000
         private const val ROLLUP_SUBMIT_TOOL = "submit_memory_rollup_result"
         private const val KEY_EMBEDDING_ENABLED = "workspace_memory_embedding_enabled_v1"
         private const val KEY_ROLLUP_ENABLED = "workspace_memory_rollup_enabled_v1"
@@ -577,6 +581,24 @@ class WorkspaceMemoryService(
             )
         }
         val content = dailyFile.readText()
+        // 幂等：rollupDay 会被 memory_rollup_day 工具反复调用、也会因为闹钟重排 /
+        // 时区变化在同一天被重复触发。原来每次都再 append 一段 "## Nightly Rollup"
+        // 并再灌一遍长期记忆（appendLongTermMemory 没有去重），文件双双膨胀。
+        val rollupMarker = "## Nightly Rollup @ ${date}"
+        if (content.contains(rollupMarker)) {
+            val alreadySummary = t(
+                "该日期已经整理过，未重复执行。",
+                "Already rolled up for this day; skipped."
+            )
+            saveRollupStatus(alreadySummary)
+            return mapOf(
+                "success" to true,
+                "date" to date.toString(),
+                "summary" to alreadySummary,
+                "longTermWrites" to 0,
+                "alreadyRolledUp" to true
+            )
+        }
         val lines = extractDailyLinesForRollup(content)
 
         if (lines.isEmpty()) {
@@ -770,6 +792,11 @@ class WorkspaceMemoryService(
             }
             .map(::sanitizeLongTermCandidate)
             .filter { it.isNotEmpty() }
+            // 去重 + 上限：启发式分支原来把当日所有 ≥18 字符的行原样当长期记忆候选，
+            // 而 appendLongTermMemory 只 appendText，于是「LLM 调用失败 → 灌入更多原文
+            // → MEMORY.md 变大 → 下次更容易超 context → 更常失败」形成正反馈。
+            .distinct()
+            .take(MAX_HEURISTIC_LONG_TERM_PER_ROLLUP)
     }
 
     private fun inferRollupByLlm(
@@ -955,7 +982,14 @@ class WorkspaceMemoryService(
         longTermMemory: String
     ): String {
         val dailyBlock = dailyLines.joinToString("\n") { "- $it" }
-        val longTermBlock = longTermMemory.ifBlank { emptyLongTermMemoryText() }
+        // 只贴末尾：MEMORY.md 会随 rollup 持续增长，整篇塞进提示词会让 rollup 请求
+        // 越来越容易超 context（超了就更常失败、更常走启发式、文件更大）。
+        val trimmedLongTerm = if (longTermMemory.length > MAX_ROLLUP_LONG_TERM_PROMPT_CHARS) {
+            longTermMemory.takeLast(MAX_ROLLUP_LONG_TERM_PROMPT_CHARS)
+        } else {
+            longTermMemory
+        }
+        val longTermBlock = trimmedLongTerm.ifBlank { emptyLongTermMemoryText() }
         return when (currentLocale()) {
             PromptLocale.ZH_CN -> """
                 日期：$date
@@ -984,7 +1018,14 @@ class WorkspaceMemoryService(
         longTermMemory: String
     ): String {
         val dailyBlock = dailyLines.joinToString("\n") { "- $it" }
-        val longTermBlock = longTermMemory.ifBlank { emptyLongTermMemoryText() }
+        // 只贴末尾：MEMORY.md 会随 rollup 持续增长，整篇塞进提示词会让 rollup 请求
+        // 越来越容易超 context（超了就更常失败、更常走启发式、文件更大）。
+        val trimmedLongTerm = if (longTermMemory.length > MAX_ROLLUP_LONG_TERM_PROMPT_CHARS) {
+            longTermMemory.takeLast(MAX_ROLLUP_LONG_TERM_PROMPT_CHARS)
+        } else {
+            longTermMemory
+        }
+        val longTermBlock = trimmedLongTerm.ifBlank { emptyLongTermMemoryText() }
         return when (currentLocale()) {
             PromptLocale.ZH_CN -> """
                 你是 Workspace 记忆整理助手。请基于当日短期记忆，为用户生成当日总结，并筛选可沉淀为长期记忆的信息。
@@ -1386,8 +1427,8 @@ class WorkspaceMemoryService(
             val embedding = if (config.configured && shouldRequestEmbeddings) {
                 runCatching { requestEmbedding(config, chunk.text) }
                     .onFailure { OmniLog.w(TAG, "embedding chunk failed: ${it.message}") }
-                    .getOrElse { emptyList() }
-                    .takeIf { vector ->
+                    .getOrNull()
+                    ?.takeIf { vector ->
                         vector.isNotEmpty() &&
                             vector.all(Double::isFinite) &&
                             (
@@ -1395,7 +1436,19 @@ class WorkspaceMemoryService(
                                     vector.size == expectedEmbeddingDimensions
                                 )
                     }
-                    .orEmpty()
+                    // 请求失败（超时/限流/网关报错）时保留旧向量：原来直接把条目写成
+                    // 空 embedding，一次瞬时失败就把已经算好的向量抹掉，语义召回退化成
+                    // 纯词法，且要等下次文本变化才会重算。只在同配置同维度时保留。
+                    ?: old?.let { previous ->
+                        previous.embedding.takeIf { vector ->
+                            vector.isNotEmpty() &&
+                                previous.embeddingConfigId == requestedEmbeddingConfigId &&
+                                (
+                                    expectedEmbeddingDimensions == null ||
+                                        vector.size == expectedEmbeddingDimensions
+                                    )
+                        }
+                    }.orEmpty()
             } else {
                 emptyList()
             }
@@ -1421,21 +1474,58 @@ class WorkspaceMemoryService(
     }
 
     private fun loadIndex(indexFile: File): List<MemoryIndexEntry> {
-        if (!indexFile.exists()) return emptyList()
+        if (!indexFile.exists()) return readIndexBackup(indexFile)
         val raw = runCatching { indexFile.readText() }.getOrDefault("")
         if (raw.isBlank()) return emptyList()
+        val parsed = runCatching {
+            val type = object : TypeToken<List<MemoryIndexEntry>>() {}.type
+            gson.fromJson<List<MemoryIndexEntry>>(raw, type)
+        }.getOrNull()
+        if (parsed != null) {
+            return parsed
+        }
+        // 解析失败时不要静默返回空表：那会把已算好的全部 embedding 丢掉，
+        // 下一次刷新要给每个 chunk 重新做一次网络 embedding（数百次串行请求）。
+        OmniLog.w(TAG, "parse memory index failed, falling back to .bak")
+        return readIndexBackup(indexFile)
+    }
+
+    private fun readIndexBackup(indexFile: File): List<MemoryIndexEntry> {
+        val backup = File(indexFile.parentFile, "${indexFile.name}.bak")
+        if (!backup.exists()) return emptyList()
         return runCatching {
             val type = object : TypeToken<List<MemoryIndexEntry>>() {}.type
-            gson.fromJson<List<MemoryIndexEntry>>(raw, type) ?: emptyList()
+            gson.fromJson<List<MemoryIndexEntry>>(backup.readText(), type) ?: emptyList()
         }.getOrElse {
-            OmniLog.w(TAG, "parse index failed: ${it.message}")
+            OmniLog.w(TAG, "parse memory index backup failed: ${it.message}")
             emptyList()
         }
     }
 
     private fun saveIndex(indexFile: File, entries: List<MemoryIndexEntry>) {
         indexFile.parentFile?.mkdirs()
-        indexFile.writeText(gson.toJson(entries))
+        // 整表 writeText 非原子：每次 memory_search / rollup / 删除条目都会重写，
+        // 写到一半被杀或磁盘满就留下截断 JSON（再被 loadIndex 当空表）。
+        val json = gson.toJson(entries)
+        val temp = File(indexFile.parentFile, "${indexFile.name}.tmp")
+        runCatching {
+            temp.writeText(json)
+            if (indexFile.exists()) {
+                runCatching {
+                    indexFile.copyTo(
+                        File(indexFile.parentFile, "${indexFile.name}.bak"),
+                        overwrite = true
+                    )
+                }
+            }
+            if (!temp.renameTo(indexFile)) {
+                indexFile.writeText(json)
+                temp.delete()
+            }
+        }.onFailure { error ->
+            OmniLog.w(TAG, "save memory index failed: ${error.message}")
+            runCatching { temp.delete() }
+        }
     }
 
     private fun requestEmbedding(

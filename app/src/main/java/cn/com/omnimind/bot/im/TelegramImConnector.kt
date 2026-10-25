@@ -28,6 +28,14 @@ internal class TelegramImConnector : ImConnector {
 
     private var pollingJob: Job? = null
 
+    /** offset 持久化用；由 ImChannelManager 在初始化时注入（connector 本身没有 context）。 */
+    @Volatile
+    private var offsetStore: ImChannelStore? = null
+
+    fun bindStore(store: ImChannelStore) {
+        offsetStore = store
+    }
+
     override fun currentStatus(): ImConnectorStatus = status
 
     override suspend fun start(
@@ -90,7 +98,8 @@ internal class TelegramImConnector : ImConnector {
         // HttpURLConnection 无效），于是两个循环同时 getUpdates —— 同一条消息
         // 被处理两次，Telegram 那边还会持续返回 409 Conflict。
         val pollingToken = currentCoroutineContext()[Job]
-        var offset: Long? = null
+        // 从持久化值续上（见 ImChannelStore.loadTelegramUpdateOffset 的注释）。
+        var offset: Long? = offsetStore?.loadTelegramUpdateOffset()?.takeIf { it > 0L }
         runCatching {
             postTelegram(
                 activeConfig,
@@ -144,6 +153,7 @@ internal class TelegramImConnector : ImConnector {
                     val updateId = update.optLong("update_id", -1L)
                     if (updateId >= 0L) {
                         offset = maxOf(offset ?: 0L, updateId + 1L)
+                        offsetStore?.saveTelegramUpdateOffset(offset ?: 0L)
                     }
                     val message = update.optJSONObject("message") ?: continue
                     val inbound = parseInbound(message, activeConfig) ?: continue
@@ -242,8 +252,13 @@ internal class TelegramImConnector : ImConnector {
         val peerId = chatId.toString()
         val username = chat.optString("username").takeIf { it.isNotBlank() }
         val allowed = activeConfig.allowedChatIds
-        if (allowed.isNotEmpty() &&
-            peerId !in allowed &&
+        // 白名单为空时**必须拒绝**：原来这里是 `if (allowed.isNotEmpty() && ...)`，
+        // 空名单等于全放行 —— 任何知道 bot 用户名的人（以及被拉进的群里任意成员）
+        // 发一句话就能驱动本机 agent（含终端 / 文件 / 浏览器工具），属远程越权执行。
+        if (allowed.isEmpty()) {
+            return null
+        }
+        if (peerId !in allowed &&
             username?.let { "@$it" in allowed || it in allowed } != true
         ) {
             return null

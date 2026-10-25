@@ -13,6 +13,11 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.LocalDate
 
+/** memory_search 不传 limit 时的默认条数。 */
+private const val DEFAULT_MEMORY_SEARCH_LIMIT = 12
+/** 即便模型显式要更多，也不超过这个数（每条命中都带完整正文）。 */
+private const val MAX_MEMORY_SEARCH_LIMIT = 40
+
 class MemoryToolHandler(
     private val helper: SharedHelper
 ) : ToolHandler {
@@ -47,9 +52,12 @@ class MemoryToolHandler(
                     require(requestedLimit == null || requestedLimit > 0) {
                         "limit 必须大于 0"
                     }
-                    // The local runtime never imposes its own search-result
-                    // ceiling. An explicit request is honored as written.
-                    val limit = requestedLimit ?: Int.MAX_VALUE
+                    // 默认不能再是 Int.MAX_VALUE：payload 里带每条命中的完整正文，
+                    // 而工具输出没有总字节上限 —— 记忆量大时单条 memory_search 结果
+                    // 就能把上下文灌爆（反而更快触发压缩）。显式传 limit 时仍照办，
+                    // 但同样夹到硬上限。
+                    val limit = (requestedLimit ?: DEFAULT_MEMORY_SEARCH_LIMIT)
+                        .coerceAtMost(MAX_MEMORY_SEARCH_LIMIT)
                     val result = env.workspaceMemoryService.searchMemory(query, limit)
                     val payload = linkedMapOf<String, Any?>(
                         "query" to result.query,

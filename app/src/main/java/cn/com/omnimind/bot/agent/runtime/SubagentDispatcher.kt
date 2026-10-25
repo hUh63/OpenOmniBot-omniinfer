@@ -9,6 +9,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
@@ -30,6 +31,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * SubagentToolHandler → SubagentDispatcher → router is a construction-time
  * cycle that we break with deferred lookup.
  */
+/** 单个子任务的时间预算（见 dispatch 里的 withTimeoutOrNull）。 */
+private const val SINGLE_SUBAGENT_TIMEOUT_MS = 10L * 60L * 1000L
+
 class SubagentDispatcher(
     private val llmClient: AgentLlmClient,
     private val toolExecutorProvider: () -> AgentToolExecutor,
@@ -104,12 +108,26 @@ class SubagentDispatcher(
             tasks.mapIndexed { index, spec ->
                 async {
                     semaphore.withPermit {
-                        runSingleSubagent(
-                            parentEnv = parentEnv,
+                        // 子弹窗原先没有任何超时：一个卡住的子 agent（LLM 不响应、
+                        // 工具挂死）会让父回合的 subagent_dispatch 永不返回，
+                        // 整轮 agent 直接挂死，只能靠用户取消。
+                        withTimeoutOrNull(SINGLE_SUBAGENT_TIMEOUT_MS) {
+                            runSingleSubagent(
+                                parentEnv = parentEnv,
+                                taskIndex = index,
+                                spec = spec,
+                                progressReporter = progressReporter,
+                                progressSequence = progressSequence
+                            )
+                        } ?: SubagentRunResult(
+                            subagentId = "subagent-timeout-${UUID.randomUUID().toString().take(8)}",
+                            profileId = spec.profileId,
                             taskIndex = index,
-                            spec = spec,
-                            progressReporter = progressReporter,
-                            progressSequence = progressSequence
+                            status = "timeout",
+                            finalContent = "",
+                            toolCallSummaries = emptyList(),
+                            errorMessage =
+                                "子任务超时（${SINGLE_SUBAGENT_TIMEOUT_MS / 60_000L} 分钟）"
                         )
                     }
                 }
