@@ -50,12 +50,29 @@ internal object AgentContextBudget {
      */
     fun cutPoint(messages: List<ChatCompletionMessage>, keepRecentTokens: Int): Int? {
         val start = messages.takeWhile { it.role == "system" }.size
+        // 先建立「tool_call id → 它的回复位置」映射，只有**后面确实有回复**的
+        // tool_call 才计入 pending。原来只要存在一个孤儿 call_id（被取消/被杀掉的
+        // 回合、旧数据导入、投影丢行），pending 就永不为空 → 后面的 user/assistant
+        // 位置全都不再进 valid → valid 为空 → cutPoint 返回 null → 压缩抛
+        // 「没有可安全压缩的已完成片段」，整个会话从此永久不可压缩、每轮都失败。
+        val toolReplyIndexById = HashMap<String, Int>()
+        for (i in start until messages.size) {
+            val message = messages[i]
+            if (message.role == "tool") {
+                message.toolCallId?.let { callId -> toolReplyIndexById.putIfAbsent(callId, i) }
+            }
+        }
         val pending = linkedSetOf<String>()
         val valid = mutableListOf<Int>()
         for (i in start until messages.size) {
             val message = messages[i]
             if (i > start && pending.isEmpty() && message.role in setOf("user", "assistant")) valid += i
-            message.toolCalls.orEmpty().forEach { pending += it.id }
+            message.toolCalls.orEmpty().forEach { call ->
+                val replyIndex = toolReplyIndexById[call.id]
+                if (replyIndex != null && replyIndex > i) {
+                    pending += call.id
+                }
+            }
             if (message.role == "tool") pending.remove(message.toolCallId)
         }
         // A fully completed final tool group may itself be summarized when no newer

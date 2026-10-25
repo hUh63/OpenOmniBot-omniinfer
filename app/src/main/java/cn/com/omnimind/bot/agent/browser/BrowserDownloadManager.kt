@@ -211,6 +211,9 @@ class BrowserDownloadManager(
                 }
                 val response = okHttpClient.newCall(requestBuilder.build()).execute()
                 if (!response.isSuccessful && response.code !in 200..299 && response.code != 206) {
+                    // 不关闭 response 的话连接不能归还、也不能复用：反复失败会堆 socket
+                    // 直到 GC。
+                    response.close()
                     throw IllegalStateException("HTTP ${response.code}")
                 }
                 val responseBody = response.body ?: throw IllegalStateException("empty_response_body")
@@ -222,6 +225,11 @@ class BrowserDownloadManager(
                 targetFile.parentFile?.mkdirs()
                 val sink = FileOutputStream(targetFile, append).buffered()
                 var downloaded = if (append) existingSize else 0L
+                // 每读一个 8KB 分片就 update() 一次（持久化 + 通知上层）：500MB 文件约
+                // 6 万次写库与 6 万次 UI 通知，写入放大还把列表刷到卡顿。按时间/字节节流，
+                // 完成与失败路径仍会写最终状态。
+                var lastProgressPersistAtMs = 0L
+                var lastProgressPersistBytes = 0L
                 val expectedTotal = if (contentLength > 0L) {
                     if (append) existingSize + contentLength else contentLength
                 } else {
@@ -238,16 +246,23 @@ class BrowserDownloadManager(
                             }
                             output.write(buffer, 0, read)
                             downloaded += read.toLong()
-                            update(
-                                original.copy(
-                                    status = STATUS_DOWNLOADING,
-                                    updatedAt = System.currentTimeMillis(),
-                                    downloadedBytes = downloaded,
-                                    totalBytes = expectedTotal,
-                                    mimeType = response.header("Content-Type") ?: original.mimeType,
-                                    errorMessage = null
+                            val progressNow = System.currentTimeMillis()
+                            if (progressNow - lastProgressPersistAtMs >= 300L ||
+                                downloaded - lastProgressPersistBytes >= 512L * 1024L
+                            ) {
+                                lastProgressPersistAtMs = progressNow
+                                lastProgressPersistBytes = downloaded
+                                update(
+                                    original.copy(
+                                        status = STATUS_DOWNLOADING,
+                                        updatedAt = progressNow,
+                                        downloadedBytes = downloaded,
+                                        totalBytes = expectedTotal,
+                                        mimeType = response.header("Content-Type") ?: original.mimeType,
+                                        errorMessage = null
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
