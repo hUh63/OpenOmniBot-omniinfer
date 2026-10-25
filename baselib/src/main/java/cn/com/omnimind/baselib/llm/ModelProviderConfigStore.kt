@@ -19,6 +19,8 @@ object ModelProviderConfigStore {
     internal const val KEY_PROVIDER_BASE_URL = "model_provider_openai_base_url"
     internal const val KEY_PROVIDER_API_KEY = "model_provider_openai_api_key"
     private const val KEY_PROVIDER_PROFILES = "model_provider_profiles_v1"
+    /** 元数据解析失败时保留原始文本：便于恢复，也避免「先清空再覆盖」的连锁丢失。 */
+    private const val KEY_PROVIDER_PROFILES_UNREADABLE = "model_provider_profiles_unreadable_v1"
     private const val KEY_EDITING_PROFILE_ID = "model_provider_editing_profile_id"
     private const val KEY_BUILTIN_OFFICIAL_PROFILES_SEEDED =
         "model_provider_builtin_official_profiles_seeded_v2"
@@ -164,7 +166,14 @@ object ModelProviderConfigStore {
         val mmkv = MMKV.defaultMMKV()
         val deletedOfficialProfileIds = readDeletedOfficialProfileIds(mmkv)
         val storedProfilesRaw = mmkv.decodeString(KEY_PROVIDER_PROFILES)
-        val decodedProfiles = hydrateProfileSecrets(decodeProfilesJson(storedProfilesRaw))
+        val decodedOrNull = decodeProfilesJsonOrNull(storedProfilesRaw)
+        if (decodedOrNull == null) {
+            // 元数据损坏：只在内存里回落默认表，绝不写回（写回会连带删除已存密钥）。
+            runCatching { mmkv.encode(KEY_PROVIDER_PROFILES_UNREADABLE, storedProfilesRaw.orEmpty()) }
+            OmniLog.w(TAG, "provider profiles unreadable; kept raw metadata for recovery")
+            return appendOfficialPlatformProfile(defaultProfiles(deletedOfficialProfileIds))
+        }
+        val decodedProfiles = hydrateProfileSecrets(decodedOrNull)
         val storedProfiles = readActiveProfiles(
             mmkv = mmkv,
             deletedOfficialProfileIds = deletedOfficialProfileIds,
@@ -248,6 +257,7 @@ object ModelProviderConfigStore {
         return target
     }
 
+    @Synchronized
     fun replaceProfiles(
         profiles: List<ModelProviderProfile>,
         editingProfileId: String? = null
@@ -306,6 +316,7 @@ object ModelProviderConfigStore {
         return sanitized
     }
 
+    @Synchronized
     fun saveProfile(
         id: String? = null,
         name: String,
@@ -327,7 +338,13 @@ object ModelProviderConfigStore {
             wireApi = wireApi
         )
         val normalizedCustomHeaders = ProviderCustomHeaderUtils.sanitizeCustomHeaders(customHeaders)
-        val normalizedBaseUrl = normalizeBaseUrl(baseUrl).orEmpty()
+        val normalizedBaseUrlOrNull = normalizeBaseUrl(baseUrl)
+        // 非法地址以前被 orEmpty() 存成空串：界面显示「保存成功」，Provider 其实立刻
+        // 变成未配置（agent 下一次请求就失败），而原来的可用地址已被覆盖、无法回滚。
+        require(!(baseUrl.isNotBlank() && normalizedBaseUrlOrNull == null)) {
+            "Base URL 格式不正确，请填写完整地址，例如 https://api.example.com/v1"
+        }
+        val normalizedBaseUrl = normalizedBaseUrlOrNull.orEmpty()
         if (normalizedBaseUrl.isNotEmpty()) {
             ContentEndpointSecurity.requireSafe(
                 rawUrl = stripDirectRequestUrlMarker(normalizedBaseUrl),
@@ -384,6 +401,7 @@ object ModelProviderConfigStore {
         return nextProfile
     }
 
+    @Synchronized
     fun deleteProfile(profileId: String): List<ModelProviderProfile> {
         ModelProviderMigration.ensureMigrated()
         val mmkv = MMKV.defaultMMKV()
@@ -405,6 +423,17 @@ object ModelProviderConfigStore {
 
         markDeletedOfficialProfileIfNeeded(mmkv, normalizedId)
         writeProfiles(mmkv, current)
+        // 场景绑定只存 (providerProfileId, modelId)：Provider 删掉后绑定成为悬空引用，
+        // agent 会继续拿旧模型名去打一个已不存在的端点，报错信息完全看不出原因。
+        runCatching {
+            val bindings = SceneModelBindingStore.getBindingEntries()
+            val remaining = bindings.filterNot { it.providerProfileId == normalizedId }
+            if (remaining.size != bindings.size) {
+                SceneModelBindingStore.replaceBindings(remaining)
+            }
+        }.onFailure { error ->
+            OmniLog.w(TAG, "clear scene bindings after delete failed: ${error.message}")
+        }
         val editingId = mmkv.decodeString(KEY_EDITING_PROFILE_ID)?.trim().orEmpty()
         if (editingId == normalizedId || editingId.isEmpty()) {
             mmkv.encode(KEY_EDITING_PROFILE_ID, current.first().id)
@@ -785,7 +814,16 @@ object ModelProviderConfigStore {
         }
     }
 
-    internal fun decodeProfilesJson(raw: String?): List<ModelProviderProfile> {
+    internal fun decodeProfilesJson(raw: String?): List<ModelProviderProfile> =
+        decodeProfilesJsonOrNull(raw) ?: emptyList()
+
+    /**
+     * null 表示「有内容但解析失败」（数据可能损坏），空表表示「确实没有配置」。
+     * 以前两者都返回空表，调用方据此认为「从未配置」，用默认表覆盖写回，而
+     * writeProfiles 会 deleteProfilesExcept 把 Keystore 里的 apiKey 一并删掉 ——
+     * 一条字段不兼容的旧记录就让用户所有 Provider（含密钥）永久消失。
+     */
+    internal fun decodeProfilesJsonOrNull(raw: String?): List<ModelProviderProfile>? {
         val normalizedRaw = raw
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
@@ -794,7 +832,7 @@ object ModelProviderConfigStore {
             decodeProfilesJsonStrict(normalizedRaw)
         } catch (e: Exception) {
             OmniLog.w(TAG, "read provider profiles failed type=${e.javaClass.simpleName}")
-            emptyList()
+            null
         }
     }
 
@@ -1033,7 +1071,8 @@ object ModelProviderConfigStore {
     private fun writeProfiles(mmkv: MMKV, profiles: List<ModelProviderProfile>) {
         val store = requireSecretStore()
         check(store.isAvailable()) {
-            "Secure model-provider credential storage is unavailable"
+            "系统安全存储不可用（常见于更换设备、恢复备份或清除锁屏密码后），" +
+                "暂时无法保存模型服务配置。请重启应用后重试，仍失败可清除应用数据后重新登录。"
         }
         val safeProfiles = profiles.map(::enforceCredentialTransport)
         val previousMetadata = mmkv.decodeString(KEY_PROVIDER_PROFILES)
