@@ -287,7 +287,10 @@ class WorkspaceMemoryService(
     fun writeLongTermMemory(content: String) {
         ensureInitialized()
         synchronized(memoryWriteLock()) {
-            workspaceManager.longTermMemoryMarkdownFile().writeText(content.trimEnd() + "\n")
+            writeTextAtomically(
+                workspaceManager.longTermMemoryMarkdownFile(),
+                content.trimEnd() + "\n"
+            )
         }
     }
 
@@ -378,7 +381,7 @@ class WorkspaceMemoryService(
                 }
                 Triple(file, updated, indexes.size)
             }
-            plans.forEach { (file, content, _) -> file.writeText(content) }
+            plans.forEach { (file, content, _) -> writeTextAtomically(file, content) }
             // Remove affected derived chunks immediately; the existing search path
             // rebuilds them from the remaining source text on its next query.
             val sources = plans.map { ".omnibot/memory/short-memories/${it.first.name}" }.toSet()
@@ -1731,7 +1734,26 @@ class WorkspaceMemoryService(
 
     private fun writeDailyMemoryLines(file: File, lines: List<String>) {
         val text = if (lines.isEmpty()) "" else lines.joinToString("\n").trimEnd() + "\n"
-        file.writeText(text)
+        writeTextAtomically(file, text)
+    }
+
+    /**
+     * 先写临时文件再 rename 替换。直接 writeText 是「先截断再写」：进程在写一半被杀
+     * （后台清理、系统回收、闪退）或磁盘写满，用户内容就停在半截或 0 字节 —— 而
+     * 短期记忆和 MEMORY.md 都不可重建。索引早就有同样的 .tmp + .bak 保护。
+     */
+    private fun writeTextAtomically(file: File, text: String) {
+        val parent = file.parentFile
+        parent?.mkdirs()
+        val temp = File(parent, file.name + ".tmp")
+        temp.writeText(text)
+        runCatching { temp.renameTo(file) }.onFailure { error ->
+            OmniLog.w(TAG, "atomic rename failed for ${file.name}: ${error.message}")
+        }.onSuccess { renamed ->
+            if (!renamed) {
+                OmniLog.w(TAG, "atomic rename returned false for ${file.name}")
+            }
+        }
     }
 
     private fun extractTimestampAndBody(item: String): Pair<String, String> {

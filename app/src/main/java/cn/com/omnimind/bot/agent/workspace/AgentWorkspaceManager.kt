@@ -597,7 +597,14 @@ class AgentWorkspaceManager(
         return if (relative.isBlank()) {
             rootDir
         } else {
-            File(rootDir, relative)
+            // 里面有 ".." 时 File(rootDir, relative) 会走出工作区：/workspace/../../shared_prefs
+            // 就是 App 私有目录（provider API Key、会话库都在那），附件读取会把它们读进模型
+            // 上下文。和 resolvePath() 一样补 canonical 化 + 边界校验。
+            val base = rootDir.canonicalFile
+            val candidate = File(base, relative).canonicalFile
+            candidate.takeIf {
+                it == base || it.absolutePath.startsWith(base.absolutePath + File.separator)
+            }
         }
     }
 

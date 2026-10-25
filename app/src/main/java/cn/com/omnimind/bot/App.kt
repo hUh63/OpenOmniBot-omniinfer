@@ -33,10 +33,13 @@ import com.rk.resources.Res
 import com.tencent.mmkv.MMKV
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineGroup
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 class App : BaseApplication() {
     companion object {
@@ -126,11 +129,25 @@ class App : BaseApplication() {
 
         NestedBackgroundStateUtil.init(this)
         cn.com.omnimind.baselib.llm.ModelSceneRegistry.init(this)
-        runCatching {
-            val workspaceManager = AgentWorkspaceManager(this)
-            workspaceManager.ensureRuntimeDirectories()
-            SkillIndexService(this, workspaceManager).seedBuiltinSkillsIfNeeded()
+        // 升级后首次启动时 ensureRuntimeDirectories() 会迁移旧工作区（copyRecursively 整棵
+        // 目录树）并复制内置资源，原本同步跑在 onCreate 主线程 —— 文件多时白屏甚至 ANR。
+        // 移到后台线程；下面恢复插件前必须等 seed 完成（两条路径会写同一个 skills 目录），
+        // 所以最多等 2 秒，真正的大迁移留在后台继续。
+        val workspaceSeed = CompletableDeferred<Unit>()
+        val workspaceSeedThread = Thread {
+            runCatching {
+                val workspaceManager = AgentWorkspaceManager(this)
+                workspaceManager.ensureRuntimeDirectories()
+                SkillIndexService(this, workspaceManager).seedBuiltinSkillsIfNeeded()
+            }.onFailure { error ->
+                OmniLog.w("AppStartup", "Workspace seed failed: ${error.message}")
+            }
+            workspaceSeed.complete(Unit)
         }
+        workspaceSeedThread.name = "workspace-seed"
+        workspaceSeedThread.isDaemon = true
+        workspaceSeedThread.start()
+        runBlocking { withTimeoutOrNull(2_000L) { workspaceSeed.await() } }
         // Seed built-in skills before restoring enabled runtime-bundle plugins.
         // Both paths materialize files under the same skills directory; starting
         // plugin recovery first can race the seeder and leave the plugin disabled.
