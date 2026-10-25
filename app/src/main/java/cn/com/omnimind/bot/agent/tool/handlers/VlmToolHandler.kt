@@ -55,6 +55,11 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 OmniVlmPlugin.RUN_LOG_TOOL,
                 helper.localized("缺少 goal"),
             )
+        // 前置的 progress 回调、插件开关读取、失败落库、权限查询、模型路由解析都可能抛
+        // 异常（存储写失败、Shizuku 查询失败、配置读取异常）。它们以前在 try 之外，一旦
+        // 抛出就没有任何工具结果返回：回合被判失败，而 assistant(tool_calls) 已进历史，
+        // 缺配对的 tool 消息会让该会话后续每轮都被 provider 400。
+        return try {
         val runId = "gui-${UUID.randomUUID()}"
         toolHandle.bindStopAction {
             OmniVlmPlugin.stop(runId)
@@ -97,7 +102,6 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 message = message,
             )
         }
-        return try {
             val execution = OmniVlmPlugin.execute(
                 context = helper.context,
                 request = OmniVlmPlugin.Request(

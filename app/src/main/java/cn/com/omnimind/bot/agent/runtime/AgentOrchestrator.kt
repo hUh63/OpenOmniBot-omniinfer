@@ -133,6 +133,14 @@ class AgentOrchestrator(
         // unit).  Allow exactly one pre-output recovery through the canonical
         // compactor; never replay a round after visible model output.
         var contextOverflowRecoveryAttempted = false
+        // 执行阶段抛出的异常会直接结束整个回合，但 assistant(tool_calls) 早已写入历史：
+        // 缺配对的 tool 消息会让 provider 对这个会话之后**每一轮**都回 400
+        // （tool_calls must be followed by tool messages），用户只能新建会话。
+        // 这里保留最近一轮的调用上下文，异常收尾时补写「未完成」结果。
+        var interruptableAssistantMessage: ChatCompletionMessage? = null
+        var interruptableToolCalls: List<AssistantToolCall> = emptyList()
+        var interruptableDescriptorMap: MutableMap<String, AgentToolRegistry.RuntimeToolDescriptor> = mutableMapOf()
+        var interruptableWrittenIds: MutableSet<String> = linkedSetOf()
         val toolBudget = AgentContextBudget.textTokens(json.encodeToString(toolRegistry.toolsForModel))
             .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
@@ -313,6 +321,12 @@ class AgentOrchestrator(
                 val parsedArgsMap = mutableMapOf<String, JsonObject>()
                 val validatedCalls = mutableListOf<AssistantToolCall>()
                 val writtenToolCallIds = linkedSetOf<String>()
+                if (toolCalls.isNotEmpty()) {
+                    interruptableAssistantMessage = assistantMessageForMemory
+                    interruptableToolCalls = toolCalls
+                    interruptableDescriptorMap = descriptorMap
+                    interruptableWrittenIds = writtenToolCallIds
+                }
 
                 // Phase A — parse + validate all tool arguments synchronously.
                 // Any parse/validation failure aborts the current turn's tool execution
@@ -517,6 +531,27 @@ class AgentOrchestrator(
             // this result to PromptResponse(CANCELLED).
             return AgentResult.Error("Agent execution cancelled", e)
         } catch (e: Exception) {
+            val interruptedCalls = interruptableToolCalls
+            if (interruptedCalls.isNotEmpty()) {
+                runCatching {
+                    appendSyntheticToolResultMessages(
+                        memory = memory,
+                        env = input.executionEnv,
+                        callback = callback,
+                        assistantMessage = interruptableAssistantMessage ?: return@runCatching,
+                        toolCalls = interruptedCalls,
+                        descriptorMap = interruptableDescriptorMap,
+                        writtenToolCallIds = interruptableWrittenIds,
+                        round = completedModelRounds,
+                        reason = t(
+                            "工具执行被中断，本轮未完成的调用已标记为未完成。",
+                            "Tool execution was interrupted, so this round's unfinished calls were marked as not completed."
+                        )
+                    )
+                }.onFailure { error ->
+                    logInfo(tag, "interrupt backfill failed: ${error.message}")
+                }
+            }
             // A retry is always an explicit new user send.  Do not infer a
             // different UI action from provider-specific status codes or
             // error strings: that turns transport heuristics into a private

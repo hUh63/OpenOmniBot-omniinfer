@@ -635,8 +635,21 @@ class FileToolHandler(
             if (overwrite && target.exists()) {
                 target.deleteRecursively()
             }
-            source.copyRecursively(target, overwrite = overwrite)
-            source.deleteRecursively()
+            // copyRecursively 默认不抛异常：碰到 IO 错误它会停下并返回 false。旧代码
+            // 既忽略返回值，又无条件 deleteRecursively(source) —— 复制失败时源文件被删、
+            // 目标不存在，却回 success=true，模型以为移动成功继续往下做（改配置、跑构建、
+            // 回复用户已完成），用户的数据已经没了。
+            val copied = runCatching { source.copyRecursively(target, overwrite = overwrite) }
+                .getOrElse { error ->
+                    throw IllegalStateException(
+                        "复制失败，源文件已保留：${error.message ?: error.javaClass.simpleName}"
+                    )
+                }
+            check(copied) { "复制失败，源文件已保留：${source.absolutePath}" }
+            val removedSource = source.deleteRecursively()
+            check(removedSource || !source.exists()) {
+                "已复制到目标，但源文件删除失败：${source.absolutePath}"
+            }
             val artifact = target.takeIf { it.isFile }?.let { workspaceManager.buildArtifactForFile(it, toolName) }
             val payload = linkedMapOf<String, Any?>(
                 "sourcePath" to (workspaceManager.shellPathForAndroid(source) ?: source.absolutePath),

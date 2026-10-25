@@ -57,12 +57,18 @@ class BrowserToolHandler(
             )
             val payload = linkedMapOf<String, Any?>("toolTitle" to request.toolTitle).apply { putAll(outcome.payload) }
             val encoded = helper.encodeLocalizedPayload(payload)
+            // 引擎把失败写在 payload 里而不是抛异常（风控拦截、下载失败）。以前一律
+            // success=true：模型据此继续自动点击而不是停下来请用户接管，历史/统计里
+            // 100% 的浏览器动作都是「成功」，真实失败率被完全掩盖。
+            val outcomeFailed = payload["blockedByRiskChallenge"] == true ||
+                payload["status"]?.toString()?.equals("failed", ignoreCase = true) == true ||
+                payload["errorMessage"]?.toString()?.isNotBlank() == true
             ToolExecutionResult.ContextResult(
                 toolName = toolName,
                 summaryText = helper.localized(outcome.summaryText),
                 previewJson = encoded,
                 rawResultJson = encoded,
-                success = true,
+                success = !outcomeFailed,
                 imageDataUrl = outcome.imageDataUrl,
                 artifacts = outcome.artifacts,
                 workspaceId = env.workspaceDescriptor.id,
