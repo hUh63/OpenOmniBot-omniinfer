@@ -30,6 +30,7 @@ import java.io.File
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +76,9 @@ private data class VoiceCacheEntry(
     val key: String,
     val format: String,
     val pcmBytes: ByteArray? = null,
-    val wavFile: File? = null
+    val wavFile: File? = null,
+    /** 流式合成因空闲超时被截断：可播放，但不能进缓存（否则重播永远只有前一段）。 */
+    val incomplete: Boolean = false
 )
 
 class SceneVoicePlaybackManager(
@@ -90,6 +93,10 @@ class SceneVoicePlaybackManager(
         private const val BYTES_PER_SAMPLE = 2
         private const val MAX_CACHE_SIZE = 48
         private const val MAX_BYOK_AUDIO_BYTES = 16L * 1024L * 1024L
+        /** 流式合成只要还在收事件就一直等，只有真的静默这么久才判定断流。 */
+        private const val STREAM_IDLE_TIMEOUT_MS = 60_000L
+        /** PCM 缓存的总字节上限：只按条数淘汰时，48 条 × 16MB 最坏 ~768MB 全在堆里。 */
+        private const val MAX_CACHE_TOTAL_BYTES = 64L * 1024L * 1024L
         private const val MAX_BYOK_JSON_BYTES = 24L * 1024L * 1024L
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
@@ -129,7 +136,8 @@ class SceneVoicePlaybackManager(
     private val replayableKeysByMessageId = mutableMapOf<String, MutableSet<String>>()
     private val cache = object : LinkedHashMap<String, VoiceCacheEntry>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, VoiceCacheEntry>?): Boolean {
-            val shouldRemove = size > MAX_CACHE_SIZE
+            val totalBytes = values.sumOf { entry -> (entry.pcmBytes?.size ?: 0).toLong() }
+            val shouldRemove = size > MAX_CACHE_SIZE || totalBytes > MAX_CACHE_TOTAL_BYTES
             if (shouldRemove) {
                 eldest?.value?.wavFile?.takeIf { it.exists() }?.delete()
                 replayableKeysByMessageId.values.forEach { keys ->
@@ -163,6 +171,9 @@ class SceneVoicePlaybackManager(
 
     @Volatile
     private var currentStopRequested = false
+
+    @Volatile
+    private var currentPaused = false
 
     fun setEventEmitter(emitter: ((Map<String, Any?>) -> Unit)?) {
         eventEmitter = emitter
@@ -213,6 +224,7 @@ class SceneVoicePlaybackManager(
         if (!messageId.isNullOrBlank() && messageId.trim() != currentId) {
             return false
         }
+        currentPaused = true
         currentAudioTrack?.pause()
         currentMediaPlayer?.takeIf { it.isPlaying }?.pause()
         emitState(currentId, "paused")
@@ -224,6 +236,7 @@ class SceneVoicePlaybackManager(
         if (!messageId.isNullOrBlank() && messageId.trim() != currentId) {
             return false
         }
+        currentPaused = false
         currentAudioTrack?.play()
         currentMediaPlayer?.start()
         emitState(currentId, "playing", canReplay = hasReplayableCache(currentId))
@@ -442,14 +455,21 @@ class SceneVoicePlaybackManager(
         if (item.preferStreaming) {
             val streamed = synthesizeStreaming(item)
             if (streamed != null) {
-                synchronized(lock) {
-                    cache[item.cacheKey] = streamed
-                    replayableKeysByMessageId
-                        .getOrPut(item.messageId) { linkedSetOf() }
-                        .add(item.cacheKey)
+                // 被空闲超时截断的音频只播这一次：写进缓存会让「重播」永远只有前面一段。
+                if (!streamed.incomplete) {
+                    synchronized(lock) {
+                        cache[item.cacheKey] = streamed
+                        replayableKeysByMessageId
+                            .getOrPut(item.messageId) { linkedSetOf() }
+                            .add(item.cacheKey)
+                    }
                 }
                 return
             }
+            // 用户点了停止 / 换成另一条消息朗读：这不是「流式失败」。以前这里会继续
+            // 走 synthesizeNonStreaming，把整段文字重新合成再播一遍 —— 表现为点了停止
+            // 之后 1~3 秒同一段又开始念，而且这条路径连 cancel 都登记不上。
+            if (currentStopRequested) return
         }
         val cached = synthesizeNonStreaming(item)
         if (cached == null) {
@@ -521,6 +541,7 @@ class SceneVoicePlaybackManager(
         var parseFailed = false
         var sawAudio = false
         var failureType: String? = null
+        val lastEventAtMs = AtomicLong(System.currentTimeMillis())
 
         val listener = object : EventSourceListener() {
             override fun onEvent(
@@ -529,6 +550,7 @@ class SceneVoicePlaybackManager(
                 type: String?,
                 data: String
             ) {
+                lastEventAtMs.set(System.currentTimeMillis())
                 if (data.trim() == "[DONE]") {
                     latch.countDown()
                     return
@@ -558,7 +580,12 @@ class SceneVoicePlaybackManager(
                     it.play()
                 }
                 output.write(bytes)
-                track.write(bytes, 0, bytes.size)
+                // 用户点停止时主线程会 release 这个轨道，write 抛出的
+                // IllegalStateException 不该让整个 SSE 线程失败。
+                val written = runCatching { track.write(bytes, 0, bytes.size) }
+                if (written.isFailure) {
+                    latch.countDown()
+                }
             }
 
             override fun onClosed(eventSource: EventSource) {
@@ -580,8 +607,26 @@ class SceneVoicePlaybackManager(
             allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
         )
         currentEventSource = source
-        withContext(Dispatchers.IO) {
-            latch.await(90, TimeUnit.SECONDS)
+        // 边收边播时「总时长」不能当超时：一段三分钟的朗读必然超过 90 秒，旧的上限会把
+        // 长文截断、把截断结果写进缓存（重播只剩前 90 秒），而且在流还开着时就把引用
+        // 置空 —— 下一条事件会新建一个 AudioTrack 继续出声且永不释放。改成空闲超时。
+        var completed = false
+        while (!completed) {
+            completed = withContext(Dispatchers.IO) { latch.await(500, TimeUnit.MILLISECONDS) }
+            if (completed) break
+            if (currentStopRequested) break
+            if (System.currentTimeMillis() - lastEventAtMs.get() > STREAM_IDLE_TIMEOUT_MS) break
+        }
+        val truncated = !completed
+        if (truncated) {
+            // 必须主动 cancel：否则 SSE 线程继续推事件，而 finally 里已经把
+            // currentAudioTrack 置空，下一条事件会另开一个轨道继续播。
+            currentEventSource?.cancel()
+            OmniLog.w(
+                TAG,
+                "streaming tts idle timeout after ${STREAM_IDLE_TIMEOUT_MS}ms, " +
+                    "bytes=${output.size()}"
+            )
         }
         currentEventSource = null
         if (currentStopRequested) {
@@ -597,7 +642,8 @@ class SceneVoicePlaybackManager(
         return VoiceCacheEntry(
             key = item.cacheKey,
             format = STREAM_PCM_FORMAT,
-            pcmBytes = output.toByteArray()
+            pcmBytes = output.toByteArray(),
+            incomplete = truncated
         )
     }
 
@@ -792,17 +838,38 @@ class SceneVoicePlaybackManager(
             latch.countDown()
             true
         }
-        mediaPlayer.prepare()
-        emitState(messageId, "playing", canReplay = true)
-        mediaPlayer.start()
-        withContext(Dispatchers.IO) {
+        // 用户可能在 prepare()（阻塞解析）期间点了停止/换了消息：主线程已经把这个
+        // player release 掉，这里再调用只会抛 IllegalStateException 并被当成「播放失败」
+        // 弹错误。被停止时静默退出即可。
+        val started = runCatching {
+            mediaPlayer.prepare()
+            emitState(messageId, "playing", canReplay = true)
+            mediaPlayer.start()
+        }
+        if (started.isFailure) {
+            if (currentStopRequested) return
+            throw started.exceptionOrNull() ?: IllegalStateException("voice playback failed")
+        }
+        val finished = withContext(Dispatchers.IO) {
             latch.await(120, TimeUnit.SECONDS)
+        }
+        if (currentStopRequested) return
+        if (!finished) {
+            // 没等到 onCompletion/onError 说明播放卡住了（解码异常、音频焦点丢失）。
+            // 不标记完成，也不让上层以为播完了。
+            OmniLog.w(TAG, "media player playback timed out file=${file.name}")
+            throw IllegalStateException("voice playback timed out")
         }
         emitState(messageId, "completed", canReplay = true)
     }
 
     private suspend fun waitForPcmPlayback(totalBytes: Int) {
         val totalFrames = totalBytes / (CHANNEL_COUNT * BYTES_PER_SAMPLE)
+        // 暂停时 playbackHeadPosition 冻结，下面的完成条件永远不成立；旧实现没有超时，
+        // 这里会一直自旋 → processLoop 永不出队 → 后面排队的段落全部饿死（体感是
+        // 「暂停一次之后语音就废了」）。按音频时长给上限，暂停期间不消耗配额。
+        var budgetMs = totalFrames.toLong() * 1000L / SAMPLE_RATE * 2 + 60_000L
+        var lastTickAt = System.currentTimeMillis()
         while (true) {
             if (currentStopRequested) {
                 return
@@ -811,6 +878,15 @@ class SceneVoicePlaybackManager(
             val playedFrames = track.playbackHeadPosition
             if (playedFrames >= totalFrames - 128) {
                 delay(40)
+                return
+            }
+            val now = System.currentTimeMillis()
+            if (!currentPaused) {
+                budgetMs -= (now - lastTickAt)
+            }
+            lastTickAt = now
+            if (budgetMs <= 0L) {
+                OmniLog.w(TAG, "pcm playback wait timed out frames=$totalFrames")
                 return
             }
             delay(40)
@@ -893,6 +969,7 @@ class SceneVoicePlaybackManager(
 
     private fun stopCurrentPlaybackLocked() {
         currentStopRequested = true
+        currentPaused = false
         currentEventSource?.cancel()
         currentEventSource = null
         currentPlatformCall?.cancel()
@@ -901,21 +978,25 @@ class SceneVoicePlaybackManager(
     }
 
     private fun releaseCurrentPlaybackResources() {
-        currentAudioTrack?.runCatching {
+        // 先摘引用再释放：SSE 回调线程可能正在 write，若它拿到的是「已 release 但还没
+        // 置空」的轨道会抛 IllegalStateException；置空后它最多重建一个新轨道。
+        val track = currentAudioTrack
+        currentAudioTrack = null
+        track?.runCatching {
             pause()
             flush()
             stop()
             release()
         }
-        currentAudioTrack = null
-        currentMediaPlayer?.runCatching {
+        val player = currentMediaPlayer
+        currentMediaPlayer = null
+        player?.runCatching {
             if (isPlaying) {
                 stop()
             }
             reset()
             release()
         }
-        currentMediaPlayer = null
     }
 
     private fun emitState(

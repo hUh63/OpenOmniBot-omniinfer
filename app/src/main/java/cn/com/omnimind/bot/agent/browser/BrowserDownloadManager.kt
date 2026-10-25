@@ -207,7 +207,7 @@ class BrowserDownloadManager(
             val existingSize = if (partFile.exists()) partFile.length() else 0L
             val ifRange = if (existingSize > 0L) {
                 runCatching { etagFile.readText().trim() }.getOrNull().orEmpty()
-            } else 
+            } else ""
             update(
                 original.copy(
                     status = STATUS_DOWNLOADING,
