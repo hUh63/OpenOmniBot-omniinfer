@@ -209,6 +209,16 @@ class WorkspaceScheduledTaskScheduler(
                 val expired = task.copy(enabled = false, nextExecutionTime = null)
                 nextMap[task.taskId] = expired
                 upsertTaskInFlutterStorage(expired)
+                // 静默停用是最难排查的一种：任务列表还在，但再也不会执行。
+                // 至少告诉用户「错过时间已停用，请重新设置」。
+                if (expired.notificationEnabled) {
+                    ScheduledTaskResultNotifier.notifyProblem(
+                        context = appContext,
+                        taskId = expired.taskId,
+                        title = expired.title,
+                        summary = "已错过设定时间，任务已停用。请重新设置时间后启用。"
+                    )
+                }
                 return@forEach
             }
             val nextExecution = resolveNextExecutionAt(
@@ -265,6 +275,14 @@ class WorkspaceScheduledTaskScheduler(
             persistTaskMap(taskMap)
             cancelAlarm(normalizedId)
             upsertTaskInFlutterStorage(failed)
+            if (failed.notificationEnabled) {
+                ScheduledTaskResultNotifier.notifyProblem(
+                    context = appContext,
+                    taskId = failed.taskId,
+                    title = failed.title,
+                    summary = "任务执行失败，已停用。打开应用查看详情或重新启用。"
+                )
+            }
         } else {
             taskMap.remove(normalizedId)
             persistTaskMap(taskMap)

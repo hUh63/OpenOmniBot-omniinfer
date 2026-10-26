@@ -561,6 +561,78 @@ class QuickLogService(private val context: Context) {
         }.getOrNull()
     }
 
+    /**
+     * 提醒响过之后，把重复任务的下一次提醒排上。
+     * 以前 repeatRule 只用来生成文案标签，从不参与排程：「每天 9 点提醒我吃药」
+     * 第二天起就彻底不再响，用户会认为提醒功能坏了。
+     */
+    fun rescheduleRepeatAfterRing(alarmId: String) {
+        val normalized = alarmId.trim()
+        if (normalized.isEmpty()) return
+        val current = loadRecords()
+        val index = current.indexOfFirst { it.reminderAlarmId == normalized }
+        if (index < 0) return
+        val record = current[index]
+        if (record.isCompleted) return
+        val nextAt = nextRepeatAtMillis(record.repeatRule, record.reminderAtMillis) ?: return
+        val nextAlarmId = scheduleReminder(
+            recordId = record.id,
+            content = record.content,
+            reminderAtMillis = nextAt
+        )
+        val updated = current.toMutableList()
+        updated[index] = record.copy(
+            reminderAtMillis = nextAt,
+            reminderAlarmId = nextAlarmId,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        saveRecords(updated.sortedByDescending { it.updatedAtMillis }.take(MAX_RECORDS))
+        QuickLogWidgetUpdater.updateAll(context)
+    }
+
+    private fun nextRepeatAtMillis(repeatRule: String?, fromMillis: Long?): Long? {
+        var next = fromMillis ?: return null
+        val now = System.currentTimeMillis()
+        // App 可能几天没打开：一次响铃要补齐到今天之后的第一班，guard 防止死循环。
+        var guard = 0
+        while (next <= now && guard < 500) {
+            next = advanceRepeat(repeatRule, next) ?: return null
+            guard++
+        }
+        return next.takeIf { it > now }
+    }
+
+    private fun advanceRepeat(repeatRule: String?, fromMillis: Long): Long? {
+        val zone = ZoneId.systemDefault()
+        val current = Instant.ofEpochMilli(fromMillis).atZone(zone)
+        val next = when (repeatRule) {
+            REPEAT_DAILY -> current.plusDays(1)
+            REPEAT_WEEKDAYS -> {
+                var candidate = current.plusDays(1)
+                while (candidate.dayOfWeek == java.time.DayOfWeek.SATURDAY ||
+                    candidate.dayOfWeek == java.time.DayOfWeek.SUNDAY
+                ) {
+                    candidate = candidate.plusDays(1)
+                }
+                candidate
+            }
+            REPEAT_WEEKLY -> current.plusWeeks(1)
+            REPEAT_MONTHLY -> current.plusMonths(1)
+            REPEAT_YEARLY -> current.plusYears(1)
+            else -> {
+                val parts = customRepeatParts(repeatRule) ?: return null
+                val (interval, unit) = parts
+                when (unit) {
+                    REPEAT_UNIT_WEEK -> current.plusWeeks(interval.toLong())
+                    REPEAT_UNIT_MONTH -> current.plusMonths(interval.toLong())
+                    REPEAT_UNIT_YEAR -> current.plusYears(interval.toLong())
+                    else -> current.plusDays(interval.toLong())
+                }
+            }
+        }
+        return next.toInstant().toEpochMilli()
+    }
+
     private fun cancelReminder(alarmId: String?) {
         val normalized = alarmId?.trim().orEmpty()
         if (normalized.isEmpty()) return

@@ -398,7 +398,27 @@ object ModelProviderConfigStore {
         clearDeletedOfficialProfileIfNeeded(mmkv, normalizedId)
         mmkv.encode(KEY_EDITING_PROFILE_ID, nextProfile.id)
         syncLegacyFlatConfig(mmkv, nextProfile)
+        // 端点被换掉（不是只改名字/密钥）时，原场景绑定的模型名大概率在新端点上不存在：
+        // agent 会拿旧模型名打新端点，报 400 model not found，而界面仍显示「已绑定 XX」。
+        // 绑定没存端点指纹，这里保守清理，让用户重新选一次。
+        if (existingProfile != null &&
+            existingProfile.baseUrl.trimEnd('/') != nextProfile.baseUrl.trimEnd('/')
+        ) {
+            clearSceneBindingsFor(nextProfile.id)
+        }
         return nextProfile
+    }
+
+    private fun clearSceneBindingsFor(profileId: String) {
+        runCatching {
+            val bindings = SceneModelBindingStore.getBindingEntries()
+            val remaining = bindings.filterNot { it.providerProfileId == profileId }
+            if (remaining.size != bindings.size) {
+                SceneModelBindingStore.replaceBindings(remaining)
+            }
+        }.onFailure { error ->
+            OmniLog.w(TAG, "clear scene bindings failed for $profileId: ${error.message}")
+        }
     }
 
     @Synchronized
@@ -425,15 +445,7 @@ object ModelProviderConfigStore {
         writeProfiles(mmkv, current)
         // 场景绑定只存 (providerProfileId, modelId)：Provider 删掉后绑定成为悬空引用，
         // agent 会继续拿旧模型名去打一个已不存在的端点，报错信息完全看不出原因。
-        runCatching {
-            val bindings = SceneModelBindingStore.getBindingEntries()
-            val remaining = bindings.filterNot { it.providerProfileId == normalizedId }
-            if (remaining.size != bindings.size) {
-                SceneModelBindingStore.replaceBindings(remaining)
-            }
-        }.onFailure { error ->
-            OmniLog.w(TAG, "clear scene bindings after delete failed: ${error.message}")
-        }
+        clearSceneBindingsFor(normalizedId)
         val editingId = mmkv.decodeString(KEY_EDITING_PROFILE_ID)?.trim().orEmpty()
         if (editingId == normalizedId || editingId.isEmpty()) {
             mmkv.encode(KEY_EDITING_PROFILE_ID, current.first().id)

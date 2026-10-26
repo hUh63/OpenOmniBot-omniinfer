@@ -30,6 +30,60 @@ object ScheduledTaskResultNotifier {
     /** 调度器给 run 打的 taskId 前缀，用来识别「这是定时任务触发的 run」。 */
     const val RUN_TASK_ID_PREFIX = "subagent_schedule_"
 
+    /**
+     * 任务没有按时执行（错过触发时间被停用 / 启动就失败）时必须让用户知道：
+     * 静默停用是最难排查的一种，用户会以为任务还在按计划跑。
+     */
+    fun notifyProblem(
+        context: Context,
+        taskId: String,
+        title: String?,
+        summary: String
+    ) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                manager.getNotificationChannel(CHANNEL_ID) == null
+            ) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        CHANNEL_ID,
+                        CHANNEL_NAME,
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    )
+                )
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                taskId.hashCode(),
+                Intent(context, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra("scheduledTaskId", taskId)
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_popup_reminder)
+                .setContentTitle(title?.trim()?.takeIf { it.isNotEmpty() } ?: "定时任务")
+                .setContentText(summary)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(summary))
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+            NotificationManagerCompat.from(context).notify(taskId.hashCode(), notification)
+        } catch (error: Exception) {
+            OmniLog.w(TAG, "notify scheduled task problem failed: ${error.message}")
+        }
+    }
+
     fun notifyResult(
         context: Context,
         conversationId: Long,

@@ -102,6 +102,11 @@ class AgentAlarmReceiver : BroadcastReceiver() {
             title = title,
             message = message
         )
+        // 重复待办（每天/每周…）：响过之后必须把下一次排上，否则第二天起再也不会响。
+        runCatching {
+            cn.com.omnimind.bot.quicklog.QuickLogService(context)
+                .rescheduleRepeatAfterRing(alarmId)
+        }
     }
 
     private fun showPreAlertNotification(
