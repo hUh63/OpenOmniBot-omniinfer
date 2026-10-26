@@ -346,12 +346,27 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return;
     }
     final requestKey = target.requestKey ?? message;
-    if (!_consumedInitialMessageRequests.add(requestKey)) return;
+    if (_consumedInitialMessageRequests.contains(requestKey)) return;
     // This method is invoked by _applyConversationThreadTarget while the
     // bootstrap Future is still running. The conversation has already been
     // initialized above, so waiting for that same Future inside _sendMessage
     // would deadlock the initial prompt (notably OmniFlow enhancement).
+    //
+    // 只有「这一轮真的开始了」才把 requestKey 记为已消费。原来在调用前就 add：
+    // _sendMessage 里任何一条早退（同一 target 已有发送在飞 / 正在回复 / 模型未配置 /
+    // Harness 切换未完成）都会让这条初始消息永久丢失，且再进同一深链也会被去重掉。
+    final wasBusy = isAiResponding || _currentDispatchTurnId != null;
+    final messageCountBefore = _messages.length;
     await _sendMessage(text: message, waitForBootstrap: false);
+    final started = (!wasBusy &&
+            (isAiResponding || _currentDispatchTurnId != null)) ||
+        _messages.length != messageCountBefore;
+    if (!started) return;
+    _consumedInitialMessageRequests.add(requestKey);
+    // 只增不减的集合要封顶（这些 key 按深链请求生成，长期使用会一直累积）。
+    if (_consumedInitialMessageRequests.length > 64) {
+      _consumedInitialMessageRequests.remove(_consumedInitialMessageRequests.first);
+    }
   }
 
   void _restoreLocalAgentThreadIdFromTarget(ConversationThreadTarget target) {
@@ -812,6 +827,22 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     if (!mounted) {
       return;
     }
+    // 协作事件可能属于别的会话。原实现完全不看归属，直接 insert 到「当前可见列表」并按
+    // 当前会话落库 —— 既会把消息串到错误的会话里，也会让本该收到它的会话永远看不到。
+    // 现在：明确带了别的 conversationId 就丢弃（宁可少显示，也不能串台）。
+    final eventConversationId = int.tryParse(
+      event['conversationId']?.toString().trim() ?? '',
+    );
+    final currentConversationId = _currentConversationId;
+    if (eventConversationId != null &&
+        currentConversationId != null &&
+        eventConversationId != currentConversationId) {
+      debugPrint(
+        '[OmniLink] drop event for conversation $eventConversationId '
+        '(active: $currentConversationId)',
+      );
+      return;
+    }
     final kind = event['kind']?.toString();
     final eventId = kind == 'omnilink_agent_message'
         ? event['messageId']?.toString().trim() ?? ''
@@ -865,15 +896,22 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       _messages.insert(0, chatMessage);
     });
     final conversationId = _currentConversationId;
+    final runtime = _runtimeCoordinator.runtimeFor(
+      conversationId: conversationId ?? 0,
+      mode: _modeKey(_activeMode),
+    );
+    // 正在跑的回合里不要用「页面列表」当来源落库：那会和 reducer 的流式快照抢同一条
+    // 历史序列（expectedHistoryRevision 必然对不上，异常还会被 unawaited 吞掉）。
+    final liveTurn = runtime?.hasInFlightTask == true;
     if (conversationId != null &&
+        !liveTurn &&
         !isEphemeralConversation(conversationId, activeConversationModeValue)) {
       unawaited(
         _runtimeCoordinator.persistConversationMessageSnapshot(
           conversationId: conversationId,
           mode: _modeKey(_activeMode),
           messages: [chatMessage],
-          expectedHistoryRevision: _runtimeCoordinator.runtimeFor(
-            conversationId: conversationId, mode: _modeKey(_activeMode))?.historyRevision ?? 0,
+          expectedHistoryRevision: runtime?.historyRevision ?? 0,
           conversation: _currentConversation,
         ),
       );

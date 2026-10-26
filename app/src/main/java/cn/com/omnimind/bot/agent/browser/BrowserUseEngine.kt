@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
@@ -100,6 +101,10 @@ private const val PREVIEW_FRAME_JPEG_QUALITY = 72
 private const val PREVIEW_FRAME_MAX_WIDTH = 420
 /** 单引擎的标签页硬上限：每个 tab 都是一整套 WebView + 两个 JS bridge。 */
 private const val MAX_TAB_COUNT = 8
+/** WebChat 镜像面板动作的固定产物上下文（不随某次 AI run 结束而失效）。 */
+private const val HOST_PANEL_RUN_ID = "webchat-panel"
+/** 浏览器快照广播的最小间隔：把下载进度（300ms 一次）等高频触发合并掉。 */
+private const val MIN_SNAPSHOT_PUBLISH_INTERVAL_MS = 400L
 /** host 级限速时间戳的保留条目数（只按 host 记账，不清会随浏览站点数单调增长）。 */
 private const val MAX_HOST_THROTTLE_ENTRIES = 64
 private const val TYPE_INPUT_CHUNK_SIZE = 3
@@ -400,7 +405,9 @@ class BrowserUseEngine(
     private data class PendingExternalOpen(
         val requestId: String,
         val title: String,
-        val target: String
+        val target: String,
+        /** 发起请求的标签页：tab 被关掉后要连同回调一起清掉。 */
+        val tabId: Int = -1
     )
 
     private data class PendingDialog(
@@ -410,7 +417,9 @@ class BrowserUseEngine(
         val url: String? = null,
         val defaultValue: String? = null,
         val jsResult: JsResult? = null,
-        val jsPromptResult: JsPromptResult? = null
+        val jsPromptResult: JsPromptResult? = null,
+        /** 发起弹窗的标签页：关闭该 tab 必须 cancel，否则面板永远显示「有弹窗待处理」。 */
+        val tabId: Int = -1
     )
 
     private data class PendingPermissionPrompt(
@@ -419,7 +428,8 @@ class BrowserUseEngine(
         val origin: String,
         val resources: List<String>,
         val webPermissionRequest: WebPermissionRequest? = null,
-        val geolocationCallback: GeolocationPermissions.Callback? = null
+        val geolocationCallback: GeolocationPermissions.Callback? = null,
+        val tabId: Int = -1
     )
 
     private val json = Json {
@@ -641,6 +651,11 @@ class BrowserUseEngine(
     /** 已经被 closeSession 销毁：之后不允许再建 WebView。 */
     @Volatile
     private var destroyed: Boolean = false
+    /** 快照广播的最小间隔与合并状态（见 publishSnapshotUpdate）。 */
+    @Volatile
+    private var lastSnapshotPublishAt: Long = 0L
+    @Volatile
+    private var snapshotPublishPending: Boolean = false
     private val uiHandler = Handler(Looper.getMainLooper())
     private var currentWorkspace: AgentWorkspaceDescriptor = workspace
     private val hostStore = BrowserHostStore.create(workspace.id)
@@ -899,12 +914,20 @@ class BrowserUseEngine(
         request: BrowserUseRequest,
         agentRunId: String,
         workspace: AgentWorkspaceDescriptor,
+        resetAiControl: Boolean = true,
     ): BrowserUseOutcome {
         activeExecutionCount.incrementAndGet()
         return try {
             requireNotDestroyed()
             actionMutex.withLock {
                 bindRunContext(agentRunId = agentRunId, workspace = workspace)
+                if (resetAiControl) {
+                    // 新的一轮 AI run 视为重新授权：否则用户上次在面板上碰过页面
+                    // （ACTION_DOWN 会自动暂停 AI）之后，AI 会永久停在「控制已暂停」，
+                    // 而面板可能根本没打开、用户看不到恢复按钮，模型只能一轮轮失败。
+                    // 注意：用户在面板上手动点的动作不会走到这里（resetAiControl=false）。
+                    if (!aiControlEnabled) setAiControlInternal(true)
+                }
                 activeAgentRunId = agentRunId
                 try {
                     executeInternal(request)
@@ -915,6 +938,23 @@ class BrowserUseEngine(
         } finally {
             activeExecutionCount.decrementAndGet()
         }
+    }
+
+    /**
+     * WebChat 镜像面板发起的动作（用户在网页端亲自点按钮，不是 AI 调工具）。
+     *
+     * 必须绑一个稳定的产物上下文：原来走单参 execute()，currentAgentRunId 还是上一次
+     * 工具调用留下的值（可能那次 run 早已结束、目录已被回收），截图/下载/cookie 脚本
+     * 会落进旧 run 的目录，本次会话里查不到产物。这里用固定的 host 运行标识，
+     * 并且不重置 AI 控制权（用户手动操作不该把 AI 的暂停状态改回来）。
+     */
+    suspend fun executeFromHostPanel(request: BrowserUseRequest): BrowserUseOutcome {
+        return execute(
+            request = request,
+            agentRunId = HOST_PANEL_RUN_ID,
+            workspace = currentWorkspace,
+            resetAiControl = false,
+        )
     }
 
     private fun requireNotDestroyed() {
@@ -1004,12 +1044,6 @@ class BrowserUseEngine(
     ) {
         currentAgentRunId = agentRunId
         currentWorkspace = workspace
-        // 新的一轮 run 视为重新授权。否则用户上次在面板里碰过页面（ACTION_DOWN 会
-        // 自动暂停 AI）之后，AI 会永久停在「控制已暂停」——而面板可能根本没打开，
-        // 用户看不到「恢复 AI 控制」按钮，模型只能一轮轮失败到回合耗尽。
-        if (!aiControlEnabled) {
-            setAiControlInternal(true)
-        }
     }
 
     fun liveSessionSnapshot(): Map<String, Any?> {
@@ -1234,8 +1268,38 @@ class BrowserUseEngine(
         }
     }
 
+    /**
+     * 广播一次浏览器快照。
+     *
+     * 这里必须节流：下载进度回调每 300ms 触发一次、JS bridge 线程也会触发，而每次广播都要
+     * 全量构建快照（列历史/收藏/脚本/下载 + 每个 tab 的 copyBackForwardList），非主线程
+     * 还要 runBlocking 等主线程 —— 下载中的高频回调足以让面板掉帧、让 bridge 线程长时间
+     * 阻塞在 runBlocking 上。前缘立即发、后续合并到 MIN_SNAPSHOT_PUBLISH_INTERVAL_MS 之后。
+     */
     private fun publishSnapshotUpdate() {
-        FlutterChatSyncBridge.dispatchBrowserSnapshotUpdated(liveSessionSnapshot())
+        val now = SystemClock.uptimeMillis()
+        val elapsed = now - lastSnapshotPublishAt
+        if (elapsed >= MIN_SNAPSHOT_PUBLISH_INTERVAL_MS) {
+            lastSnapshotPublishAt = now
+            dispatchSnapshotUpdate()
+            return
+        }
+        if (snapshotPublishPending) return
+        snapshotPublishPending = true
+        uiHandler.postDelayed({
+            snapshotPublishPending = false
+            if (destroyed) return@postDelayed
+            lastSnapshotPublishAt = SystemClock.uptimeMillis()
+            dispatchSnapshotUpdate()
+        }, MIN_SNAPSHOT_PUBLISH_INTERVAL_MS - elapsed)
+    }
+
+    private fun dispatchSnapshotUpdate() {
+        runCatching {
+            FlutterChatSyncBridge.dispatchBrowserSnapshotUpdated(liveSessionSnapshot())
+        }.onFailure { error ->
+            OmniLog.w("BrowserUseEngine", "publish browser snapshot failed: $error")
+        }
     }
 
     private suspend fun hostNavigate(
@@ -1289,6 +1353,7 @@ class BrowserUseEngine(
         val resolvedTabId = tabId ?: activeTabId ?: throw IllegalArgumentException("当前没有活动标签页")
         val tab = requireExistingTab(resolvedTabId)
         withContext(Dispatchers.Main.immediate) {
+            releasePendingPromptsForTab(tab.tabId)
             tabs.remove(tab.tabId)
             if (activeTabId == tab.tabId) {
                 activeTabId = tabs.keys.lastOrNull()
@@ -1565,6 +1630,40 @@ class BrowserUseEngine(
         }
     }
 
+    /**
+     * 关闭一个标签页时，把挂在它上面的弹窗/权限/外链请求一并释放。
+     *
+     * 不清的话：快照里仍带着 pendingDialog.requestId，面板一直显示「有弹窗待处理」；
+     * 用户点确定，代码会对一个已经 destroy 的 WebView 的 JsResult 调 confirm/cancel，
+     * 页面那头永远不会继续；下一个 tab 出现同类请求时还会先 cancel 掉这个陈旧回调。
+     */
+    private fun releasePendingPromptsForTab(tabId: Int) {
+        pendingDialog?.let { dialog ->
+            if (dialog.tabId != -1 && dialog.tabId == tabId) {
+                pendingDialog = null
+                runCatching {
+                    if (dialog.jsPromptResult != null) {
+                        dialog.jsPromptResult.cancel()
+                    } else {
+                        dialog.jsResult?.cancel()
+                    }
+                }
+            }
+        }
+        pendingPermissionPrompt?.let { prompt ->
+            if (prompt.tabId != -1 && prompt.tabId == tabId) {
+                pendingPermissionPrompt = null
+                runCatching { prompt.webPermissionRequest?.deny() }
+                runCatching { prompt.geolocationCallback?.invoke(prompt.origin, false, false) }
+            }
+        }
+        pendingExternalOpen?.let { external ->
+            if (external.tabId != -1 && external.tabId == tabId) {
+                pendingExternalOpen = null
+            }
+        }
+    }
+
     private fun destroyOnMain() {
         destroyed = true
         // 弹窗/权限请求挂着的是已被销毁 WebView 的回调对象：不清掉，面板会一直显示
@@ -1614,6 +1713,7 @@ class BrowserUseEngine(
     private suspend fun executeCloseTab(request: BrowserUseRequest): BrowserUseOutcome {
         val tab = requireTabForMutation(request)
         withContext(Dispatchers.Main.immediate) {
+            releasePendingPromptsForTab(tab.tabId)
             tabs.remove(tab.tabId)
             if (activeTabId == tab.tabId) {
                 activeTabId = tabs.keys.lastOrNull()
@@ -3371,7 +3471,8 @@ class BrowserUseEngine(
                 pendingExternalOpen = PendingExternalOpen(
                     requestId = UUID.randomUUID().toString(),
                     title = tab.title ?: "下载链接",
-                    target = targetUrl
+                    target = targetUrl,
+                    tabId = tab.tabId
                 )
                 publishSnapshotUpdate()
                 return@DownloadListener
@@ -3652,7 +3753,8 @@ class BrowserUseEngine(
                 pendingExternalOpen = PendingExternalOpen(
                     requestId = UUID.randomUUID().toString(),
                     title = tab.title ?: "外部链接",
-                    target = target
+                    target = target,
+                    tabId = tab.tabId
                 )
                 publishSnapshotUpdate()
                 true
@@ -3798,7 +3900,8 @@ class BrowserUseEngine(
                 type = "alert",
                 message = message.orEmpty(),
                 url = url,
-                jsResult = result
+                jsResult = result,
+                tabId = tab.tabId
             )
             publishSnapshotUpdate()
             return true
@@ -3816,7 +3919,8 @@ class BrowserUseEngine(
                 type = "confirm",
                 message = message.orEmpty(),
                 url = url,
-                jsResult = result
+                jsResult = result,
+                tabId = tab.tabId
             )
             publishSnapshotUpdate()
             return true
@@ -3836,7 +3940,8 @@ class BrowserUseEngine(
                 message = message.orEmpty(),
                 url = url,
                 defaultValue = defaultValue,
-                jsPromptResult = result
+                jsPromptResult = result,
+                tabId = tab.tabId
             )
             publishSnapshotUpdate()
             return true
@@ -3852,7 +3957,8 @@ class BrowserUseEngine(
                 kind = "web",
                 origin = request.origin?.toString().orEmpty(),
                 resources = request.resources?.toList().orEmpty(),
-                webPermissionRequest = request
+                webPermissionRequest = request,
+                tabId = tab.tabId
             )
             publishSnapshotUpdate()
         }
@@ -3881,7 +3987,8 @@ class BrowserUseEngine(
                     Manifest.permission.ACCESS_COARSE_LOCATION,
                     Manifest.permission.ACCESS_FINE_LOCATION
                 ),
-                geolocationCallback = callback
+                geolocationCallback = callback,
+                tabId = tab.tabId
             )
             publishSnapshotUpdate()
         }
@@ -3944,6 +4051,7 @@ class BrowserUseEngine(
 
         override fun onCloseWindow(window: WebView?) {
             val closeTab = tabs.values.firstOrNull { it.webView == window } ?: return
+            releasePendingPromptsForTab(closeTab.tabId)
             tabs.remove(closeTab.tabId)
             if (activeTabId == closeTab.tabId) {
                 activeTabId = tabs.keys.lastOrNull()

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -584,10 +585,7 @@ function resolveVisibleMessages(taskMessages: ChatMessage[], primary: ChatMessag
   return visibleMessages.sort(compareOldestFirst);
 }
 
-function buildRunGroup(messages: ChatMessage[], taskId: string, active: boolean): RunGroup | null {
-  const taskMessages = messages.filter(
-    (message) => agentRunParentTaskId(message) === taskId && isAgentRunCandidateMessage(message),
-  );
+function buildRunGroup(taskMessages: ChatMessage[], active: boolean): RunGroup | null {
   const requestMessages = taskMessages.filter(isCodexRequestMessage);
   if (taskMessages.length < 2 && !requestMessages.length) return null;
   const primary = resolvePrimaryVisibleMessage(taskMessages, active, requestMessages);
@@ -623,6 +621,17 @@ function buildGroups(messages: ChatMessage[], activeTaskId: string | null): Rend
   const items: RenderItem[] = [];
   const emittedTaskIds = new Set<string>();
   const normalizedActiveTaskId = activeTaskId?.trim() || null;
+  // 先把候选消息按 taskId 分一次组：原来每个 taskId 都要对整张表 filter 一遍，
+  // 长会话（几百条消息、几十个 task）是 O(n²)，每帧几十万次比较，主线程直接卡住输入。
+  const byTaskId = new Map<string, ChatMessage[]>();
+  for (const message of messages) {
+    const taskId = agentRunParentTaskId(message);
+    if (!taskId) continue;
+    if (!isAgentRunCandidateMessage(message)) continue;
+    const bucket = byTaskId.get(taskId);
+    if (bucket) bucket.push(message);
+    else byTaskId.set(taskId, [message]);
+  }
   for (const message of messages) {
     const taskId = agentRunParentTaskId(message);
     if (!taskId) {
@@ -633,7 +642,7 @@ function buildGroups(messages: ChatMessage[], activeTaskId: string | null): Rend
       if (!isAgentRunCandidateMessage(message)) items.push({ kind: "single", message });
       continue;
     }
-    const group = buildRunGroup(messages, taskId, taskId === normalizedActiveTaskId);
+    const group = buildRunGroup(byTaskId.get(taskId) ?? [], taskId === normalizedActiveTaskId);
     if (!group) {
       items.push({ kind: "single", message });
       continue;
@@ -720,7 +729,14 @@ export function ChatPanel({
   const messageListRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const sortedMessages = [...messages].sort((left, right) => messageTime(left) - messageTime(right));
+  const sortedMessages = useMemo(
+    () => [...messages].sort((left, right) => messageTime(left) - messageTime(right)),
+    [messages],
+  );
+  const renderItems = useMemo(
+    () => buildGroups(sortedMessages, activeTaskId),
+    [sortedMessages, activeTaskId],
+  );
   const normalizedActiveTaskId = activeTaskId?.trim() || null;
   const thinkingTaskIds = new Set(
     sortedMessages
@@ -834,7 +850,7 @@ export function ChatPanel({
 
       <div className="message-list" aria-live="polite" ref={messageListRef}>
         {!sortedMessages.length && <EmptyGreeting />}
-        {buildGroups(sortedMessages, activeTaskId).map((item, index) => {
+        {renderItems.map((item, index) => {
           if (item.kind === "run") {
             return <AgentRunGroup group={item.group} key={`run-${item.group.taskId}`} />;
           }

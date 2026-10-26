@@ -819,6 +819,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       _agentCollaborationModeListError = null;
     });
     final generation = _conversationTargetRequestId;
+    final requestId = ++_agentCollaborationModeRequestId;
     final agentId = _activeAcpAgentId;
     try {
       await _ensureActiveConversationReadyForStreaming();
@@ -861,7 +862,10 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         );
       });
     } finally {
-      if (mounted) {
+      // 只让最后一次请求复位 loading。原来只看 mounted：请求 A 还没回来请求 B 已经开始，
+      // A 的 finally 会把 B 的 loading 清掉 —— 互斥失效、UI 立刻显示「非加载中且无模式」，
+      // 随后用空的旧列表去解析 Plan 模式并写进 session，和 B 的结果互相覆盖。
+      if (mounted && requestId == _agentCollaborationModeRequestId) {
         setState(() => _isAgentCollaborationModeListLoading = false);
       }
     }
@@ -1829,6 +1833,12 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         result.method != 'codex/stderr' &&
         result.method != 'codex/parseError') {
       debugPrint('[Agent] unhandled ACP event: ${jsonEncode(event)}');
+      _finalizeOrphanAgentTurn(
+        conversationId: conversationId,
+        mode: _modeKey(eventMode),
+        sessionId: eventSessionId,
+        turnId: eventTurnId,
+      );
     }
     if (_activeMode == ChatPageMode.agent && mounted && isVisibleConversation) {
       setState(() {});
@@ -2179,20 +2189,82 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     final turnId =
         runtimeIdentity?.normalizedTurnId ?? _activeAgentTurnId?.trim();
     if (conversationId == null && sessionId == null) {
+      // 原来这里静默 return：新建会话还没落库、或 run 身份还没绑定时点「停止」完全没反应，
+      // 而输入框仍被 isAiResponding 挡着，用户没有任何出路。
+      _forceEndAgentTurnLocally('还没有可取消的轮次，已按本地状态结束本轮');
       return;
     }
+    var cancelAccepted = false;
     try {
       await AgentRuntimeService.cancelPrompt(
         conversationId: _isRemoteCodexConfigured() ? null : conversationId,
         sessionId: sessionId,
         promptId: turnId,
-      );
+      ).timeout(const Duration(seconds: 12));
+      cancelAccepted = true;
     } catch (error) {
       debugPrint('Agent interrupt failed: $error');
       if (mounted) {
         showToast(formatAgentRuntimeErrorForUser(error), type: ToastType.error);
       }
     }
+    if (!cancelAccepted) {
+      // 取消没落地时 ACP 的终态事件可能永远不来，UI 会一直停在「运行中」。
+      // 「停止」必须有本地兜底，否则按钮成了纯装饰。
+      _forceEndAgentTurnLocally('取消请求没有生效，已按本地状态结束本轮');
+    }
+  }
+
+  /// 迟到终态事件的兜底收尾。
+  ///
+  /// registerTask 会清掉上一轮的官方 turn id（否则旧 id 会认领新 prompt 的终态事件）。
+  /// 于是那一轮的 turn/completed 到达时被判成 unhandled，原来只打一行日志 —— 前一轮的
+  /// 思考卡/工具卡永久 loading，isAiResponding 由别的轮次决定（表现为两个头像、一个
+  /// 永远转圈）。这里按「已知 turn → runId」映射找回那个已经不属于活跃轮次的 task，
+  /// 交给 unregisterTask 正常收尾。
+  void _finalizeOrphanAgentTurn({
+    required int conversationId,
+    required String mode,
+    String? sessionId,
+    String? turnId,
+  }) {
+    final normalizedTurnId = turnId?.trim() ?? '';
+    if (normalizedTurnId.isEmpty) return;
+    final runtime = _runtimeCoordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: mode,
+    );
+    if (runtime == null) return;
+    final runId = runtime.resolveKnownRunId(
+      sessionId: sessionId,
+      turnId: normalizedTurnId,
+    );
+    if (runId == null || runId.isEmpty) return;
+    if (runId == runtime.activeRunId || runId == runtime.currentDispatchTurnId) {
+      return;
+    }
+    if (!mounted) return;
+    _runtimeCoordinator.unregisterTask(
+      runId,
+      conversationId: conversationId,
+      mode: mode,
+    );
+  }
+
+  /// 「停止」的本地兜底：不依赖 ACP 终态事件，直接把本轮的展示状态收尾。
+  void _forceEndAgentTurnLocally(String reason) {
+    if (!mounted) return;
+    final taskId = _activeRuntime?.activeRunId;
+    if (taskId != null && taskId.isNotEmpty) {
+      _runtimeCoordinator.unregisterTask(taskId);
+    }
+    setState(() {
+      final agentState = _modeState(ChatPageMode.agent);
+      agentState.isAiResponding = false;
+      agentState.isDeepThinking = false;
+      agentState.activeAcpTurnId = null;
+    });
+    showToast(reason, type: ToastType.warning);
   }
 
   Future<String?> _resolveAgentRequestModel(

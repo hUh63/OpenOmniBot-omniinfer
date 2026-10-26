@@ -80,6 +80,17 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   final Map<String, Future<void>> _persistenceTails = <String, Future<void>>{};
   final Set<String> _ephemeralRuntimeKeys = <String>{};
 
+  /// 每个会话运行时的最后使用时间（毫秒），用于超限时按 LRU 回收。
+  final Map<String, int> _runtimeLastTouchedAt = <String, int>{};
+
+  /// 常驻的会话运行时上限。
+  ///
+  /// runtime 与页面解耦（后台 turn 要继续跑），但原来 _runtimes 只增不减：每浏览一个会话
+  /// 就常驻一份完整消息列表 + 十来个 map，长会话还带历史，内存随「访问过的会话数 × 历史
+  /// 长度」增长，页面 dispose 也不释放。超过上限时按最久未用淘汰（只淘汰无在飞任务、
+  /// 非临时会话的），被淘汰的会话下次进入会重新从 DB 分页装载。
+  static const int _kMaxRuntimeStates = 8;
+
   bool _initialized = false;
 
   bool get _isEnglish => LegacyTextLocalizer.isEnglish;
@@ -233,7 +244,35 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     if (conversation != null) {
       runtime.conversation = conversation;
     }
+    _runtimeLastTouchedAt[key] = DateTime.now().millisecondsSinceEpoch;
+    _reclaimIdleRuntimes(keepKey: key);
     return runtime;
+  }
+
+  void _reclaimIdleRuntimes({required String keepKey}) {
+    if (_runtimes.length <= _kMaxRuntimeStates) return;
+    final candidates = _runtimes.entries
+        .where((entry) => entry.key != keepKey)
+        .where((entry) => !_ephemeralRuntimeKeys.contains(entry.key))
+        .where((entry) => !entry.value.hasInFlightTask)
+        .toList()
+      ..sort(
+        (left, right) => (_runtimeLastTouchedAt[left.key] ?? 0)
+            .compareTo(_runtimeLastTouchedAt[right.key] ?? 0),
+      );
+    final excess = _runtimes.length - _kMaxRuntimeStates;
+    for (final entry in candidates.take(excess)) {
+      final runtime = entry.value;
+      debugPrint(
+        '[ChatRuntime] reclaim idle runtime '
+        'conversation=${runtime.conversationId} mode=${runtime.mode}',
+      );
+      discardConversationRuntime(
+        conversationId: runtime.conversationId,
+        mode: runtime.mode,
+      );
+      _runtimeLastTouchedAt.remove(entry.key);
+    }
   }
 
   ChatConversationRuntimeState ensureEphemeralRuntime({
@@ -1146,6 +1185,7 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
       (_, binding) =>
           binding.conversationId == conversationId && binding.mode == mode,
     );
+    _runtimeLastTouchedAt.remove(_runtimeKey(conversationId: conversationId, mode: mode));
     final removed = _runtimes.remove(
       _runtimeKey(conversationId: conversationId, mode: mode),
     );

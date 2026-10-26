@@ -200,13 +200,25 @@ internal class AcpAgentProfileStore(context: Context) {
         val normalizedSessionId = sessionId.trim()
         val normalizedAgentId = agentId.trim()
         if (normalizedSessionId.isEmpty() || normalizedAgentId.isEmpty()) return
-        val bindings = sessionBindings().toMutableMap()
+        val bindings = LinkedHashMap(sessionBindings())
+        bindings.remove(normalizedSessionId)
         bindings[normalizedSessionId] = normalizedAgentId
+        // 同一会话换 Harness 会生成新的 sessionId，旧的那条永远没人删（unbindSession 只在
+        // session/delete 时调用）。这张表还会被 agentIdForSession 在每轮路由里读，所以
+        // 必须封顶：超出就丢掉最早插入的条目（会话本身不受影响，只是失去「这条历史会话
+        // 属于哪个 Harness」的记忆，重开时按当前选中的 Agent 处理）。
+        if (bindings.size > MAX_SESSION_BINDINGS) {
+            val excess = bindings.size - MAX_SESSION_BINDINGS
+            bindings.keys.take(excess).forEach { bindings.remove(it) }
+        }
         preferences.edit().putString(KEY_SESSION_BINDINGS, gson.toJson(bindings)).apply()
+        sessionBindingsCache = bindings
     }
 
     fun agentIdForSession(sessionId: String): String? {
-        migrateLegacyXiaowanAliases()
+        // 迁移只在进程内做一次：原来这里每次调用都要读一遍 profile 存储 + 解析整张
+        // sessionBindings JSON，而它在每轮路由里都会被调用。
+        if (!legacyAliasesMigrated) migrateLegacyXiaowanAliases()
         return sessionBindings()[sessionId.trim()]
             ?.takeIf(String::isNotBlank)
             ?.takeUnless { it in catalog.retiredAgentIds }
@@ -242,6 +254,7 @@ internal class AcpAgentProfileStore(context: Context) {
             preferences.edit()
                 .putString(KEY_SESSION_BINDINGS, gson.toJson(bindings))
                 .apply()
+            sessionBindingsCache = bindings
         }
     }
 
@@ -399,6 +412,8 @@ internal class AcpAgentProfileStore(context: Context) {
             .putString(KEY_SESSION_BINDINGS, gson.toJson(remainingBindings))
             .putString(KEY_CONVERSATION_BINDINGS, gson.toJson(remainingConversationBindings))
             .apply()
+        // 缓存必须跟着失效：否则被删 Agent 的绑定还会继续命中（agentIdForSession 走缓存）。
+        sessionBindingsCache = remainingBindings
         clearHealth(normalizedId)
         if (preferences.getString(KEY_SELECTED_PROFILE_ID, null) == normalizedId) {
             // Xiaowan is the single built-in default entry.  Deleting a
@@ -507,7 +522,11 @@ internal class AcpAgentProfileStore(context: Context) {
      * references, without guessing from user-editable names or commands.
      */
     @Synchronized
+    @Volatile
+    private var legacyAliasesMigrated = false
+
     private fun migrateLegacyXiaowanAliases() {
+        legacyAliasesMigrated = true
         val stored = readStoredProfiles()
         val aliases = stored.filter(::isLegacyXiaowanAlias)
         if (aliases.isEmpty()) return
@@ -521,6 +540,7 @@ internal class AcpAgentProfileStore(context: Context) {
         val conversationBindings = conversationBindings().mapValues { (_, agentId) ->
             if (agentId in aliasIds) XIAOWAN_AGENT_ID else agentId
         }
+        sessionBindingsCache = null
         val health = readHealth().filterKeys { it !in aliasIds }
         preferences.edit().apply {
             if (selectedId in aliasIds) {
@@ -546,14 +566,23 @@ internal class AcpAgentProfileStore(context: Context) {
             profile.enabled != definition.enabled
     }
 
-    private fun sessionBindings(): Map<String, String> = runCatching {
-        val json = preferences.getString(KEY_SESSION_BINDINGS, null)
-            ?: return@runCatching emptyMap()
-        gson.fromJson<Map<String, String>>(
-            json,
-            object : TypeToken<Map<String, String>>() {}.type
-        )
-    }.getOrNull().orEmpty()
+    /** 进程内缓存：这张表在每轮路由的 agentIdForSession 里都会读到。 */
+    @Volatile
+    private var sessionBindingsCache: Map<String, String>? = null
+
+    private fun sessionBindings(): Map<String, String> {
+        sessionBindingsCache?.let { return it }
+        val loaded = runCatching {
+            val json = preferences.getString(KEY_SESSION_BINDINGS, null)
+                ?: return@runCatching emptyMap()
+            gson.fromJson<Map<String, String>>(
+                json,
+                object : TypeToken<Map<String, String>>() {}.type
+            )
+        }.getOrNull().orEmpty()
+        sessionBindingsCache = loaded
+        return loaded
+    }
 
     private fun conversationBindings(): Map<String, String> = runCatching {
         val json = preferences.getString(KEY_CONVERSATION_BINDINGS, null)
@@ -628,6 +657,8 @@ internal class AcpAgentProfileStore(context: Context) {
         private const val KEY_PROFILES = "profiles"
         private const val KEY_SELECTED_PROFILE_ID = "selected_profile_id"
         private const val KEY_SESSION_BINDINGS = "session_bindings"
+        /** sessionId → agentId 绑定的保留上限（防止换 Harness 产生的孤儿无限增长）。 */
+        private const val MAX_SESSION_BINDINGS = 256
         private const val KEY_CONVERSATION_BINDINGS = "conversation_bindings"
         private const val KEY_HEALTH = "health"
         private const val DEEPSEEK_HARNESS_CORDIS_PATH =

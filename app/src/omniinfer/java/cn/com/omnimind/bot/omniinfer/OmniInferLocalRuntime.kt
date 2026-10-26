@@ -76,10 +76,20 @@ object OmniInferLocalRuntime {
     }
 
     fun setPort(port: Int) {
-        if (port > 0) {
-            mmkv.encode(KEY_API_PORT, port)
-            syncProviderState()
+        if (port <= 0) return
+        val previous = getPort()
+        if (previous == port) return
+        mmkv.encode(KEY_API_PORT, port)
+        if (OmniInferServer.isReady()) {
+            // 服务已经绑在旧端口上。只改配置的话：getBaseUrl() 立刻指向新端口，而 Ktor 仍
+            // 监听旧端口 —— agent 与前端的所有请求全部连不上，同时旧端口继续对外开着，
+            // 用户「换端口」的意图完全没生效（表现为偶发连不上的怪问题，重启 App 才好）。
+            // 端口变更必须连带停服务，由调用方重新加载模型并发起在新端口上。
+            OmniLog.i("OmniInferLocalRuntime", "API port changed $previous -> $port; stopping server")
+            stop()
+            return
         }
+        syncProviderState()
     }
 
     /** API key guarding the local server (and the LAN proxy). Blank means "no key". */
@@ -233,8 +243,19 @@ object OmniInferLocalRuntime {
             mmkv.encode(KEY_LOADED_BACKEND, normalizedBackend)
             mmkv.encode(KEY_LOADED_MODEL_ID, normalizedModelId)
         } else {
-            OmniInferServer.stop()
-            clearLoadedState()
+            // 只回滚「本次」失败。原来无条件 stop()：并发场景下（自动启动线程刚把后端 B
+            // 加载成功、前台又在加载 A 失败）会把 B 的引擎一起卸掉 —— 本地模型页突然显示
+            // 未运行、agent 请求打到已关端口，而 B 其实加载成功过。
+            if (OmniInferServer.isReady()) {
+                OmniLog.w(
+                    TAG,
+                    "[loadModel] load failed for backend=$serverBackend but another engine is " +
+                        "running; skipping stop()"
+                )
+            } else {
+                OmniInferServer.stop()
+                clearLoadedState()
+            }
         }
         syncProviderState()
         return success

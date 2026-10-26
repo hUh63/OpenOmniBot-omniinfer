@@ -46,6 +46,16 @@ class MnnLocalModelsChannel {
         private var pendingImportResult: MethodChannel.Result? = null
         @Volatile
         private var pendingImportBackend: String = DEFAULT_BACKEND
+        /** 发起导入的时间：用来判断上一次导入是否已经永远不会回调了。 */
+        @Volatile
+        private var pendingImportAt: Long = 0L
+
+        /**
+         * 导入请求的保鲜期。用户在选择器里取消、或进程被系统回收后 Activity 不再回调
+         * onActivityResult，这个槽位就会永久被占住 —— 之后每次 importModel 都返回
+         * 「Another import is already in progress」，只能杀进程才能恢复。
+         */
+        private const val IMPORT_REQUEST_STALE_MS = 5 * 60 * 1000L
 
         fun onActivityResult(
             activity: Activity,
@@ -61,6 +71,7 @@ class MnnLocalModelsChannel {
             val backend = pendingImportBackend
             pendingImportResult = null
             pendingImportBackend = DEFAULT_BACKEND
+            pendingImportAt = 0L
             if (result == null) return true
 
             if (resultCode != Activity.RESULT_OK || data?.data == null) {
@@ -157,6 +168,16 @@ class MnnLocalModelsChannel {
         methodChannel = null
         eventChannel?.setStreamHandler(null)
         eventChannel = null
+        // 挂起的导入请求必须在这里回收：它属于进程级静态状态，Flutter view 销毁后旧 Dart
+        // 侧的 await 随 isolate 一起消失，但槽位仍被占着，新 isolate 再也发不起导入。
+        pendingImportResult?.let { stale ->
+            runCatching {
+                stale.success(mapOf("success" to false, "error" to "cancelled"))
+            }
+        }
+        pendingImportResult = null
+        pendingImportBackend = DEFAULT_BACKEND
+        pendingImportAt = 0L
         // NOTE: Do NOT call OmniInferModelsManager.clear() or OmniInferMnnModelsManager.clear()
         // here. Those methods cancel active downloads, but this clear() is called when the
         // Flutter view is destroyed (e.g. app goes to background). Downloads should continue
@@ -252,11 +273,24 @@ class MnnLocalModelsChannel {
                     result.error(ERROR_CODE, "Not attached to activity", null)
                     return
                 }
+                val now = System.currentTimeMillis()
+                val staleImport = pendingImportResult?.takeIf {
+                    now - pendingImportAt >= IMPORT_REQUEST_STALE_MS
+                }
+                if (staleImport != null) {
+                    pendingImportResult = null
+                    pendingImportBackend = DEFAULT_BACKEND
+                    pendingImportAt = 0L
+                    runCatching {
+                        staleImport.success(mapOf("success" to false, "error" to "cancelled"))
+                    }
+                }
                 if (pendingImportResult != null) {
                     result.error(ERROR_CODE, "Another import is already in progress", null)
                     return
                 }
                 pendingImportResult = result
+                pendingImportAt = now
                 try {
                     val backend = getSelectedBackend()
                     pendingImportBackend = backend

@@ -306,6 +306,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   String? _loadedAgentModelSourceKey;
   String? _loadingAgentModelSourceKey;
   int _agentModelListRequestId = 0;
+  /// 协作模式（Plan / 多 Agent）列表的请求序号：用来只让「最后一次」请求收尾。
+  int _agentCollaborationModeRequestId = 0;
   bool _agentModelConfigSupported = false;
   List<String> _agentModelOptions = const <String>[];
   List<String> _agentReasoningEffortOptions = const <String>[];

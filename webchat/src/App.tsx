@@ -201,7 +201,10 @@ export default function App() {
       setSelectedConversation(currentSelection);
       return;
     }
+    // 找不到同一个 key 时保留当前选中（尤其是刚创建、尚未出现在列表里的会话），
+    // 不要静默回退到「列表第一条」—— 那会让视图直接跳到别的会话，而 run 还在原会话里跑。
     const nextSelected = nextConversations.find((item) => conversationKey(item) === previousKey)
+      ?? (currentSelection && !isPersistedConversation(currentSelection) ? currentSelection : null)
       ?? nextConversations[0]
       ?? null;
     const selectionChanged = conversationKey(nextSelected) !== previousKey;
@@ -393,7 +396,11 @@ export default function App() {
         });
         conversation = {
           ...conversation,
-          mode: draftMode,
+          // 以服务端返回的 mode 为准。服务端会把 codex/acp/coding 一律归一成 "agent"，
+          // 而本地 draftMode 是 "codex"/"normal" —— 用 draftMode 覆盖会让 conversationKey
+          // 变成 codex:123，而会话列表里是 agent:123，随后 loadConversations 找不到同一个
+          // key，静默回退到「列表第一条」：刚发的那条乐观消息被清空重载，甚至跳到别的会话。
+          mode: conversation.mode ?? draftMode,
           agentId: conversation.agentId ?? draftAgentId,
         };
         conversationCreatedForSend = conversation;

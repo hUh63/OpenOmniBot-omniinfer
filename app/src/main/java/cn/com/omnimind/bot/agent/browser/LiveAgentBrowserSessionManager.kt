@@ -121,7 +121,9 @@ object LiveAgentBrowserSessionManager {
     }
 
     suspend fun executeCurrent(request: BrowserUseRequest): BrowserUseOutcome? {
-        return store.current()?.execute(request)
+        // 走 host panel 入口：绑定稳定的产物上下文（见 executeFromHostPanel），
+        // 而不是复用上一次 AI 工具调用留下的 run id。
+        return store.current()?.executeFromHostPanel(request)
     }
 
     suspend fun captureCurrentFramePng(): ByteArray? {

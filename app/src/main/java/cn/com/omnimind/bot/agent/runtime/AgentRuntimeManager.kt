@@ -259,6 +259,8 @@ class AgentRuntimeManager private constructor(
     // reservation and terminal logic.
     private val turnOwnershipStore = AcpTurnOwnershipStore()
     private val localAcpRuntimes = ConcurrentHashMap<String, LocalAcpRuntime>()
+    /** 每个 Agent 运行时最后一次被路由到的时间，用于空闲回收。 */
+    private val localAgentLastUsedAt = ConcurrentHashMap<String, Long>()
     private val localAcpRuntime = createLocalAcpRuntime(defaultLocalAgentId)
 
     private fun createLocalAcpRuntime(agentId: String): LocalAcpRuntime = LocalAcpRuntime(
@@ -296,9 +298,42 @@ class AgentRuntimeManager private constructor(
 
     private fun localRuntimeFor(agentId: String): LocalAcpRuntime {
         val normalized = agentId.trim()
+        localAgentLastUsedAt[normalized] = System.currentTimeMillis()
         if (normalized == defaultLocalAgentId) return localAcpRuntime
         return localAcpRuntimes.computeIfAbsent(normalized) {
             createLocalAcpRuntime(normalized)
+        }
+    }
+
+    /**
+     * 回收长期不用的 Agent 运行时。
+     *
+     * 切换 Agent 只是改 profileStore.select()，旧运行时的 Node+proot 子进程原样留着 —
+     * 而 localAcpRuntimes 只增不减，每访问一个 Harness 就常驻一套进程（DSH 类常驻几百 MB）。
+     * 这里按「不是当前选中 + 没有活跃 turn + 空闲超过阈值」回收；会话本身靠
+     * session/load 恢复，不需要留着进程。
+     */
+    private fun reclaimIdleAgentRuntimes() {
+        val selectedId = acpAgentProfileStore.selected().id
+        val now = System.currentTimeMillis()
+        val stale = localAcpRuntimes.entries.filter { (agentId, runtime) ->
+            agentId != selectedId &&
+                runtime.hasActiveTurns().not() &&
+                now - (localAgentLastUsedAt[agentId] ?: now) >= IDLE_AGENT_RUNTIME_MS
+        }.map { it.key }
+        stale.forEach { agentId ->
+            val runtime = localAcpRuntimes.remove(agentId) ?: return@forEach
+            localAgentLastUsedAt.remove(agentId)
+            Log.i(
+                LOG_TAG,
+                "Reclaiming idle ACP runtime for $agentId after " +
+                    "${IDLE_AGENT_RUNTIME_MS / 1000}s of inactivity"
+            )
+            try {
+                runtime.disconnect()
+            } catch (error: Throwable) {
+                Log.w(LOG_TAG, "Idle ACP runtime teardown failed for $agentId: $error")
+            }
         }
     }
 
@@ -809,6 +844,8 @@ class AgentRuntimeManager private constructor(
             if (method == "agent/select") {
                 activeRuntime = AgentRuntimeKind.LOCAL
                 activeLocalDistributionId = TerminalDistribution.selected().id
+                // 切换 Agent 是回收旧运行时的天然时机：此时用户已经明确换了对象。
+                reclaimIdleAgentRuntimes()
             }
             return response
         }
@@ -3610,6 +3647,9 @@ private const val MANAGED_ACP_INSTALL_TIMEOUT_MS = 8 * 60 * 1_000L
 private const val MANAGED_ACP_PROBE_TIMEOUT_MS = 5_000L
 private const val REMOTE_CANCEL_TIMEOUT_MS = 10_000L
 private const val REMOTE_TURN_SCOPE = "remote:codex"
+/** 非当前选中的 Agent 运行时，空闲多久之后回收其进程。 */
+private const val IDLE_AGENT_RUNTIME_MS = 15 * 60 * 1_000L
+private const val LOG_TAG = "AgentRuntimeManager"
 internal const val AGENT_PROVIDER_MODEL_LOOKUP_TIMEOUT_MS = 3_000L
 
 /**

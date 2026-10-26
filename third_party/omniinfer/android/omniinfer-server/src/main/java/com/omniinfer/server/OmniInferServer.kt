@@ -301,10 +301,22 @@ object OmniInferServer {
             val intent = Intent(ctx, OmniInferService::class.java).apply {
                 putExtra("port", port)
             }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                ctx.startForegroundService(intent)
-            } else {
-                ctx.startService(intent)
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    ctx.startForegroundService(intent)
+                } else {
+                    ctx.startService(intent)
+                }
+            } catch (error: Throwable) {
+                // Android 12+ 禁止从后台启动前台服务（ForegroundServiceStartNotAllowedException），
+                // 或 FGS type/manifest 校验抛 SecurityException。
+                // 不回滚的话：native 引擎已经建成（GB 级 mmap），但服务永远起不来 ——
+                // isReady() 恒 false，这颗引擎再也不会被释放（只有下次换 loadKey 才顺带卸载），
+                // 纯内存泄漏 + OOM 风险。
+                Log.e(TAG, "Failed to start local inference service", error)
+                lastError = "Failed to start local inference service: ${error.message}"
+                unloadModel()
+                return false
             }
 
             // Wait for the server to become reachable. This catches port-in-use

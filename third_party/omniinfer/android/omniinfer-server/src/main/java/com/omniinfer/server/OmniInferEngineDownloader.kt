@@ -95,6 +95,27 @@ object OmniInferEngineDownloader {
         // The engine version is only known after the manifest has been parsed.
         val manifest = OmniInferEngineLoader.verify(staging, verifyHashes)
         val target = File(root, "engine-${sanitize(manifest.engineVersion)}")
+
+        // 进程内已经加载过引擎时，物理上不能替换它：已 System.load 的 .so 还映射着旧文件，
+        // 而 ggml 之后必须在这个目录里 dlopen 其它后端库；目录被删掉重建会让部分后端直接
+        // 失效（表现为「换一次引擎后只有部分后端可用」）。换版本还会在磁盘上并存两份
+        // engine-*，installedEngineDir() 任取其一，下次启动可能加载到旧版本。
+        OmniInferEngineLoader.installedEngineDir()?.let { loadedDir ->
+            staging.deleteRecursively()
+            if (loadedDir.absolutePath == target.absolutePath) {
+                // 同版本重复安装：直接复用已加载的那份。
+                pruneOldEngines(root, keep = loadedDir)
+                return OmniInferEngineLoader.installedManifest()
+                    ?: throw OmniInferEngineException(
+                        "Engine ${manifest.engineVersion} is loaded but its manifest is missing."
+                    )
+            }
+            throw OmniInferEngineException(
+                "Engine ${manifest.engineVersion} cannot replace ${loadedDir.name} which is " +
+                    "already loaded in this process. Restart the app to switch engines."
+            )
+        }
+
         target.deleteRecursively()
         if (!staging.renameTo(target)) {
             throw OmniInferEngineException("Cannot move verified engine into place: ${target.absolutePath}")
@@ -109,7 +130,11 @@ object OmniInferEngineDownloader {
     fun installedEngineDir(context: Context): File? =
         engineRoot(context).listFiles()
             .orEmpty()
-            .firstOrNull { it.isDirectory && it.name.startsWith("engine-") && File(it, OmniInferEngineLoader.MANIFEST_FILE).isFile }
+            .filter { it.isDirectory && it.name.startsWith("engine-") && File(it, OmniInferEngineLoader.MANIFEST_FILE).isFile }
+            // 按名字（engine-<version>）取最新的那个。firstOrNull 的 listFiles 顺序由文件系统
+            // 决定，可能拿到旧版本，导致「装上新引擎却仍加载旧的」。
+            .sortedBy { it.name }
+            .lastOrNull()
 
     private fun engineRoot(context: Context): File =
         File(context.filesDir, ROOT_DIR).apply { mkdirs() }

@@ -4452,6 +4452,13 @@ private class AcpProcessConnection(
     private var readerJob: Job? = null
     private var writer: OutputStreamWriter? = null
 
+    /**
+     * 本连接专属的进程标记。收尾时按 /proc/<pid>/environ 精确判断「哪些进程是我起的」，
+     * 而不是按命令行子串扫：`opencode` / `kimi` 这种短 token 与用户在终端里手敲的命令、
+     * 以及正在跑的 `npm install -g .../kimi-code` 天然重叠，按子串匹配会把这些一起 SIGKILL。
+     */
+    private val runtimeMarker = java.util.UUID.randomUUID().toString()
+
     @Volatile
     private var closing = false
 
@@ -4500,7 +4507,7 @@ private class AcpProcessConnection(
             command = command,
             executorKey = "acp-agent-${profile.id}",
             redirectErrorStream = false,
-            extraEnvironment = environment
+            extraEnvironment = environment + mapOf(RUNTIME_MARKER_ENV_KEY to runtimeMarker)
         )
         process = started
         val harnessAdapter = AcpHarnessAdapters.forProfile(profile)
@@ -4677,7 +4684,7 @@ private class AcpProcessConnection(
     override suspend fun close() {
         closing = true
         val current = process
-        val processTree = collectManagedProcessIds(profile.command)
+        val processTree = collectManagedProcessIds()
         Log.i(
             "LocalAcpRuntime",
             "Closing ACP process profile=${profile.id} alive=${current?.isAlive == true} " +
@@ -4730,36 +4737,50 @@ private class AcpProcessConnection(
         // Android, destroying the Java Process wrapper can reap only the
         // linker/proot parent and leave Node alive. Re-scan once after the
         // parent shutdown and terminate any descendants that survived it.
-        killProcessTree(collectManagedProcessIds(profile.command))
+        killProcessTree(collectManagedProcessIds())
         readerJob = null
         stderrJob = null
         waitJob = null
         inputChannel.close()
     }
 
-    private fun collectManagedProcessIds(commandToken: String): List<Int> {
-        if (commandToken.isBlank()) return emptyList()
+    /**
+     * 只收集「本连接启动的」进程及其子孙。
+     *
+     * 旧实现按 `profile.command` 做 cmdline 子串匹配：`opencode`/`kimi`/`dsh` 这些短 token
+     * 会和用户在内置终端里手敲的同名命令、以及正在跑的安装器命令行重叠，收尾时一并
+     * SIGKILL —— 用户终端会话被打断、npm 安装被杀在半路（留下半装的 node_modules）。
+     * 现在按启动时注入的唯一环境标记精确匹配；一个都没命中就不杀（宁可有残留进程，
+     * 也不误杀用户的进程），只记一条日志。
+     */
+    private fun collectManagedProcessIds(): List<Int> {
+        val needle = "$RUNTIME_MARKER_ENV_KEY=$runtimeMarker"
         val parentByPid = mutableMapOf<Int, Int>()
-        val commandByPid = mutableMapOf<Int, String>()
+        val markedPids = LinkedHashSet<Int>()
         File("/proc").listFiles().orEmpty().forEach { entry ->
             val pid = entry.name.toIntOrNull() ?: return@forEach
             val stat = runCatching {
                 File(entry, "stat").readText(StandardCharsets.UTF_8)
             }.getOrNull() ?: return@forEach
             val match = PROCESS_STAT_PATTERN.find(stat) ?: return@forEach
-            val parentPid = match.groupValues[1].toIntOrNull() ?: return@forEach
-            val command = runCatching {
-                String(File(entry, "cmdline").readBytes(), StandardCharsets.UTF_8)
-                    .replace('\u0000', ' ')
-            }.getOrNull().orEmpty()
-            parentByPid[pid] = parentPid
-            commandByPid[pid] = command
+            match.groupValues[1].toIntOrNull()?.let { parentPid -> parentByPid[pid] = parentPid }
+            // 只能读同 UID 进程的 environ。读不到就跳过（不是本连接起的进程）。
+            val environ = runCatching {
+                String(File(entry, "environ").readBytes(), StandardCharsets.UTF_8)
+            }.getOrNull() ?: return@forEach
+            if (environ.split('\u0000').any { it == needle }) {
+                markedPids.add(pid)
+            }
         }
-        val roots = commandByPid
-            .asSequence()
-            .filter { (_, command) -> command.contains(commandToken) }
-            .map { (pid, _) -> pid }
-            .toSet()
+        val roots = markedPids
+        if (roots.isEmpty()) {
+            Log.w(
+                "LocalAcpRuntime",
+                "No managed process carries the runtime marker for ${profile.id}; " +
+                    "skipping process sweep (refusing to kill unrelated processes)"
+            )
+            return emptyList()
+        }
         val managed = LinkedHashSet<Int>()
         var frontier = roots
         while (frontier.isNotEmpty()) {
@@ -4794,6 +4815,8 @@ private class AcpProcessConnection(
 
     companion object {
         private val PROCESS_STAT_PATTERN = Regex("^\\d+ \\([^)]*\\) \\S+ (\\d+)")
+        /** 启动 ACP 进程时注入的一次性标记，收尾时按它精确识别「本连接起的进程」。 */
+        private const val RUNTIME_MARKER_ENV_KEY = "OMNI_ACP_RUNTIME_ID"
         private const val MAX_STDERR_LINES = 60
         private const val MAX_STDERR_CHARS = 6_000
     }
@@ -4999,6 +5022,9 @@ private fun Map<String, Any?>.listOfMaps(key: String): List<Map<String, Any?>> =
         }
     }.orEmpty()
 
+/** 「ACP initialize 失败」状态的保鲜期：超过它就不再压制探针的自愈结果。 */
+private const val STALE_INITIALIZE_FAILURE_MS = 6 * 60 * 60 * 1_000L
+
 internal fun managedAgentHealthFromProbe(
     enabled: Boolean,
     launchInstalled: Boolean,
@@ -5011,9 +5037,16 @@ internal fun managedAgentHealthFromProbe(
     // failure visible until explicit preparation or a later successful
     // initialize clears it. Otherwise a shallow probe can turn a broken
     // plugin graph back into a misleading `online` state.
+    val failureAgeMs = checkedAt - (previous.checkedAt ?: 0L)
+    // 握手失败的状态不能是永久的：用户可能已经修好了环境（配好 provider、修好插件图、
+    // 重启过进程），而只读的「检查」并不会发起握手，于是这个失败状态永远清不掉，
+    // 唯一出路变成整包重装。超过时效窗口就允许探针把它降回「未检查」，由下一次真实
+    // 连接决定结果。
     val previousInitializeFailure =
         previous.error?.let(::isAcpInitializeFailure) == true &&
             previous.status != AcpAgentHealth.STATUS_ONLINE
+    val staleInitializeFailure = previousInitializeFailure &&
+        failureAgeMs >= STALE_INITIALIZE_FAILURE_MS
     return when {
         !enabled -> previous.copy(
             status = AcpAgentHealth.STATUS_OFFLINE,
@@ -5041,6 +5074,13 @@ internal fun managedAgentHealthFromProbe(
                 checkedAt = checkedAt,
             )
         }
+        staleInitializeFailure -> AcpAgentHealth(
+            status = AcpAgentHealth.STATUS_UNCHECKED,
+            installed = true,
+            error = null,
+            checkedAt = checkedAt,
+            preparationRevision = previous.preparationRevision,
+        )
         previousInitializeFailure -> previous.copy(
             status = AcpAgentHealth.STATUS_OFFLINE,
             installed = true,
