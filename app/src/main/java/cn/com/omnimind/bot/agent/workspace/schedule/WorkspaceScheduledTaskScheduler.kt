@@ -88,6 +88,12 @@ class WorkspaceScheduledTaskScheduler(
         val existing = existingMap[taskId]
         var task = parseTask(rawTask, existing)
         if (task.enabled) {
+            // 空 prompt 的任务以前照样保存成功、排上闹钟，然后被 loadTaskMapMutable 过滤掉：
+            // 列表里看不到、到点 onAlarmTriggered 直接 return（无日志无通知），用户既无法
+            // 排查也无法删除。启用的任务在创建时就拒绝，把原因回给调用方。
+            require(task.subagentPrompt?.isNotBlank() == true) {
+                "任务内容不能为空：请填写要让 AI 执行的具体内容"
+            }
             task = task.copy(
                 nextExecutionTime = resolveNextExecutionAt(
                     task = task,

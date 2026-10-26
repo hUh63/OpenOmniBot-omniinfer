@@ -325,12 +325,29 @@ class QuickLogService(private val context: Context) {
             }
         }
         if (updatedRecord != null) {
+            val toggledRecord = updatedRecord!!
             val synced = previousRecord?.let { previous ->
-                syncQuickLogMemory(previous, updatedRecord!!)
+                syncQuickLogMemory(previous, toggledRecord)
             } ?: false
+            // 勾选完成时必须撤掉已经排好的提醒：否则任务都做完了，到点照样响铃 + 弹通知，
+            // 用户第一反应是「提醒重复了/取消不掉」（deleteLog 会取消，这里以前不会）。
+            // 取消勾选时按记录的提醒时间重新排一次，避免「再勾回来就再也收不到提醒」。
+            val reminderAlarmId = if (toggledRecord.isCompleted) {
+                cancelReminder(toggledRecord.reminderAlarmId)
+                null
+            } else {
+                scheduleReminder(
+                    recordId = toggledRecord.id,
+                    content = toggledRecord.content,
+                    reminderAtMillis = toggledRecord.reminderAtMillis
+                )
+            }
             val finalUpdated = updated.map { record ->
                 if (record.id == targetId) {
-                    record.copy(shortMemorySynced = synced)
+                    record.copy(
+                        shortMemorySynced = synced,
+                        reminderAlarmId = reminderAlarmId
+                    )
                 } else {
                     record
                 }

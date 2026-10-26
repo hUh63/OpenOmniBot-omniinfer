@@ -59,8 +59,9 @@ class VlmToolHandler(context: Context) : ToolHandler {
         // 异常（存储写失败、Shizuku 查询失败、配置读取异常）。它们以前在 try 之外，一旦
         // 抛出就没有任何工具结果返回：回合被判失败，而 assistant(tool_calls) 已进历史，
         // 缺配对的 tool 消息会让该会话后续每轮都被 provider 400。
-        return try {
+        // runId 要在 try 之外声明：catch 里的失败落库与结果构造都要用它。
         val runId = "gui-${UUID.randomUUID()}"
+        return try {
         toolHandle.bindStopAction {
             OmniVlmPlugin.stop(runId)
         }
