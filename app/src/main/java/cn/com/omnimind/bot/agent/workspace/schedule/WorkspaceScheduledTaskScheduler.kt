@@ -565,23 +565,47 @@ class WorkspaceScheduledTaskScheduler(
         val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pendingIntent = buildPendingIntent(task.taskId)
         alarmManager.cancel(pendingIntent)
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerAt,
-                    pendingIntent
-                )
-            } else {
-                alarmManager.setExact(
+        // Android 12+ 没有「闹钟和提醒」权限时 setExact* 会抛 SecurityException。原来的兜底
+        // 是 set()：在 Doze / App Standby 下可能被推到几十分钟甚至几小时之后，而任务列表
+        // 仍然显示原定的 nextExecutionTime，用户完全无法判断是没执行还是延迟。
+        val canExactAlarm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            alarmManager.canScheduleExactAlarms()
+        } else {
+            true
+        }
+        if (canExactAlarm) {
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerAt,
+                        pendingIntent
+                    )
+                } else {
+                    alarmManager.setExact(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerAt,
+                        pendingIntent
+                    )
+                }
+            }.onFailure {
+                OmniLog.w(TAG, "setExact failed, fallback setAndAllowWhileIdle: ${it.message}")
+                alarmManager.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     triggerAt,
                     pendingIntent
                 )
             }
-        }.onFailure {
-            OmniLog.w(TAG, "setExact failed, fallback set(): ${it.message}")
-            alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+        } else {
+            OmniLog.w(
+                TAG,
+                "exact alarm not permitted; scheduled inexact task=${task.taskId}"
+            )
+            alarmManager.setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                triggerAt,
+                pendingIntent
+            )
         }
     }
 
