@@ -157,7 +157,9 @@ export function ConversationSidebar({
         icon: "agent" as IconName,
       },
       ...profiles
-        .filter((profile) => profile.enabled !== false)
+        // 小万上面已经单独加了一条，这里要排掉，否则新建菜单里会出现两个「小万」。
+        // 其余 Agent 保持原生 catalog 顺序（与 App 内一致）。
+        .filter((profile) => profile.enabled !== false && profile.id !== "xiaowan-acp")
         .map((profile) => ({
           key: profile.id,
           target: {

@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Base64
 import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.mcp.WebChatRoutes.receiveJson
+import cn.com.omnimind.bot.mcp.WebChatRoutes.respondJson
 import cn.com.omnimind.bot.webchat.AgentRunService
 import cn.com.omnimind.bot.webchat.BrowserMirrorService
 import cn.com.omnimind.bot.webchat.ConversationDomainService
@@ -35,7 +37,6 @@ import io.ktor.server.request.host
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.uri
 import io.ktor.server.request.path
-import io.ktor.server.request.receive
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondFile
@@ -234,7 +235,7 @@ object McpServerManager {
         val body = if (!headerToken.isNullOrBlank()) {
             emptyMap<String, Any?>()
         } else {
-            runCatching { call.receive<Map<String, Any?>>() }.getOrDefault(emptyMap())
+            runCatching { call.receiveJson() }.getOrDefault(emptyMap())
         }
         val token = body["token"]?.toString() ?: headerToken
         if (token.isNullOrBlank() || !timingSafeEquals(token, ensureToken())) {
@@ -255,7 +256,7 @@ object McpServerManager {
                 maxAge = (WEBCHAT_SESSION_TTL_MS / 1000L).toInt()
             )
         )
-        call.respond(
+        call.respondJson(
             mapOf(
                 "success" to true,
                 "server" to currentState().toMap()

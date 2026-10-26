@@ -58,26 +58,47 @@ data class ProviderRequestCapabilities(
     val supportsVisionInput: Boolean? = null,
 )
 
+/** 被原生侧缓存、并被 Flutter 直接消费：JSON key 是显式存储契约，不能随混淆/重构改变。 */
 data class ProviderModelOption(
+    @field:SerializedName("id")
     val id: String,
+    @field:SerializedName("displayName")
     val displayName: String = id,
+    @field:SerializedName("ownedBy")
     val ownedBy: String? = null,
+    @field:SerializedName("contextLimit")
     val contextLimit: Int? = null,
+    @field:SerializedName("inputLimit")
     val inputLimit: Int? = null,
+    @field:SerializedName("outputLimit")
     val outputLimit: Int? = null,
+    @field:SerializedName("inputModalities")
     val inputModalities: List<String> = emptyList(),
+    @field:SerializedName("outputModalities")
     val outputModalities: List<String> = emptyList(),
+    @field:SerializedName("modelsDevProviderId")
     val modelsDevProviderId: String? = null,
+    @field:SerializedName("modelsDevProviderName")
     val modelsDevProviderName: String? = null,
+    @field:SerializedName("providerLogoUrl")
     val providerLogoUrl: String? = null,
+    @field:SerializedName("family")
     val family: String? = null,
+    @field:SerializedName("group")
     val group: String? = null,
+    @field:SerializedName("attachment")
     val attachment: Boolean? = null,
+    @field:SerializedName("reasoning")
     val reasoning: Boolean? = null,
+    @field:SerializedName("supportedReasoningLevels")
     val supportedReasoningLevels: List<String> = emptyList(),
+    @field:SerializedName("defaultReasoningLevel")
     val defaultReasoningLevel: String? = null,
+    @field:SerializedName("toolCall")
     val toolCall: Boolean? = null,
+    @field:SerializedName("structuredOutput")
     val structuredOutput: Boolean? = null,
+    @field:SerializedName("temperature")
     val temperature: Boolean? = null
 )
 
