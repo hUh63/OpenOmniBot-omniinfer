@@ -117,6 +117,19 @@ class WorkspaceScheduledTaskScheduler(
         )
     }
 
+    /**
+     * run taskId 形如 `subagent_schedule_<millis>_<taskId>`。记录已经被删掉（一次性任务
+     * 派发后就会移除）时默认仍然通知：用户本来就是想收到这次结果。
+     */
+    fun isNotificationEnabledForRun(runTaskId: String): Boolean {
+        val prefix = "subagent_schedule_"
+        if (!runTaskId.startsWith(prefix)) return false
+        val scheduledTaskId = runTaskId.removePrefix(prefix)
+            .substringAfter('_', missingDelimiterValue = "")
+        if (scheduledTaskId.isEmpty()) return true
+        return loadTaskMapMutable()[scheduledTaskId]?.notificationEnabled ?: true
+    }
+
     fun deleteTask(taskId: String): Boolean {
         val normalizedId = taskId.trim()
         if (normalizedId.isEmpty()) return false

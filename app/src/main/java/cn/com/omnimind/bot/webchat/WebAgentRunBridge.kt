@@ -6,6 +6,8 @@ import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.resolveAgentToolPayloadStatus
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
 import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.agent.workspace.schedule.ScheduledTaskResultNotifier
+import cn.com.omnimind.bot.agent.workspace.schedule.WorkspaceScheduledTaskScheduler
 import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -379,6 +381,11 @@ internal class WebAgentRunBridge(
         }
         publishMessages(state, finalizeInterruptedEntries = true)
         publishTaskEvent(state, "completed")
+        notifyScheduledTaskResult(
+            state = state,
+            success = true,
+            summary = state.assistantEntries.values.lastOrNull()?.text
+        )
         removeState(state)
     }
 
@@ -411,7 +418,28 @@ internal class WebAgentRunBridge(
         }
         publishMessages(state, finalizeInterruptedEntries = true)
         publishTaskEvent(state, "error", message)
+        notifyScheduledTaskResult(state = state, success = false, summary = message)
         removeState(state)
+    }
+
+    /** 定时任务在后台跑完时给用户一条通知；普通会话的 run 不受影响。 */
+    private fun notifyScheduledTaskResult(
+        state: WebAgentRunState,
+        success: Boolean,
+        summary: String?
+    ) {
+        if (!state.taskId.startsWith("subagent_schedule_")) return
+        // 任务里关掉通知时不打扰。
+        if (!WorkspaceScheduledTaskScheduler(appContext)
+                .isNotificationEnabledForRun(state.taskId)
+        ) return
+        ScheduledTaskResultNotifier.notifyResult(
+            context = appContext,
+            conversationId = state.conversationId,
+            taskId = state.taskId,
+            success = success,
+            summary = summary
+        )
     }
 
     private suspend fun persistAssistantEntry(
