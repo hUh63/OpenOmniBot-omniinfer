@@ -348,15 +348,15 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
 
       List<ChatMessageModel> savedMessages;
       if (inMemoryMessages != null) {
+        // getInMemoryMessagesForConversation copied these entries from the
+        // active runtime itself. Reinstalling them would dispose every row
+        // notifier and interrupt an AgentRunGroupMessage that is currently
+        // animating from running to completed.
+        //
+        // 这里也不要动分页游标：原来无条件写 hasMoreMessages=false 会让该会话在任意
+        // 一次列表刷新后永久关掉向上翻历史；把 messageOffset 写成「内存条数」又和全库
+        // 其它地方（SQL 实际消费行数 scanned）语义相反，一旦重新打开分页就会重读或漏读。
         savedMessages = List<ChatMessageModel>.from(inMemoryMessages);
-        setState(() {
-          hasMoreMessages = false;
-          messageOffset = savedMessages.length;
-          // getInMemoryMessagesForConversation copied these entries from the
-          // active runtime itself. Reinstalling them would dispose every row
-          // notifier and interrupt an AgentRunGroupMessage that is currently
-          // animating from running to completed.
-        });
       } else {
         final pagedResult =
             await ConversationHistoryService.getConversationMessagesPaged(
@@ -460,7 +460,12 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       }
     } catch (e) {
       debugPrint('加载更多消息失败: $e');
-      if (_isConversationOperationCurrent(token)) {
+    } finally {
+      // 收尾必须无条件复位：await 期间用户切了会话（lifecycle token 失效）时，上面
+      // 所有 setState 分支都会被跳过 —— 原来 isLoadingMore 就永久卡在 true，
+      // 入口守卫 `if (!hasMoreMessages || isLoadingMore) return;` 让该 mode 之后
+      // 再也翻不了历史，直到页面销毁。
+      if (mounted && isLoadingMore) {
         setState(() {
           isLoadingMore = false;
         });

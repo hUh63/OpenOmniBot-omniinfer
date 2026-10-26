@@ -302,7 +302,13 @@ object OmniInferMnnModelsManager {
                 task.execute { info ->
                     emitDownloadUpdate(resolved.modelId, info)
                 }
-                activeDownloads.remove(resolved.downloadId)
+                // 只有「表里还是我这个 task」才摘表项。否则：用户暂停后立刻重新下载，
+                // 旧协程从重试退避里返回时会把新任务的表项摘掉 —— 之后 pause/delete
+                // 全都找不到任务（暂停变空操作），第三次点下载还会和它并发写同一个
+                // .part 文件，最后仍被判成功，得到一个损坏的模型目录。
+                if (activeDownloads[resolved.downloadId] === task) {
+                    activeDownloads.remove(resolved.downloadId)
+                }
                 if (task.isCancelled) {
                     // A cancelled task returns normally, so without this the stale
                     // DOWNLOADING snapshot would overwrite the PAUSED state that
@@ -317,7 +323,9 @@ object OmniInferMnnModelsManager {
                     )
                 }
             } catch (_: Exception) {
-                activeDownloads.remove(resolved.downloadId)
+                if (activeDownloads[resolved.downloadId] === task) {
+                    activeDownloads.remove(resolved.downloadId)
+                }
                 emitDownloadUpdate(resolved.modelId, task.info)
                 emitEvent("downloads_changed", emptyMap())
                 ModelDownloadForegroundService.stopIfIdle(context)
@@ -615,6 +623,12 @@ object OmniInferMnnModelsManager {
             resolved?.repoPath?.substringAfterLast('/')?.takeIf { it.isNotBlank() }?.let { add(it) }
             modelId.substringAfterLast('/').takeIf { it.isNotBlank() }?.let { add(it) }
         }.distinct()
+        // 先取消下载任务、再删目录。反过来的话下载协程会在下一个文件开始时把刚删掉的
+        // 目录 mkdirs 回来继续写 .part —— 用户「删了又出现」，几 GB 空间也没释放
+        // （对已打开的文件 delete 只是 unlink，要等协程关流才真正回收）。
+        listOfNotNull(resolved?.downloadId, modelId).distinct().forEach { id ->
+            activeDownloads.remove(id)?.cancel()
+        }
         val mnnDir = AgentWorkspaceManager.modelsMnnDirectory(context)
         dirNames.forEach { name ->
             val dir = File(mnnDir, name)
@@ -624,7 +638,6 @@ object OmniInferMnnModelsManager {
                     OmniLog.w(TAG, "delete incomplete model dir failed: ${error.message}")
                 }
         }
-        resolved?.downloadId?.let { activeDownloads.remove(it)?.cancel() }
         emitEvent("downloads_changed", emptyMap())
     }
 

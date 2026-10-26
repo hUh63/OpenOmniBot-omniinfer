@@ -23,8 +23,10 @@ class _OmniinferLocalModelFeature extends LocalModelFeature {
 
   @override
   Future<String?> findInstalledRecommendedModelId() async {
-    await MnnLocalModelsService.setBackend(_recommendedBackend);
-    final installed = await MnnLocalModelsService.listInstalledModels();
+    // 这里只是「查一下推荐模型装没装」这一只读探测：绝不能 setBackend。setBackend 会把
+    // 用户正在跑的 MNN/QNN/LiteRT 引擎 stop 掉（还顺带停局域网代理）并静默改掉他的选择，
+    // 而调用方以为只是读一下列表。listAllInstalledModels 跨后端汇总，正好够用。
+    final installed = await MnnLocalModelsService.listAllInstalledModels();
     for (final model in installed) {
       final normalized = model.id.trim().toLowerCase();
       if (normalized == _recommendedModelId.toLowerCase()) {

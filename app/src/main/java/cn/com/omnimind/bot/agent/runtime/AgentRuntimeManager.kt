@@ -269,7 +269,13 @@ class AgentRuntimeManager private constructor(
         prepareLaunchEnvironment = ::prepareLocalAcpLaunch,
         // 「重新安装」的另一条分支（当前连着别的 Agent 时不切换运行时）必须真的安装：
         // prepareLocalAcpLaunch 只构造启动环境、明确不装依赖。
-        prepareManagedAdapter = { profile -> ensureManagedAcpAdapter(profile, force = true) },
+        //
+        // 但这里必须是 force = false：agent/prepare 已经在 handleMethod 之前按用户请求的
+        // force 装过一遍（见下面的 ensureManagedAcpAdapter 调用点）。此前这里硬编码
+        // force = true，等于一次「安装」跑两遍完整 npm 脚本；第二遍一旦撞上网络抖动/
+        // npm 缓存锁就会把「已装好」的 health 覆盖成失败，用户看到的是「安装失败」。
+        // force = false 的语义是「没就绪才装」，正好是这条分支需要的。
+        prepareManagedAdapter = { profile -> ensureManagedAcpAdapter(profile, force = false) },
         resolveSessionMcpEnabled = { profile ->
             AcpHarnessAdapters.forProfile(profile)
                 .supportsSessionMcp(currentAgentProviderCredentials())

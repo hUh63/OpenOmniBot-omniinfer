@@ -268,18 +268,26 @@ object OmniInferQnnModelsManager {
                 downloadModel(resolved, destDir, state) { info ->
                     emitDownloadUpdate(modelId, info)
                 }
-                activeDownloads.remove(modelId)
-                emitDownloadUpdate(modelId, downloadInfoMap(
-                    stateLabel = "completed",
-                    progress = 1.0,
-                    savedSize = totalSize,
-                    totalSize = totalSize,
-                ))
+                if (activeDownloads[modelId] === state) {
+                    activeDownloads.remove(modelId)
+                }
+                // 被暂停/取消的任务是「正常返回」的，不能报 completed：否则会把
+                // pauseDownload 刚推的 paused 快照覆盖成 100%。
+                if (!state.cancelled) {
+                    emitDownloadUpdate(modelId, downloadInfoMap(
+                        stateLabel = "completed",
+                        progress = 1.0,
+                        savedSize = totalSize,
+                        totalSize = totalSize,
+                    ))
+                }
                 emitEvent("downloads_changed", emptyMap())
                 ModelDownloadForegroundService.stopIfIdle(context)
                 OmniInferBuiltinProviderRefresher.refreshAsync(context, "qnn_download_finished:$modelId")
             } catch (e: Exception) {
-                activeDownloads.remove(modelId)
+                if (activeDownloads[modelId] === state) {
+                    activeDownloads.remove(modelId)
+                }
                 val errorMsg = e.message ?: "unknown_error"
                 emitDownloadUpdate(modelId, downloadInfoMap(
                     stateLabel = if (state.cancelled) "paused" else "failed",

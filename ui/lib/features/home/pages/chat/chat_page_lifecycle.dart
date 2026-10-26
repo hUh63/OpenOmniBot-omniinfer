@@ -65,11 +65,17 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _browserSessionSnapshotChangedSubscription = AssistsMessageService
         .browserSessionSnapshotChangedStream
         .listen(_handleBrowserSessionSnapshotChanged);
+    // 事件流一旦出错或关闭，reducer 再也收不到终态事件：思考中 / 停止按钮会永远停在
+    // 原地（表现为「AI 一直回复、点了也没反应」），而且没有任何自愈入口。至少要复位
+    // 「正在回复」的状态，让用户能重新发送。
     _agentEventSubscription = AgentRuntimeService.events.listen(
       _handleAgentRuntimeEvent,
+      onError: _handleAgentEventStreamFailure,
+      onDone: _handleAgentEventStreamDone,
     );
     _omniLinkEventSubscription = OmniLinkPluginService.events.listen(
       _handleOmniLinkEvent,
+      onError: (Object error) => debugPrint('[OmniLink] event stream failed: $error'),
     );
     unawaited(_refreshAgentRuntimeStatus());
 
@@ -78,6 +84,25 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     final bootstrapFuture = _bootstrapConversationThread();
     _conversationBootstrapFuture = bootstrapFuture;
     unawaited(bootstrapFuture);
+  }
+
+  void _handleAgentEventStreamFailure(Object error) {
+    debugPrint('[Agent] event stream failed: $error');
+    if (!mounted) return;
+    // 事件流断了就再也等不到终态事件，本轮只能按「已结束」收尾，否则 UI 永久转圈。
+    setState(() {
+      _modeState(_activeMode).isAiResponding = false;
+      _isDeepThinking = false;
+    });
+  }
+
+  void _handleAgentEventStreamDone() {
+    debugPrint('[Agent] event stream closed by the native side');
+    if (!mounted) return;
+    setState(() {
+      _modeState(_activeMode).isAiResponding = false;
+      _isDeepThinking = false;
+    });
   }
 
   @override

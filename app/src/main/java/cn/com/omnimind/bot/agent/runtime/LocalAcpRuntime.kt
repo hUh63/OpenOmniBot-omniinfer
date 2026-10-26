@@ -13,6 +13,7 @@ import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.baselib.database.DatabaseHelper
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.omniflow.OmniVlmPlugin
@@ -340,8 +341,23 @@ internal class AcpTurnOwnershipStore {
         activeBySession.remove(sessionKey)
         current.requestId?.let { requestId ->
             requestRecords[AcpTurnRequestKey(scope, sessionId, requestId)] = finished
+            pruneTerminalRequestRecords()
         }
         finished
+    }
+
+    /**
+     * 终态 request 记录只为「同一 requestId 重放」保留，但清理点只有 disconnect。
+     * 一直连着同一个 Harness 时它会随轮次线性增长（且每轮 reserve 都要在这张 map 上
+     * 查表），所以这里按条数封顶，先丢最旧的终态记录；在飞记录不动。
+     */
+    private fun pruneTerminalRequestRecords() {
+        if (requestRecords.size <= MAX_REQUEST_RECORDS) return
+        val excess = requestRecords.size - MAX_REQUEST_RECORDS
+        requestRecords.entries
+            .filter { it.value.terminal != null }
+            .take(excess)
+            .forEach { requestRecords.remove(it.key) }
     }
 
     fun clear(scopeId: String) = synchronized(lock) {
@@ -374,6 +390,7 @@ internal class AcpTurnOwnershipStore {
                 requestRecords[AcpTurnRequestKey(scope, record.sessionId, requestId)] = record
             }
         }
+        pruneTerminalRequestRecords()
         finished
     }
 
@@ -382,6 +399,8 @@ internal class AcpTurnOwnershipStore {
 
     private companion object {
         const val DEFAULT_SCOPE = "default"
+        /** 幂等重放用的终态 request 记录上限。 */
+        const val MAX_REQUEST_RECORDS = 256
     }
 }
 
@@ -1665,6 +1684,10 @@ internal class LocalAcpRuntime(
                 "capabilities" to statusPayload()["capabilities"]
             )
         }.getOrElse { error ->
+            // 取消不是失败：runCatching 连 CancellationException 一起吞掉的话，用户离开
+            // 设置页/切 Agent 会让这个 Harness 的 health 被永久写成 offline（错误文本还是
+            // Kotlin 的 "Job was cancelled"），下一次连接又被迫走 defensive 探针。
+            if (error is CancellationException) throw error
             val health = failedAgentHealth(error)
             profileStore.saveHealth(profile.id, health)
             linkedMapOf(
@@ -1742,6 +1765,7 @@ internal class LocalAcpRuntime(
                     )["capabilities"],
                 )
             }.getOrElse { error ->
+                if (error is CancellationException) throw error
                 val health = failedAgentHealth(error)
                 profileStore.saveHealth(profile.id, health)
                 linkedMapOf(
@@ -1765,6 +1789,10 @@ internal class LocalAcpRuntime(
                 "capabilities" to statusPayload()["capabilities"]
             )
         }.getOrElse { error ->
+            // 取消不是失败：runCatching 连 CancellationException 一起吞掉的话，用户离开
+            // 设置页/切 Agent 会让这个 Harness 的 health 被永久写成 offline（错误文本还是
+            // Kotlin 的 "Job was cancelled"），下一次连接又被迫走 defensive 探针。
+            if (error is CancellationException) throw error
             val health = failedAgentHealth(error)
             profileStore.saveHealth(profile.id, health)
             linkedMapOf(
@@ -1850,9 +1878,17 @@ internal class LocalAcpRuntime(
                 }.groupBy { it.first }
             }.getOrDefault(emptyMap())
         }
+        // 探针「整体失败」（终端冷启动超时、proot 未就绪、脚本异常）与「什么都没装」在
+        // 输出上完全一样：都是空 map。必须把两者区分开，否则一次探针失败就把所有 Agent
+        // 写成 missing，用户在设置页看到「全都没装」并去重装（重装又会重跑安装脚本）。
+        val probeFailed = externalProfiles.isNotEmpty() && availabilityById.isEmpty()
+        if (probeFailed) {
+            OmniLog.w(TAG, "ACP availability probe returned nothing; keep previous health")
+        }
         val checkedAt = System.currentTimeMillis()
         profiles.forEach { profile ->
             val builtIn = profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID
+            if (probeFailed && !builtIn) return@forEach
             val availability = availabilityById[profile.id].orEmpty()
                 .associate { it.second to it.third }
             val runtime = AcpAgentProfileStore.officialRuntime(profile)
@@ -2691,6 +2727,9 @@ internal class LocalAcpRuntime(
         // the resource visible to session/cancel before any prompt IO starts,
         // while still giving the admission check below one atomic boundary.
         val promptStart = CompletableDeferred<Unit>()
+        // 最近一次「有反应」的时间戳：session/update 每来一条刷新一次。空闲看门狗用它判断
+        // adapter 是不是活着但不回话。
+        val lastPromptActivityAt = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
         val job = scope.launch {
             var stopReason: String? = null
             var cancelled = false
@@ -2707,10 +2746,12 @@ internal class LocalAcpRuntime(
                 // collecting until that transport closes leaves the UI in
                 // "thinking" forever even though the turn already ended.
                 acquireForegroundTurn(threadId, turnId)
+                lastPromptActivityAt.set(System.currentTimeMillis())
                 markTurnTiming(threadId, turnId, "prompt_sent")
                 session.prompt(blocks, promptMeta(args)).takeWhile { event ->
                     when (event) {
                         is Event.SessionUpdateEvent -> {
+                            lastPromptActivityAt.set(System.currentTimeMillis())
                             handleSessionUpdate(threadId, turnId, event.update)
                             true
                         }
@@ -2815,14 +2856,42 @@ internal class LocalAcpRuntime(
             }
         }
 
+        // 进程活着但 adapter 不回话（stdio 挂死、插件异常、弱网等待）时，collect 永远不会
+        // 结束：turn 预约不释放，之后同一会话的每次 session/prompt 都在 reserve 处被拒，
+        // 主机请求也永远挂在 completion.await() 上。进程退出看门狗救不了这种情况，
+        // 必须再有一条空闲看门狗。
+        val idleWatcher = scope.launch(start = CoroutineStart.LAZY) {
+            while (isActive) {
+                delay(PROMPT_IDLE_WATCHDOG_TICK_MS)
+                if (!job.isActive) return@launch
+                val idleMs = System.currentTimeMillis() - lastPromptActivityAt.get()
+                if (idleMs < PROMPT_IDLE_TIMEOUT_MS) continue
+                Log.w(
+                    TAG,
+                    "ACP prompt idle timeout turn=$turnId session=$threadId idleMs=$idleMs"
+                )
+                finishTurn(
+                    threadId = threadId,
+                    turnId = turnId,
+                    status = "error",
+                    error = "ACP agent 已 ${PROMPT_IDLE_TIMEOUT_MS / 1000} 秒没有任何响应，本轮已中止"
+                )
+                job.cancel(CancellationException("ACP prompt idle timeout"))
+                return@launch
+            }
+        }
+
         job.invokeOnCompletion {
             exitWatcher.cancel()
+            idleWatcher.cancel()
         }
         return {
             exitWatcher.start()
+            idleWatcher.start()
             job.start()
             job.join()
             exitWatcher.cancelAndJoin()
+            idleWatcher.cancelAndJoin()
             linkedMapOf<String, Any?>(
                 "threadId" to threadId,
                 "turnId" to turnId,
@@ -4158,6 +4227,12 @@ internal class LocalAcpRuntime(
         private const val TAG = "LocalAcpRuntime"
         private const val INITIALIZE_TIMEOUT_MS = 90_000L
         private const val PROCESS_CLOSE_TIMEOUT_MS = 1_500L
+        /**
+         * prompt 空闲上限：这么久没有任何 session/update 就认为 adapter 卡死并中止本轮。
+         * 取 10 分钟是为了只抓「彻底不回话」的适配器，不误杀长时间工具调用。
+         */
+        private const val PROMPT_IDLE_TIMEOUT_MS = 600_000L
+        private const val PROMPT_IDLE_WATCHDOG_TICK_MS = 15_000L
         /** ACP 终端输出在写入侧的硬上限（未指定 outputByteLimit 时使用）。 */
         private const val DEFAULT_ACP_TERMINAL_OUTPUT_LIMIT_BYTES = 8L * 1024L * 1024L
         private const val READER_JOIN_TIMEOUT_MS = 2_000L

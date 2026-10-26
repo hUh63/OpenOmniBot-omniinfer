@@ -186,6 +186,24 @@ class MnnLocalModelsChannel {
     }
 
     private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        // 同步分支（getApiAuth / saveApiAuth / getBackend / setBackend / getConfig /
+        // setActiveModel ...）此前是裸调的：ensureContext() 未初始化、MMKV 异常、
+        // provider 刷新抛错都会直接冒到 Flutter 的 MethodChannel handler —— 主线程
+        // FATAL，同时 Dart 侧那次 invokeMethod 永远收不到回包（页面永久 loading）。
+        try {
+            handleMethodCallInternal(call, result)
+        } catch (error: Throwable) {
+            runCatching {
+                result.error(
+                    ERROR_CODE,
+                    error.message ?: error.javaClass.simpleName,
+                    null,
+                )
+            }
+        }
+    }
+
+    private fun handleMethodCallInternal(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "listAllInstalledModels" -> runSuspend(result) {
                 listAllInstalledModels()
@@ -525,8 +543,12 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferMnnModelsManager.startDownload(modelId)
-                    result.success(true)
+                    // startDownload 会遍历目标目录统计已下载字节 + StatFs + 写 MMKV +
+                    // 起前台服务；MethodChannel 回调在主线程，原来直接跑会掉帧甚至 ANR。
+                    runSuspend(result) {
+                        OmniInferMnnModelsManager.startDownload(modelId)
+                        true
+                    }
                 }
             }
 
@@ -535,8 +557,10 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferMnnModelsManager.pauseDownload(modelId)
-                    result.success(true)
+                    runSuspend(result) {
+                        OmniInferMnnModelsManager.pauseDownload(modelId)
+                        true
+                    }
                 }
             }
 

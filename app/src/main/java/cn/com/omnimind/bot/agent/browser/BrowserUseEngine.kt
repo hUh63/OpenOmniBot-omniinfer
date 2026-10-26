@@ -84,6 +84,11 @@ import kotlin.coroutines.resumeWithException
 import kotlin.random.Random
 
 private const val NAVIGATION_TIMEOUT_MS = 30_000L
+/**
+ * 单次 evaluateJavascript 的上限。弹窗阻塞 JS 线程、脚本死循环、renderer 卡住都会让
+ * ValueCallback 永不回调，而这个协程持有 actionMutex —— 不设上限就是整条浏览器链路死锁。
+ */
+private const val EVALUATE_JS_TIMEOUT_MS = 15_000L
 private const val ACTION_SETTLE_DELAY_MS = 250L
 private const val LOAD_SETTLE_DELAY_MS = 600L
 private const val DESKTOP_VIEWPORT_WIDTH = 1280
@@ -93,6 +98,10 @@ private const val READ_IMAGE_JPEG_QUALITY = 75
 private const val READ_IMAGE_MAX_WIDTH = 1280
 private const val PREVIEW_FRAME_JPEG_QUALITY = 72
 private const val PREVIEW_FRAME_MAX_WIDTH = 420
+/** 单引擎的标签页硬上限：每个 tab 都是一整套 WebView + 两个 JS bridge。 */
+private const val MAX_TAB_COUNT = 8
+/** host 级限速时间戳的保留条目数（只按 host 记账，不清会随浏览站点数单调增长）。 */
+private const val MAX_HOST_THROTTLE_ENTRIES = 64
 private const val TYPE_INPUT_CHUNK_SIZE = 3
 private const val TYPE_INPUT_CHUNK_DELAY_MS = 35L
 /** userscript 下载的硬上限（见 downloadUserscriptText）。 */
@@ -626,6 +635,12 @@ class BrowserUseEngine(
     private var lastAiActionMutatesPage: Boolean = false
     @Volatile
     private var aiControlChangedAt: Long = 0L
+    /** 正在执行的动作数（见 LiveAgentBrowserSessionStore 的淘汰策略）。 */
+    private val activeExecutionCount = java.util.concurrent.atomic.AtomicInteger(0)
+    override val isBusy: Boolean get() = activeExecutionCount.get() > 0
+    /** 已经被 closeSession 销毁：之后不允许再建 WebView。 */
+    @Volatile
+    private var destroyed: Boolean = false
     private val uiHandler = Handler(Looper.getMainLooper())
     private var currentWorkspace: AgentWorkspaceDescriptor = workspace
     private val hostStore = BrowserHostStore.create(workspace.id)
@@ -654,10 +669,33 @@ class BrowserUseEngine(
     override val workspaceId: String
         get() = currentWorkspace.id
 
+    /**
+     * 这些 host call 绝不能排在 [actionMutex] 后面：
+     *  - 快照/预览：页面正在加载（[navigateTab] 最多持锁 30s）时，面板刷新会被一起堵死；
+     *  - stopLoading：它是唯一能打断正在进行的导航的手段，排在锁后面等于「点了没反应」；
+     *  - 弹窗/权限应答：WebView 在弹窗期间会阻塞 JS 线程，而 AI 的 evaluateJavascript 正持锁
+     *    等 JS 回调 —— 应答排在同一把锁上就是三方死锁（AI 等 JS、JS 等用户、用户等锁）；
+     *  - AI 控制权：纯状态读写，用户随时要能一键接管。
+     */
+    private val unGuardedHostCalls = setOf(
+        "getSnapshot",
+        "getLiveBrowserSessionSnapshot",
+        "capturePreviewFrame",
+        "setAiControl",
+        "getAiControl",
+        "stopLoading",
+        "resolveDialog",
+        "grantPermission",
+        "denyPermission",
+    )
+
     suspend fun handleHostCall(
         method: String,
         arguments: Map<String, Any?> = emptyMap()
     ): Any? {
+        if (method in unGuardedHostCalls) {
+            return handleHostCallInternal(method = method, arguments = arguments)
+        }
         return actionMutex.withLock {
             handleHostCallInternal(method = method, arguments = arguments)
         }
@@ -848,7 +886,13 @@ class BrowserUseEngine(
     }
 
     suspend fun execute(request: BrowserUseRequest): BrowserUseOutcome {
-        return actionMutex.withLock { executeInternal(request) }
+        activeExecutionCount.incrementAndGet()
+        return try {
+            requireNotDestroyed()
+            actionMutex.withLock { executeInternal(request) }
+        } finally {
+            activeExecutionCount.decrementAndGet()
+        }
     }
 
     suspend fun execute(
@@ -856,14 +900,26 @@ class BrowserUseEngine(
         agentRunId: String,
         workspace: AgentWorkspaceDescriptor,
     ): BrowserUseOutcome {
-        return actionMutex.withLock {
-            bindRunContext(agentRunId = agentRunId, workspace = workspace)
-            activeAgentRunId = agentRunId
-            try {
-                executeInternal(request)
-            } finally {
-                activeAgentRunId = null
+        activeExecutionCount.incrementAndGet()
+        return try {
+            requireNotDestroyed()
+            actionMutex.withLock {
+                bindRunContext(agentRunId = agentRunId, workspace = workspace)
+                activeAgentRunId = agentRunId
+                try {
+                    executeInternal(request)
+                } finally {
+                    activeAgentRunId = null
+                }
             }
+        } finally {
+            activeExecutionCount.decrementAndGet()
+        }
+    }
+
+    private fun requireNotDestroyed() {
+        if (destroyed) {
+            throw IllegalStateException("浏览器会话已关闭，请重新打开页面后再操作")
         }
     }
 
@@ -948,6 +1004,12 @@ class BrowserUseEngine(
     ) {
         currentAgentRunId = agentRunId
         currentWorkspace = workspace
+        // 新的一轮 run 视为重新授权。否则用户上次在面板里碰过页面（ACTION_DOWN 会
+        // 自动暂停 AI）之后，AI 会永久停在「控制已暂停」——而面板可能根本没打开，
+        // 用户看不到「恢复 AI 控制」按钮，模型只能一轮轮失败到回合耗尽。
+        if (!aiControlEnabled) {
+            setAiControlInternal(true)
+        }
     }
 
     fun liveSessionSnapshot(): Map<String, Any?> {
@@ -1349,6 +1411,20 @@ class BrowserUseEngine(
             return
         }
         withContext(Dispatchers.Main.immediate) {
+            // 弹窗期间 JS 线程是被挂住的：只有把 JsResult 应答掉它才会继续，否则用户点了
+            // 「停止」页面依旧卡着，evaluateJavascript 也永远不会回调。
+            pendingDialog?.let { dialog ->
+                pendingDialog = null
+                val promptResult = dialog.jsPromptResult
+                val jsResult = dialog.jsResult
+                runCatching {
+                    if (promptResult != null) {
+                        promptResult.cancel()
+                    } else {
+                        jsResult?.cancel()
+                    }
+                }
+            }
             tabs.values.forEach { tab ->
                 runCatching { tab.webView.stopLoading() }
                 tab.isLoading = false
@@ -1490,6 +1566,12 @@ class BrowserUseEngine(
     }
 
     private fun destroyOnMain() {
+        destroyed = true
+        // 弹窗/权限请求挂着的是已被销毁 WebView 的回调对象：不清掉，面板会一直显示
+        // 「有弹窗待处理」，用户点了也只是对一个死对象 confirm。
+        pendingDialog = null
+        pendingPermissionPrompt = null
+        pendingExternalOpen = null
         tabs.values.forEach { tab ->
             runCatching {
                 (tab.webView.parent as? ViewGroup)?.removeView(tab.webView)
@@ -1500,6 +1582,7 @@ class BrowserUseEngine(
         tabs.clear()
         activeTabId = null
         attachedContainer = null
+        hostActionTimestampsMs.clear()
         downloadManager.shutdown()
         mainScope.cancel()
     }
@@ -2346,6 +2429,10 @@ class BrowserUseEngine(
         profile: BrowserUserAgentProfile = defaultUserAgentProfile
     ): BrowserTab {
         require(Looper.myLooper() == Looper.getMainLooper()) { "createTabOnMain must run on main thread" }
+        require(!destroyed) { "浏览器会话已关闭，请重新打开页面后再操作" }
+        require(tabs.size < MAX_TAB_COUNT) {
+            "标签页数量已达上限（$MAX_TAB_COUNT），请先关闭不需要的标签页"
+        }
         val tabId = ++nextTabId
         val contextWrapper = MutableContextWrapper(appContext)
         val webView = WebView(contextWrapper).apply {
@@ -2447,6 +2534,11 @@ class BrowserUseEngine(
             delay(delayMs)
         }
         hostActionTimestampsMs[host] = System.currentTimeMillis()
+        // 只按 host 记账、永不清理的话，逛过多少站点就留多少条（引擎是全局保活的）。
+        if (hostActionTimestampsMs.size > MAX_HOST_THROTTLE_ENTRIES) {
+            hostActionTimestampsMs.keys.take(hostActionTimestampsMs.size - MAX_HOST_THROTTLE_ENTRIES)
+                .forEach { hostActionTimestampsMs.remove(it) }
+        }
         return delayMs
     }
 
@@ -2670,19 +2762,24 @@ class BrowserUseEngine(
         tab: BrowserTab,
         script: String
     ): String {
-        return withContext(Dispatchers.Main.immediate) {
-            val (vpWidth, vpHeight) = viewportDimensionsForProfile(tab.userAgentProfile)
-            layoutWebView(tab.webView, vpWidth, vpHeight)
-            suspendCancellableCoroutine { continuation ->
-                val callback = ValueCallback<String> { value ->
-                    if (continuation.isActive) {
-                        continuation.resume(value ?: "null")
+        // 没有超时的 evaluateJavascript 会把整条浏览器链路一起拖死：页面弹窗/死循环脚本/
+        // renderer 卡住时 ValueCallback 永不回调，而这个协程正持着 actionMutex（execute 里），
+        // 于是「用户点确定」「点停止」「取快照」全部排在锁上永远进不来。这里必须给上限。
+        return withTimeout(EVALUATE_JS_TIMEOUT_MS) {
+            withContext(Dispatchers.Main.immediate) {
+                val (vpWidth, vpHeight) = viewportDimensionsForProfile(tab.userAgentProfile)
+                layoutWebView(tab.webView, vpWidth, vpHeight)
+                suspendCancellableCoroutine { continuation ->
+                    val callback = ValueCallback<String> { value ->
+                        if (continuation.isActive) {
+                            continuation.resume(value ?: "null")
+                        }
                     }
-                }
-                try {
-                    tab.webView.evaluateJavascript(script, callback)
-                } catch (error: Exception) {
-                    continuation.resumeWithException(error)
+                    try {
+                        tab.webView.evaluateJavascript(script, callback)
+                    } catch (error: Exception) {
+                        continuation.resumeWithException(error)
+                    }
                 }
             }
         }
@@ -2726,9 +2823,13 @@ class BrowserUseEngine(
             })();
         """.trimIndent()
         val raw = evaluateJavascriptRaw(tab, wrappedScript)
-        tab.helpersInjected = true
         val decoded = decodeJavascriptString(raw)
         val envelope = json.parseToJsonElement(decoded).jsonObject
+        // 只有这一轮真的拿到合法 envelope 才能认定 helpers 已注入。先置 true 再解析的话，
+        // 一次求值失败（弹窗阻塞、页面正在切换、renderer 异常 → "null"）会让引擎认为
+        // 已注入，之后所有动作都走 window.__omni 快捷块，在 undefined 上抛错，
+        // 直到下一次主框架导航才自愈。
+        tab.helpersInjected = true
         val ok = envelope["ok"]?.jsonPrimitive?.booleanOrNull == true
         if (!ok) {
             val message = envelope["error"]?.jsonPrimitive?.contentOrNull ?: "JavaScript 执行失败"
@@ -3819,8 +3920,16 @@ class BrowserUseEngine(
             if (resultMsg == null) {
                 return false
             }
-            val popupTab = createTabOnMain(tab.userAgentProfile)
+            // 先校验 transport 再建 tab：反过来的话 cast 失败会留下一个「已进 tabs、
+            // activeTabId 已切过去、但从未 attach 也永不 destroy」的幽灵 tab。
             val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+            if (tabs.size >= MAX_TAB_COUNT) {
+                // 广告/反爬站点会 for(...) window.open(...)：不设上限就是几十个 WebView
+                // 同时存活，必然 OOM。
+                OmniLog.w("BrowserUseEngine", "onCreateWindow rejected: tab limit $MAX_TAB_COUNT reached")
+                return false
+            }
+            val popupTab = createTabOnMain(tab.userAgentProfile)
             transport.webView = popupTab.webView
             resultMsg.sendToTarget()
             activeTabId = popupTab.tabId

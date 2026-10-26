@@ -80,5 +80,14 @@ class ChatPageModeState {
     pendingAttachments.clear();
     editingUserMessageId = null;
     draftMessage = '';
+    // 分页游标与工具卡展开集合同样是「会话作用域」的状态。漏清的话：新会话首屏若走
+    // 「runtime 已存在」分支（不重写分页状态），会继承上一会话的 messageOffset
+    // （例如 600），上滑按旧游标查、拿到空页，表现为历史翻不动；展开集合残留则让
+    // 工具活动条按旧 taskId 决定是否显示。
+    hasMoreMessages = false;
+    messageOffset = 0;
+    isLoadingMore = false;
+    expandedAgentRunTaskIds.clear();
+    expandedAgentRunTaskOrder.clear();
   }
 }

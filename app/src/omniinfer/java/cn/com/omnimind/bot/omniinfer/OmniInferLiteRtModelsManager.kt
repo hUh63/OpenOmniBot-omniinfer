@@ -344,17 +344,24 @@ object OmniInferLiteRtModelsManager {
         scope.launch {
             try {
                 downloadMarketModel(marketModel, destFile, state)
-                activeDownloads.remove(marketModel.id)
-                emitDownloadUpdate(
-                    marketModel.id,
-                    downloadInfoMap(
-                        stateLabel = "completed",
-                        progress = 1.0,
-                        savedSize = destFile.length(),
-                        totalSize = destFile.length(),
-                        currentFile = marketModel.fileName,
+                // 只有表里还是本次任务才摘表项（旧协程晚归不能摘掉暂停后新建的任务）。
+                if (activeDownloads[marketModel.id] === state) {
+                    activeDownloads.remove(marketModel.id)
+                }
+                // 被暂停/取消的任务是正常返回的：不能报 completed，否则会把刚推的
+                // paused 快照覆盖成 100%。
+                if (!state.cancelled) {
+                    emitDownloadUpdate(
+                        marketModel.id,
+                        downloadInfoMap(
+                            stateLabel = "completed",
+                            progress = 1.0,
+                            savedSize = destFile.length(),
+                            totalSize = destFile.length(),
+                            currentFile = marketModel.fileName,
+                        )
                     )
-                )
+                }
                 emitConfigChanged()
                 emitEvent("downloads_changed", emptyMap())
                 ModelDownloadForegroundService.stopIfIdle(context)
@@ -363,7 +370,9 @@ object OmniInferLiteRtModelsManager {
                     "litert_download_finished:${marketModel.id}"
                 )
             } catch (e: Exception) {
-                activeDownloads.remove(marketModel.id)
+                if (activeDownloads[marketModel.id] === state) {
+                    activeDownloads.remove(marketModel.id)
+                }
                 val stateLabel = if (state.cancelled) "paused" else "failed"
                 emitDownloadUpdate(
                     marketModel.id,

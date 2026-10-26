@@ -6,6 +6,12 @@ import android.view.ViewGroup
 interface AgentBrowserLiveSessionHandle {
     val workspaceId: String
 
+    /**
+     * 是否正有动作在跑（含 AI 的一次 navigation 等待）。正在跑的引擎被淘汰会在
+     * 中途把 WebView destroy 掉、把 mainScope cancel 掉，页面加载永远等不到 onPageFinished。
+     */
+    val isBusy: Boolean get() = false
+
     fun closeSession()
 }
 
@@ -37,7 +43,12 @@ class LiveAgentBrowserSessionStore<T : AgentBrowserLiveSessionHandle> {
                 sessions[workspaceId] = hit
             } else {
                 val excess = (sessions.size + 1 - MAX_LIVE_WORKSPACES).coerceAtLeast(0)
-                sessions.keys.take(excess).forEach { key ->
+                // 只淘汰「当前没有动作在跑」的引擎。淘汰一个正在 navigate 的引擎等于把它
+                // mainScope 直接 cancel：那次加载永远等不到 onPageFinished，AI 侧要白等
+                // 30s 才报超时；更糟的是残留的 createTab 会在这个已销毁的引擎上再造
+                // WebView（既没人 attach 也再没人 destroy）。
+                val evictable = sessions.entries.filter { !it.value.isBusy }.map { it.key }
+                evictable.take(excess).forEach { key ->
                     sessions.remove(key)?.let { evicted.add(it) }
                 }
             }
