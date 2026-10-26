@@ -639,8 +639,23 @@ object DatabaseHelper {
         )
     }
 
-    suspend fun deleteAgentConversationMessageIds(conversationId: Long, modes: List<String>, entryIds: List<String>): Int =
-        getDatabase().agentConversationEntryDao().deleteMessageEntries(conversationId, modes, entryIds)
+    suspend fun deleteAgentConversationMessageIds(
+        conversationId: Long,
+        modes: List<String>,
+        entryIds: List<String>
+    ): Int {
+        if (entryIds.isEmpty()) return 0
+        val dao = getDatabase().agentConversationEntryDao()
+        // IN (...) 的绑定变量数 = entryIds + modes。会话用久了条目上万，一次「多选删除」
+        // 就可能超过 SQLite 上限（老设备 999），整笔事务回滚 → 用户看到的是「删不掉」。
+        // 与其它批量查询保持一致，按 IN_QUERY_CHUNK_SIZE 分块。
+        val budget = (IN_QUERY_CHUNK_SIZE - modes.size).coerceAtLeast(1)
+        var deleted = 0
+        entryIds.chunked(budget).forEach { chunk ->
+            deleted += dao.deleteMessageEntries(conversationId, modes, chunk)
+        }
+        return deleted
+    }
 
     suspend fun deleteAgentConversationThread(
         conversationId: Long,

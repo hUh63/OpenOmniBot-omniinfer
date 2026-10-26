@@ -10,6 +10,7 @@ import cn.com.omnimind.baselib.database.Conversation
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
+import cn.com.omnimind.bot.agent.workspace.schedule.ScheduledTaskResultNotifier
 import cn.com.omnimind.bot.webchat.WebAgentRunBridge
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
