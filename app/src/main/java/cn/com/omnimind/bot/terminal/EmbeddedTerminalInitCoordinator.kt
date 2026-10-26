@@ -310,7 +310,10 @@ object EmbeddedTerminalInitCoordinator {
                 val probe = manager.executeHiddenCommand(
                     command = "true",
                     executorKey = "distribution-switch-${distribution.id}",
-                    timeoutMs = 60_000L,
+                    // 首次切换发行版时，这次探测会顺带完成 rootfs 解包（~106MB）。
+                    // 原来给 60 秒，超时后进程被 destroyForcibly() —— 解包被打断、
+                    // marker 没写，下次又从零开始，于是永远卡在同一处。与安装预算对齐。
+                    timeoutMs = 10 * 60 * 1000L,
                     distribution = distribution
                 )
                 if (probe.isOk && probe.exitCode == 0) {

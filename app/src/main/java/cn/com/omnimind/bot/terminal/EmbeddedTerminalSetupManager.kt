@@ -20,6 +20,8 @@ class EmbeddedTerminalSetupManager(
     private companion object {
         // Inventory can perform the first rootfs extraction as part of setup.
         const val SETUP_COMMAND_TIMEOUT_MS = 15 * 60 * 1000L
+        /** 安装会话超过这个时长仍标记 running，视为上一次安装留下的残留。 */
+        private const val INSTALL_SESSION_STALE_MS = 20 * 60 * 1000L
     }
     data class PackageDefinition(
         val id: String,
@@ -55,7 +57,8 @@ class EmbeddedTerminalSetupManager(
         val completed: Boolean = false,
         val success: Boolean? = null,
         val message: String = "",
-        val selectedPackageIds: List<String> = emptyList()
+        val selectedPackageIds: List<String> = emptyList(),
+        val startedAt: Long = 0L
     ) {
         fun toMap(): Map<String, Any?> = mapOf(
             "sessionId" to sessionId,
@@ -249,7 +252,18 @@ class EmbeddedTerminalSetupManager(
 
             installSessionMutex.withLock {
                 val currentSnapshot = installSessionSnapshot
-                if (currentSnapshot.running && !currentSnapshot.sessionId.isNullOrBlank()) {
+                // 这个快照只在启动时置 running=true，之后没有任何代码把它复成完成
+                // （dismissInstallSession 没有暴露给 UI）。于是装过一次之后，本次进程内
+                // 再点安装都会命中下面的提前返回：新的安装命令根本不下发，界面上一直
+                // 转圈、也没有失败结论。超过安装预算的快照按残留处理，让用户能重试。
+                val stale = currentSnapshot.running &&
+                    (currentSnapshot.startedAt <= 0L ||
+                        System.currentTimeMillis() - currentSnapshot.startedAt >
+                        INSTALL_SESSION_STALE_MS)
+                if (currentSnapshot.running &&
+                    !stale &&
+                    !currentSnapshot.sessionId.isNullOrBlank()
+                ) {
                     return@withLock currentSnapshot
                 }
 
@@ -295,7 +309,8 @@ class EmbeddedTerminalSetupManager(
                         completed = false,
                         success = null,
                         message = "环境配置进行中，请在下方终端查看安装输出。",
-                        selectedPackageIds = installIds
+                        selectedPackageIds = installIds,
+                        startedAt = System.currentTimeMillis()
                     )
                     updateInstallSessionSnapshot(startedSnapshot)
 

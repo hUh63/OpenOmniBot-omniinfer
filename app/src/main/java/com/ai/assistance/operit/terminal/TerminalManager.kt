@@ -29,8 +29,10 @@ import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
@@ -71,6 +73,8 @@ class TerminalManager private constructor(
     )
 
     internal val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    /** 每个发行版只保留一份环境初始化任务，避免并发调用重复下载/解包。 */
+    private val environmentInitJobs = java.util.concurrent.ConcurrentHashMap<String, Deferred<Boolean>>()
 
     private val sessionsById = ConcurrentHashMap<String, ManagedSession>()
     private val _terminalState = MutableStateFlow(TerminalState())
@@ -102,6 +106,44 @@ class TerminalManager private constructor(
                 INSTANCE ?: TerminalManager(context.applicationContext).also { INSTANCE = it }
             }
         }
+    }
+
+    /**
+     * 首次运行/切换发行版时，运行环境的准备（下载 29MB + 解包 ~106MB rootfs）必然
+     * 超过单次隐藏调用的超时。以前用 withTimeoutOrNull 包住 initializeEnvironment：
+     * 那是「超时取消」，会把下载/解包一起打断，下次又从头再来 —— 用户看到的就是环境
+     * 永远装不上、Agent 装完不生效。现在把初始化放到独立的 scope 里跑，调用方只等结果，
+     * 超时只是「这次探测没等到」，初始化仍在后台继续。
+     */
+    private suspend fun awaitEnvironmentReady(
+        distribution: TerminalDistribution.Spec
+    ): Boolean {
+        if (EmbeddedRuntimeInstaller.isCurrentDistributionReady(context)) {
+            return runCatching {
+                ensureShellScripts()
+                true
+            }.getOrElse {
+                Log.e(TAG, "Failed to prepare shell scripts", it)
+                false
+            }
+        }
+        val key = distribution.id
+        val initJob = environmentInitJobs.computeIfAbsent(key) {
+            coroutineScope.async {
+                runCatching { initializeEnvironment(distribution = distribution) }
+                    .getOrElse { error ->
+                        if (error is CancellationException) throw error
+                        Log.w(TAG, "Environment initialization failed", error)
+                        false
+                    }
+            }
+        }
+        val ready = withTimeoutOrNull(HIDDEN_EXEC_ENVIRONMENT_TIMEOUT_MS) { initJob.await() } ?: false
+        if (!ready && initJob.isCompleted) {
+            // 失败结果不缓存，下次调用重新尝试。
+            environmentInitJobs.remove(key, initJob)
+        }
+        return ready
     }
 
     suspend fun initializeEnvironment(
@@ -265,11 +307,7 @@ class TerminalManager private constructor(
         onProcessStarted: ((Process) -> Unit)? = null,
         onOutputChunk: suspend (String) -> Unit = {}
     ): HiddenExecResult {
-        val environmentReady = withTimeoutOrNull(
-            HIDDEN_EXEC_ENVIRONMENT_TIMEOUT_MS
-        ) {
-            initializeEnvironment(distribution = distribution)
-        } ?: false
+        val environmentReady = awaitEnvironmentReady(distribution)
         if (!environmentReady) {
             return HiddenExecResult(
                 output = "",
@@ -694,7 +732,7 @@ internal fun terminateHiddenExecProcess(process: Process) {
 
 private const val HIDDEN_EXEC_TERMINATION_GRACE_MS = 500L
 private const val HIDDEN_EXEC_READER_DRAIN_TIMEOUT_MS = 250L
-private const val HIDDEN_EXEC_ENVIRONMENT_TIMEOUT_MS = 10_000L
+private const val HIDDEN_EXEC_ENVIRONMENT_TIMEOUT_MS = 45_000L
 
 internal fun isExpectedHiddenExecReaderTermination(error: Throwable): Boolean {
     var current: Throwable? = error
