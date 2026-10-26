@@ -105,6 +105,16 @@ class AgentBrowserSessionService {
     });
   }
 
+  /// 切换 AI 对浏览器的控制权。
+  ///
+  /// 用户希望自己操作页面时应先置 false：AI 的点击/输入会立刻停手，只保留
+  /// 只读动作（读文字、截图），并把「已暂停」作为结果回给模型，避免两边互相踩。
+  static Future<ChatBrowserSessionSnapshot?> setAiControl(bool enabled) {
+    return _invokeSnapshot('setAiControl', <String, dynamic>{
+      'enabled': enabled,
+    });
+  }
+
   static Future<ChatBrowserSessionSnapshot?> reload({int? tabId}) {
     return _invokeSnapshot('reload', <String, dynamic>{
       if (tabId != null) 'tabId': tabId,

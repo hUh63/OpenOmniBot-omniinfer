@@ -38,7 +38,10 @@ class BrowserToolHandler(
     ): ToolExecutionResult {
         val toolName = "browser_use"
         return try {
-            helper.requireWorkspaceStorageAccess(callback)?.let { return it }
+            // 浏览器操作只在内置 WebView 里跑，产物落在 app 私有 workspace 里，
+            // 不需要「所有文件访问」权限。原先这里要求存储权限，等于没有该权限时
+            // 每一次 browser_use / webfetch 都只返回一个权限申请、永远不执行，
+            // 表现就是「AI 根本调不了浏览器」。
             val request = BrowserUseRequest.fromJson(args)
             val engine = LiveAgentBrowserSessionManager.acquireEngine(
                 context = helper.context,

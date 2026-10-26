@@ -1130,6 +1130,10 @@ class ChatBrowserSessionSnapshot {
     this.pendingDialog,
     this.permissionPrompt,
     this.userscriptSummary = const BrowserUserscriptSummary(),
+    this.aiControlEnabled = true,
+    this.lastAiAction = '',
+    this.lastAiActionAt = 0,
+    this.lastAiActionMutatesPage = false,
   });
 
   final bool available;
@@ -1159,6 +1163,25 @@ class ChatBrowserSessionSnapshot {
   final BrowserDialogPrompt? pendingDialog;
   final BrowserPermissionPrompt? permissionPrompt;
   final BrowserUserscriptSummary userscriptSummary;
+
+  /// AI 此刻是否被允许改变页面状态。用户一在浏览器里动手就会变成 false，
+  /// 面板上可以显式切回。
+  final bool aiControlEnabled;
+
+  /// AI 最近一次动作的描述，用于「AI 正在控制浏览器 · 点击…」这类提示。
+  final String lastAiAction;
+  final int lastAiActionAt;
+
+  /// 上一条 AI 动作是否真的改了页面（只读的读页面动作不该把面板弹出来）。
+  final bool lastAiActionMutatesPage;
+
+  /// AI 卡在需要人来处理的环节（原生弹窗、权限、外部打开、风控）。这种时候必须把
+  /// 浏览器面板摆出来，不能因为用户之前关过就一直藏着。
+  bool get needsUserAttention =>
+      pendingDialog != null ||
+      permissionPrompt != null ||
+      externalOpenPrompt != null ||
+      riskChallengeDetected;
 
   bool matchesWorkspace(String? candidateWorkspaceId) {
     final normalizedCandidate = candidateWorkspaceId?.trim() ?? '';
@@ -1196,6 +1219,10 @@ class ChatBrowserSessionSnapshot {
     BrowserDialogPrompt? pendingDialog,
     BrowserPermissionPrompt? permissionPrompt,
     BrowserUserscriptSummary? userscriptSummary,
+    bool? aiControlEnabled,
+    String? lastAiAction,
+    int? lastAiActionAt,
+    bool? lastAiActionMutatesPage,
   }) {
     return ChatBrowserSessionSnapshot(
       available: available ?? this.available,
@@ -1227,6 +1254,11 @@ class ChatBrowserSessionSnapshot {
       pendingDialog: pendingDialog ?? this.pendingDialog,
       permissionPrompt: permissionPrompt ?? this.permissionPrompt,
       userscriptSummary: userscriptSummary ?? this.userscriptSummary,
+      aiControlEnabled: aiControlEnabled ?? this.aiControlEnabled,
+      lastAiAction: lastAiAction ?? this.lastAiAction,
+      lastAiActionAt: lastAiActionAt ?? this.lastAiActionAt,
+      lastAiActionMutatesPage:
+          lastAiActionMutatesPage ?? this.lastAiActionMutatesPage,
     );
   }
 
@@ -1318,6 +1350,14 @@ class ChatBrowserSessionSnapshot {
       userscriptSummary: BrowserUserscriptSummary.fromMap(
         _browserMap(normalized['userscriptSummary']),
       ),
+      // 旧版本快照没有这几个字段：缺省视为「AI 可以控制」，避免一升级就显示已暂停。
+      aiControlEnabled: normalized['aiControlEnabled'] == null
+          ? true
+          : _browserBool(normalized['aiControlEnabled']),
+      lastAiAction: _browserString(normalized['lastAiAction']),
+      lastAiActionAt: _browserInt(normalized['lastAiActionAt']) ?? 0,
+      lastAiActionMutatesPage:
+          _browserBool(normalized['lastAiActionMutatesPage']),
     );
   }
 

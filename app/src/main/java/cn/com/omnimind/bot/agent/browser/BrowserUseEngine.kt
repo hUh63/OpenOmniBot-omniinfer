@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.Looper
 import android.Manifest
 import android.annotation.SuppressLint
@@ -15,6 +16,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.pm.PackageManager
 import android.provider.DocumentsContract
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
@@ -36,6 +38,7 @@ import android.webkit.WebViewClient
 import android.webkit.URLUtil
 import androidx.core.content.FileProvider
 import cn.com.omnimind.baselib.permission.PermissionRequest as RuntimePermissionRequest
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.browser.BrowserToolResultPayloads
 import cn.com.omnimind.bot.webchat.FlutterChatSyncBridge
 import kotlinx.coroutines.CompletableDeferred
@@ -434,6 +437,12 @@ class BrowserUseEngine(
                 "riskChallengeKind" to null,
                 "recommendedNextAction" to null,
                 "throttleDelayMs" to null,
+                // 没有会话时视为 AI 可以控制，避免 UI 一上来就显示「已暂停」。
+                "aiControlEnabled" to true,
+                "lastAiAction" to "",
+                "lastAiActionAt" to 0L,
+                "lastAiActionMutatesPage" to false,
+                "aiControlChangedAt" to 0L,
                 "tabs" to emptyList<Map<String, Any?>>(),
                 "bookmarks" to emptyList<Map<String, Any?>>(),
                 "history" to emptyList<Map<String, Any?>>(),
@@ -601,6 +610,23 @@ class BrowserUseEngine(
     private var currentAgentRunId: String = agentRunId
     @Volatile
     private var activeAgentRunId: String? = null
+    /**
+     * AI 是否被允许改变页面状态。用户在浏览器视图里一动手就自动置 false（否则 AI 的
+     * 点击/输入会和用户的操作互相踩），也可以从面板上显式切换。只读动作（get_text /
+     * screenshot 等）不受影响，AI 仍能看懂用户把页面操作到哪了。
+     */
+    @Volatile
+    private var aiControlEnabled: Boolean = true
+    @Volatile
+    private var lastAiAction: String = ""
+    @Volatile
+    private var lastAiActionAt: Long = 0L
+    /** 上一条 AI 动作是否真的改了页面（决定要不要把面板弹出来打扰用户）。 */
+    @Volatile
+    private var lastAiActionMutatesPage: Boolean = false
+    @Volatile
+    private var aiControlChangedAt: Long = 0L
+    private val uiHandler = Handler(Looper.getMainLooper())
     private var currentWorkspace: AgentWorkspaceDescriptor = workspace
     private val hostStore = BrowserHostStore.create(workspace.id)
     private var defaultUserAgentProfile =
@@ -644,6 +670,15 @@ class BrowserUseEngine(
         return when (method) {
             "getSnapshot",
             "getLiveBrowserSessionSnapshot" -> liveSessionSnapshot()
+            "setAiControl" -> {
+                setAiControlInternal(arguments["enabled"] != false)
+                liveSessionSnapshot()
+            }
+            "getAiControl" -> linkedMapOf<String, Any?>(
+                "aiControlEnabled" to aiControlEnabled,
+                "lastAiAction" to lastAiAction,
+                "lastAiActionAt" to lastAiActionAt
+            )
             "capturePreviewFrame" -> {
                 captureActivePreviewFrame(
                     maxWidth = arguments["maxWidth"].asInt()?.coerceIn(120, 960)
@@ -833,6 +868,36 @@ class BrowserUseEngine(
     }
 
     private suspend fun executeInternal(request: BrowserUseRequest): BrowserUseOutcome {
+        if (!aiControlEnabled && request.action.mutatesPageState()) {
+            // 用户接管期间不执行会改页面的动作，但必须让模型知道「为什么没做、接下来
+            // 该怎么办」，否则它只会反复重试同一个动作直到回合耗尽。
+            val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull()
+            val message = "用户正在手动操作浏览器，AI 控制已暂停，本次 ${request.action.wireName} " +
+                "未执行。不要重复调用：请告诉用户你在等什么，并请他在浏览器面板点击「恢复 AI 控制」后继续。"
+            return BrowserUseOutcome(
+                summaryText = "AI 控制已暂停（用户正在操作）",
+                payload = linkedMapOf(
+                    "status" to "failed",
+                    "aiControlEnabled" to false,
+                    "aiControlPaused" to true,
+                    "action" to request.action.wireName,
+                    "errorMessage" to message,
+                    "message" to message,
+                    "currentUrl" to (tab?.currentUrl ?: ""),
+                    "title" to (tab?.title ?: "")
+                )
+            )
+        }
+        lastAiAction = request.toolTitle
+        lastAiActionAt = System.currentTimeMillis()
+        lastAiActionMutatesPage = request.action.mutatesPageState()
+        // 立刻把「AI 正在控制 · 当前动作」推给面板，用户才能看见页面为什么自己在动。
+        // 异步投递：快照要读 WebView 才有历史/尺寸，这里正持着 actionMutex，
+        // 不能同步 runBlocking 到主线程，否则和面板的 host call 互相等。
+        uiHandler.post {
+            runCatching { publishSnapshotUpdate() }
+                .onFailure { OmniLog.w("BrowserUseEngine", "publish ai action failed: $it") }
+        }
         return when (request.action) {
             BrowserUseAction.NEW_TAB -> executeNewTab(request)
             BrowserUseAction.LIST_TABS -> simpleOutcome(request, listTabsPayload())
@@ -859,6 +924,23 @@ class BrowserUseEngine(
             BrowserUseAction.WAIT_FOR_SELECTOR -> executeWaitForSelector(request)
         }
     }
+
+    /** 切换 AI 控制权；用户触摸页面或点面板按钮都会走到这里。 */
+    fun setAiControlInternal(enabled: Boolean) {
+        if (aiControlEnabled == enabled) return
+        aiControlEnabled = enabled
+        aiControlChangedAt = System.currentTimeMillis()
+        if (enabled) {
+            // 恢复 AI 控制时清掉上一条动作描述，避免横幅显示过期信息。
+            lastAiAction = ""
+        }
+        // 触摸接管发生在 WebView 回调里，不在 host call 链路上；主动广播一次，
+        // 否则面板横幅要等下一次刷新才变成「你正在操作，AI 已暂停」。
+        runCatching { publishSnapshotUpdate() }
+            .onFailure { OmniLog.w("BrowserUseEngine", "publish ai control change failed: $it") }
+    }
+
+    fun isAiControlEnabled(): Boolean = aiControlEnabled
 
     fun bindRunContext(
         agentRunId: String,
@@ -903,6 +985,13 @@ class BrowserUseEngine(
             "riskChallengeKind" to tab.riskChallengeKind,
             "recommendedNextAction" to tab.recommendedNextAction,
             "throttleDelayMs" to null,
+            // 控制权：谁在操作浏览器、AI 最近做了什么。UI 靠这几项显示「AI 正在控制」
+            // 横幅与「我来操作 / 恢复 AI」按钮。
+            "aiControlEnabled" to aiControlEnabled,
+            "lastAiAction" to lastAiAction,
+            "lastAiActionAt" to lastAiActionAt,
+            "lastAiActionMutatesPage" to lastAiActionMutatesPage,
+            "aiControlChangedAt" to aiControlChangedAt,
             "tabs" to tabs.values.map { item ->
                 linkedMapOf(
                     "tabId" to item.tabId,
@@ -1352,6 +1441,15 @@ class BrowserUseEngine(
                 )
             )
         }
+        // 用户一旦在浏览器视图里按下手指，就把控制权交还给他：否则 AI 正在执行的
+        // 点击/输入会和用户的操作互相踩（点错按钮、表单被覆盖），而用户完全没办法
+        // 「抢回」页面。返回 false 不消费事件，页面交互照常。
+        tab.webView.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                setAiControlInternal(false)
+            }
+            false
+        }
         tab.webView.post { layoutWebView(tab.webView) }
         return true
     }
@@ -1366,6 +1464,19 @@ class BrowserUseEngine(
             parent.removeView(tab.webView)
         }
         tab.contextWrapper.baseContext = appContext
+    }
+
+    private fun BrowserUseAction.mutatesPageState(): Boolean = when (this) {
+        BrowserUseAction.GET_TEXT,
+        BrowserUseAction.GET_READABLE,
+        BrowserUseAction.SCREENSHOT,
+        BrowserUseAction.GET_PAGE_INFO,
+        BrowserUseAction.GET_BACKBONE,
+        BrowserUseAction.FIND_ELEMENTS,
+        BrowserUseAction.LIST_TABS,
+        BrowserUseAction.GET_COOKIES,
+        BrowserUseAction.WAIT_FOR_SELECTOR -> false
+        else -> true
     }
 
     override fun closeSession() {

@@ -41,6 +41,102 @@ class _ChatBrowserOverlayState extends State<ChatBrowserOverlay> {
 
   bool get _isEnglish => LegacyTextLocalizer.isEnglish;
 
+  bool _aiControlBusy = false;
+
+  /// AI 控制状态条：AI 正在控制时给出提示与「我来操作」，用户接管时给出「恢复 AI 控制」。
+  Widget _buildAiControlBanner(ChatBrowserSessionSnapshot snapshot) {
+    if (!snapshot.available) {
+      return const SizedBox.shrink();
+    }
+    final aiControlling = snapshot.aiControlEnabled;
+    final accent = aiControlling
+        ? const Color(0xFF1B7F3B)
+        : const Color(0xFFB26A00);
+    final background = aiControlling
+        ? const Color(0xFFEAF7EE)
+        : const Color(0xFFFFF6E5);
+    final action = snapshot.lastAiAction.trim();
+    final label = aiControlling
+        ? (action.isEmpty
+              ? _text('AI 正在控制浏览器', 'AI is controlling this browser')
+              : _text('AI 正在控制 · $action', 'AI is controlling · $action'))
+        : _text('你正在操作，AI 已暂停', 'You are in control - AI paused');
+    return Container(
+      width: double.infinity,
+      color: background,
+      padding: const EdgeInsets.only(left: 12, right: 4, top: 2, bottom: 2),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: accent, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: accent,
+              ),
+            ),
+          ),
+          TextButton(
+            key: Key('browser-ai-control-toggle'),
+            onPressed: _aiControlBusy
+                ? null
+                : () => _toggleAiControl(snapshot, enabled: !aiControlling),
+            style: TextButton.styleFrom(
+              foregroundColor: accent,
+              minimumSize: const Size(0, 30),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: Text(
+              aiControlling
+                  ? _text('我来操作', 'Take over')
+                  : _text('恢复 AI 控制', 'Resume AI'),
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleAiControl(
+    ChatBrowserSessionSnapshot snapshot, {
+    required bool enabled,
+  }) async {
+    if (_aiControlBusy) return;
+    setState(() => _aiControlBusy = true);
+    try {
+      final updated = await AgentBrowserSessionService.setAiControl(enabled);
+      if (!mounted) return;
+      if (updated != null) {
+        widget.onSnapshotChanged(updated);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      // 静默失败最糟：用户会以为已经接管/已恢复，然后看着页面被抢。
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text(
+            _text('切换失败：$error', 'Could not switch control: $error'),
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _aiControlBusy = false);
+      }
+    }
+  }
+
   String _text(String zh, String en) => _isEnglish ? en : zh;
 
   @override
@@ -119,6 +215,9 @@ class _ChatBrowserOverlayState extends State<ChatBrowserOverlay> {
             Column(
               children: [
                 _buildChrome(context, snapshot),
+                // 谁在操作浏览器必须一眼可见：AI 自动操作时用户需要知道页面会自己动，
+                // 用户一旦动手也要能立刻看到「AI 已暂停」并一键恢复。
+                _buildAiControlBanner(snapshot),
                 if (snapshot.hasSslError)
                   _buildBanner(
                     icon: Icons.gpp_bad_rounded,

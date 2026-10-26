@@ -10,6 +10,12 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
   static const double _kBrowserOverlayBottomMargin = 16;
   static const double _kDrawerSwipeThreshold = 36;
 
+  /// 用户手动关掉浏览器面板后，本次会话不再被 AI 的动作自动唤起（否则每点一下
+  /// 页面都弹一次，非常吵）。AI 卡在需要人处理的环节时例外。
+  bool _browserOverlayAutoDismissed = false;
+  int _lastAutoRevealedAiActionAt = 0;
+  int _lastBrowserAutoHintAt = 0;
+
   bool _maybeOpenDrawerFromPageSwipe() {
     if (!mounted ||
         // 锚点面板展开时整页处于"点击空白收起"的模态态，此时的滑动不应
@@ -225,6 +231,7 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
         _isBrowserOverlayInitialized = false;
       }
     });
+    _maybeAutoRevealBrowserOverlay(resolved);
   }
 
   @override
@@ -269,6 +276,7 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
         _isBrowserOverlayInitialized = false;
       }
     });
+    _maybeAutoRevealBrowserOverlay(resolved);
   }
 
   @override
@@ -337,7 +345,10 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
     }
     final snapshot = _resolvedBrowserSessionSnapshot;
     if (snapshot == null || !snapshot.available) {
-      showToast('当前会话还没有可用的浏览器会话', type: ToastType.warning);
+      showToast(
+        '还没有打开网页：让助手打开某个网站，浏览器面板会自动出现',
+        type: ToastType.info,
+      );
       return;
     }
     if (!mounted) {
@@ -350,6 +361,8 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
       );
       _isBrowserOverlayVisible = true;
       _browserOverlayViewSeed += 1;
+      // 用户主动打开面板 → 重新允许 AI 动作时自动显示。
+      _browserOverlayAutoDismissed = false;
     });
   }
 
@@ -361,6 +374,44 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
     setState(() {
       _isBrowserOverlayVisible = false;
       _isBrowserOverlayInitialized = false;
+      _browserOverlayAutoDismissed = true;
+    });
+  }
+
+  /// AI 开始操作页面时把面板自动摆出来（用户关过就不再打扰，除非需要人接管）。
+  void _maybeAutoRevealBrowserOverlay(ChatBrowserSessionSnapshot? snapshot) {
+    if (snapshot == null || !snapshot.available) return;
+    if (_isBrowserOverlayVisible) return;
+    if (_activeSurfaceMode != ChatSurfaceMode.normal) return;
+    final attention = snapshot.needsUserAttention;
+    // 只读动作（读文字、截图、取信息）不动页面，把面板推上来只会挡住用户打字。
+    if (!attention && !snapshot.lastAiActionMutatesPage) return;
+    if (attention) {
+      // 风控/弹窗/权限：用户必须能看到并处理，无视「已关闭」。
+      _browserOverlayAutoDismissed = false;
+    } else if (_browserOverlayAutoDismissed) {
+      // 面板被用户收起来了，但页面仍在被 AI 操作 —— 必须告知，否则用户回来发现
+      // 页面已经跳到别处却不知道发生了什么。节流到每分钟一次，不刷屏。
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (snapshot.lastAiActionAt > _lastAutoRevealedAiActionAt &&
+          now - _lastBrowserAutoHintAt > 60000) {
+        _lastBrowserAutoHintAt = now;
+        _lastAutoRevealedAiActionAt = snapshot.lastAiActionAt;
+        showToast('AI 正在操作浏览器，点浏览器工具岛可查看或接管', type: ToastType.info);
+      }
+      return;
+    }
+    if (!attention && snapshot.lastAiActionAt <= _lastAutoRevealedAiActionAt) {
+      return;
+    }
+    _lastAutoRevealedAiActionAt = snapshot.lastAiActionAt;
+    setState(() {
+      _setChatIslandDisplayLayerForMode(
+        _activeConversationMode,
+        ChatIslandDisplayLayer.tools,
+      );
+      _isBrowserOverlayVisible = true;
+      _browserOverlayViewSeed += 1;
     });
   }
 
