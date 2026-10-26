@@ -267,6 +267,9 @@ class AgentRuntimeManager private constructor(
         bindingRepository = bindingRepository,
         profileStore = acpAgentProfileStore,
         prepareLaunchEnvironment = ::prepareLocalAcpLaunch,
+        // 「重新安装」的另一条分支（当前连着别的 Agent 时不切换运行时）必须真的安装：
+        // prepareLocalAcpLaunch 只构造启动环境、明确不装依赖。
+        prepareManagedAdapter = { profile -> ensureManagedAcpAdapter(profile, force = true) },
         resolveSessionMcpEnabled = { profile ->
             AcpHarnessAdapters.forProfile(profile)
                 .supportsSessionMcp(currentAgentProviderCredentials())

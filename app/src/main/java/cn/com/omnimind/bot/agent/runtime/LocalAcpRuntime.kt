@@ -482,6 +482,11 @@ internal class LocalAcpRuntime(
     private val bindingRepository: AgentSessionBindingRepository,
     private val profileStore: AcpAgentProfileStore,
     private val prepareLaunchEnvironment: suspend (AcpAgentProfile) -> Map<String, String>,
+    /**
+     * 真正执行托管适配器的安装。prepareLaunchEnvironment 明确不装依赖（它只构造启动环境），
+     * 所以「不切换当前运行时」的准备路径必须单独调这个，否则永远装不上。
+     */
+    private val prepareManagedAdapter: suspend (AcpAgentProfile) -> Unit = {},
     private val resolveSessionMcpEnabled: suspend (AcpAgentProfile) -> Boolean = { true },
     private val prepareSharedProviderBinding: suspend () -> Unit = {},
     private val buildHandoffContext: suspend (Long, String?) -> String?,
@@ -1710,6 +1715,12 @@ internal class LocalAcpRuntime(
             // command in place; the normal agent/select path performs the ACP
             // handshake when the user actually switches to that Harness.
             return runCatching {
+                // 这条路径以前只 prepareLaunchEnvironment + requireLaunchCommand，而
+                // prepareLaunchEnvironment 的约定是「只给已安装的 Harness 构造启动环境」，
+                // 从不安装依赖。于是当前连着别的 Agent（例如小万）时，点 Codex /
+                // DeepSeek Harness 的「重新安装」只会检查命令是否存在，永远不去装，
+                // 失败后一直显示「启动失败」。
+                prepareManagedAdapter(profile)
                 prepareLaunchEnvironment(profile)
                 requireLaunchCommand(profile)
                 val health = managedAgentPreparationHealth(

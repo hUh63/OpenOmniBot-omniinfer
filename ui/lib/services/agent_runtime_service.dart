@@ -313,6 +313,23 @@ String formatAgentRuntimeErrorForUser(
   if (raw.contains('unknown variant namespace') && raw.contains('tools')) {
     return text('unsupportedTools');
   }
+  // 本应用自己拼的安装错误（"Failed to prepare the X ACP adapter: <details>"）。
+  // 以前它落到 fallback「助手未能启动，请重试」，用户永远看不到 npm / 脚本的真实报错，
+  // 也就无从自救（换镜像源、修权限、看清缺哪个编译工具）。这里只透出我们自己的前缀
+  // 之后的内容并截断，不会把任意服务端 payload 渲染出来。
+  final prepareMatch = RegExp(
+    r'failed to prepare the .{0,80}?acp adapter[:\s]*([\s\S]*)',
+    caseSensitive: false,
+  ).firstMatch(rawMessage ?? '');
+  if (prepareMatch != null) {
+    final flattened = (prepareMatch.group(1) ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final detail = flattened.length > 200
+        ? flattened.substring(flattened.length - 200)
+        : flattened;
+    return english
+        ? 'Installation failed.${detail.isEmpty ? '' : ' Details: $detail'}'
+        : '安装失败${detail.isEmpty ? '' : '：$detail'}';
+  }
   if (raw.contains('not installed') ||
       raw.contains('executable not found') ||
       raw.contains('command not found')) {
