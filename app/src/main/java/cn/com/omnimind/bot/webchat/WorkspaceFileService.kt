@@ -8,6 +8,12 @@ import java.io.File
 class WorkspaceFileService(
     context: Context
 ) {
+    private companion object {
+        /** 超过这个体积就不再整文件读入预览（String 还会按 UTF-16 再翻一倍）。 */
+        const val DEFAULT_PREVIEW_MAX_BYTES = 1L * 1024L * 1024L
+        const val DEFAULT_PREVIEW_MAX_CHARS = 200_000
+    }
+
     private val workspaceManager = AgentWorkspaceManager(context)
 
     fun getWorkspaceDescriptor(
@@ -93,6 +99,23 @@ class WorkspaceFileService(
                 offset = offset,
                 lineStart = lineStart,
                 lineCount = lineCount
+            )
+            return linkedMapOf(
+                "file" to filePayload(file, workspace),
+                "content" to streamedSlice.content,
+                "truncated" to streamedSlice.truncated
+            )
+        }
+        // 不带任何切片参数时以前是整文件 readText()：工作区里一个几百 MB 的日志、
+        // 模型或 SQL dump 就能把这个进程打爆（预览一次、整个 App 连同正在跑的 Agent
+        // 一起被杀）。超过阈值时按默认窗口流式读取，并如实标记 truncated。
+        if (file.length() > DEFAULT_PREVIEW_MAX_BYTES) {
+            val streamedSlice = sliceWorkspaceFileByStream(
+                file = file,
+                maxChars = DEFAULT_PREVIEW_MAX_CHARS,
+                offset = 0,
+                lineStart = null,
+                lineCount = null
             )
             return linkedMapOf(
                 "file" to filePayload(file, workspace),

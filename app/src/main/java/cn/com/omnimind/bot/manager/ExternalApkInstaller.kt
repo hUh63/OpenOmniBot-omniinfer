@@ -131,9 +131,21 @@ object ExternalApkInstaller {
         }
     }
 
+    /** APK 不可能小于这个体积；小于即视为被截断的坏包。 */
+    private const val MIN_VALID_APK_BYTES = 1L * 1024L * 1024L
+
     private fun existingDownloadedApk(context: Context, apkFileName: String): File? {
         val apkFile = File(File(context.filesDir, DOWNLOAD_DIR_NAME), apkFileName)
-        return apkFile.takeIf { it.exists() && it.length() > 0L }
+        if (!apkFile.exists()) return null
+        // 只要同名文件非空就复用，是「永远提示已下载、永远安装失败」的根源：下载被
+        // 中途掐断会留下一个被截断的 APK，之后每次点安装都直接把它交给系统安装器，
+        // 既没有重新下载的路径也没有任何失败提示。小于阈值的一律当坏包丢掉。
+        if (apkFile.length() < MIN_VALID_APK_BYTES) {
+            OmniLog.w(TAG, "discard truncated apk: ${apkFile.name} (${apkFile.length()} bytes)")
+            apkFile.delete()
+            return null
+        }
+        return apkFile
     }
 
     private suspend fun downloadApk(
@@ -188,6 +200,16 @@ object ExternalApkInstaller {
                         }
                         output.flush()
                     }
+                }
+                // 有 Content-Length 时必须读满，否则就是被 CDN/代理/弱网提前关闭的
+                // 截断包（chunked 时 EOF 即结束，OkHttp 不报错）。
+                if (totalBytes > 0L && downloadedBytes != totalBytes) {
+                    OmniLog.w(
+                        TAG,
+                        "apk download incomplete: $downloadedBytes/$totalBytes bytes"
+                    )
+                    tempFile.delete()
+                    error("安装包下载不完整，请重试")
                 }
                 notifier.showDownloadFinished()
 
