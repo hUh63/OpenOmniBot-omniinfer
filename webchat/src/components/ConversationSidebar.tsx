@@ -102,11 +102,15 @@ function agentIcon(agentId?: string): IconName {
 
 function conversationSection(conversation: Conversation): ConversationSection {
   if (conversation.isPinned) return "pinned";
-  if (conversation.mode === "codex") {
-    if (!conversation.agentId || conversation.agentId === "codex-acp") return "codex";
-    if (conversation.agentId === "claude-code-acp") return "claude";
-    if (conversation.agentId === "opencode-acp") return "opencode";
-    if (conversation.agentId === "deepseek-harness-acp") return "deepseek";
+  // 服务端把 codex/acp/coding 一律归一成 mode="agent"，按 mode === "codex" 分组永远
+  // 不成立 —— 所有 Agent 会话都会掉进「小万」，Codex/Claude/OpenCode/DeepSeek 四个
+  // 分组永远是空的。改为按 agentId 分组。
+  const agentId = conversation.agentId?.trim() ?? "";
+  if (agentId && agentId !== "xiaowan-acp") {
+    if (agentId === "codex-acp") return "codex";
+    if (agentId === "claude-code-acp") return "claude";
+    if (agentId === "opencode-acp") return "opencode";
+    if (agentId === "deepseek-harness-acp") return "deepseek";
     return "acp";
   }
   if (conversation.mode === "chat_only") return "chat";

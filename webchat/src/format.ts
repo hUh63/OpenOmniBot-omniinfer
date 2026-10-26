@@ -143,14 +143,17 @@ export function markdownToHtml(value: unknown): string {
 }
 
 export function modeLabel(mode?: string, agentId?: string): string {
-  if (mode === "codex") {
-    return ({
-      "codex-acp": "Codex",
-      "claude-code-acp": "Claude Code",
-      "opencode-acp": "OpenCode",
-      "deepseek-harness-acp": "DeepSeek Harness",
-    } as Record<string, string>)[agentId ?? ""] ?? "Agent";
-  }
+  // 服务端把 codex/acp/coding 统一归一成 mode="agent"（ConversationDomainService
+  // .normalizeConversationMode），所以判定必须先看 agentId：原来「mode === "codex"」
+  // 永远为假，所有 Agent 会话的标签都显示成「小万」。
+  const agentLabel = ({
+    "codex-acp": "Codex",
+    "claude-code-acp": "Claude Code",
+    "opencode-acp": "OpenCode",
+    "deepseek-harness-acp": "DeepSeek Harness",
+  } as Record<string, string>)[agentId?.trim() ?? ""];
+  if (agentLabel) return agentLabel;
+  if (mode === "codex") return "Agent";
   return ({
     normal: "小万",
     chat_only: "纯聊天",

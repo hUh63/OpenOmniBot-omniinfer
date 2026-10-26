@@ -707,6 +707,16 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // 草稿/附件属于「当前会话」。切换会话时不清的话，在 A 里写了一半的草稿（可能带私密
+  // 图片）会跟着进入 B，回车就发到 B 去；同时 A 的草稿也丢不回来。
+  const draftConversationIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    const nextId = conversation && conversation.id > 0 ? conversation.id : null;
+    if (draftConversationIdRef.current === nextId) return;
+    draftConversationIdRef.current = nextId;
+    setDraft("");
+    setAttachments([]);
+  }, [conversation]);
   const messageListRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);

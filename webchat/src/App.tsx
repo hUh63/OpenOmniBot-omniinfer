@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { request } from "./api";
+import { ApiError, request, setUnauthorizedHandler } from "./api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ContextPane } from "./components/ContextPane";
 import { ConversationSidebar } from "./components/ConversationSidebar";
@@ -23,6 +23,7 @@ import type {
   ContextPanelName,
   Conversation,
   ConversationCreateTarget,
+  ConnectionStatus,
   ConversationMode,
   MobileSection,
   RealtimeEventData,
@@ -92,6 +93,7 @@ export default function App() {
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(false);
   const [toast, setToast] = useState("");
   const selectedRef = useRef<Conversation | null>(null);
+  const messageLoadSeqRef = useRef(0);
   const conversationHistoryRef = useRef<string[]>([]);
   const conversationHistoryIndexRef = useRef(-1);
   const completedTaskIdsRef = useRef(new Set<string>());
@@ -159,10 +161,15 @@ export default function App() {
 
   async function loadMessages(conversation = selectedRef.current) {
     if (!conversation || !isPersistedConversation(conversation)) return;
+    // 同一个会话也会有多次 GET 在飞（切会话 + conversation_updated 触发的全量刷新 +
+    // 流式推送），先发出的晚回来就会把期间的新内容整体覆盖回去（表现为回答「倒退」
+    // 或工具卡消失又出现）。只接受最后一次请求的结果。
+    const requestSeq = ++messageLoadSeqRef.current;
     try {
       const payload = await request<ChatMessage[]>(`/conversations/${conversation.id}/messages`, {
         query: { mode: conversation.mode ?? "normal" },
       });
+      if (requestSeq !== messageLoadSeqRef.current) return;
       if (conversationKey(conversation) === conversationKey(selectedRef.current)) {
         const incoming = Array.isArray(payload) ? payload : [];
         setMessages((current) => (
@@ -296,6 +303,12 @@ export default function App() {
     selectedRef.current = conversation;
     setSelectedConversation(conversation);
     setMessages([]);
+    // 运行态是按会话的：不清的话，从「正在跑的会话 A」切到 B 之后，B 会被 A 的
+    // activeTaskId 锁成「运行中」——发不出消息、按钮显示成「停止」，点下去取消的
+    // 还是 A 的任务。
+    setActiveTaskId(null);
+    setActiveRenderTaskId(null);
+    setClarifyTaskId(null);
     recordConversationNavigation(conversation);
     setConversationsOpen(false);
     await loadMessages(conversation);
@@ -430,9 +443,13 @@ export default function App() {
           mode: result.conversationMode ?? conversationMode,
           agentId: result.conversation.agentId ?? conversation.agentId,
         };
-        selectedRef.current = updatedConversation;
-        setSelectedConversation(updatedConversation);
-        applyConversationSnapshot(updatedConversation);
+        // 发送期间用户可能已经切到别的会话：这时不能把视图拽回发起会话，否则会
+        // 「标题是 A、内容是 B」（messages 是 B 的，selected 被改回 A）。
+        if (conversationKey(selectedRef.current) === conversationKey(conversation)) {
+          selectedRef.current = updatedConversation;
+          setSelectedConversation(updatedConversation);
+          applyConversationSnapshot(updatedConversation);
+        }
       }
       const acceptedTaskId = String(result?.taskId ?? taskId);
       const completedBeforeAcceptance = completedTaskIdsRef.current.has(acceptedTaskId);
@@ -597,12 +614,20 @@ export default function App() {
     if (eventName === "chat_task_event") {
       const kind = String(data.kind ?? "");
       const taskId = String(data.taskId ?? "");
-      if (["completed", "error"].includes(kind)) {
-        if (taskId) completedTaskIdsRef.current.add(taskId);
-        setActiveTaskId(null);
-        setActiveRenderTaskId(null);
-        setClarifyTaskId(null);
+      if (!["completed", "error"].includes(kind)) return;
+      if (taskId) completedTaskIdsRef.current.add(taskId);
+      // 事件带 conversationId/taskId，必须比对：别的会话（另一台设备、定时任务、
+      // 上一轮的迟到帧）跑完了也来清当前会话的运行态，会让正在跑的 run 失去停止按钮，
+      // 再发消息还会被服务端 409 拒绝。
+      const eventConversationId = Number(data.conversationId ?? 0);
+      const selectedForTask = selectedRef.current;
+      if (eventConversationId && selectedForTask && eventConversationId !== Number(selectedForTask.id)) {
+        return;
       }
+      if (activeTaskId && taskId && taskId !== activeTaskId) return;
+      setActiveTaskId(null);
+      setActiveRenderTaskId(null);
+      setClarifyTaskId(null);
       return;
     }
     if (eventName !== "acp_event") return;
@@ -624,6 +649,32 @@ export default function App() {
   }
 
   const connectionStatus = useRealtime(authenticated, handleRealtimeEvent);
+
+  // MCP 服务重启 / webchat session TTL 到期后，内存里的 session 表会全部失效，
+  // 业务请求统一 401。必须回到登录页：否则页面停在「已登录」，EventSource 还会
+  // 每 3 秒重试一次 401，用户只能手动刷新。
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      autoLoginToken.current = "";
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      setAuthenticated(false);
+      setGlobalError("连接已失效，请重新输入令牌登录");
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  const previousConnectionStatusRef = useRef<ConnectionStatus | null>(null);
+  useEffect(() => {
+    const previous = previousConnectionStatusRef.current;
+    previousConnectionStatusRef.current = connectionStatus;
+    if (previous !== "offline" || connectionStatus !== "online") return;
+    // SSE 断线期间的事件不会重放（服务端 replay = 0、也不读 Last-Event-ID）：
+    // 最终回答、任务结束、标题更新都会丢，界面会一直停在旧状态（停止按钮常驻）。
+    // 重连后自己补一次快照。
+    void loadConversations(true).catch(showError);
+    void loadMessages().catch(showError);
+    void refreshBrowser(false);
+  }, [connectionStatus]);
 
   function selectMobileSection(section: MobileSection) {
     setMobileSectionState(section);
