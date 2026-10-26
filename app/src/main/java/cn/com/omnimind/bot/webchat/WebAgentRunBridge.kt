@@ -73,6 +73,8 @@ private data class WebAgentRunState(
     var agentId: String? = null,
     var agentName: String? = null,
     var sequence: Long = 0,
+    /** 上次把全量快照推给客户端的时间；流式 token 会密集触发，必须节流。 */
+    var lastPublishAt: Long = 0L,
     val assistantEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val reasoningEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val toolEntries: LinkedHashMap<String, WebAgentToolEntryState> = linkedMapOf()
@@ -89,6 +91,8 @@ internal class WebAgentRunBridge(
 ) {
     companion object {
         private const val TAG = "WebAgentRunBridge"
+        /** 流式快照广播的最小间隔。 */
+        private const val PUBLISH_THROTTLE_MS = 150L
     }
 
     private val appContext = context.applicationContext
@@ -96,7 +100,10 @@ internal class WebAgentRunBridge(
     private val conversationService = ConversationDomainService(appContext)
     private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val events = Channel<Map<String, Any?>>(Channel.UNLIMITED)
+    // 有界队列：消费端每条事件都要写库并重载会话，长会话下单条可能上百毫秒，
+    // 生产端却是每 token 一条。UNLIMITED 会让队列单调增长直到 OOM —— 而且
+    // trySend 永不失败，连日志都不会有。
+    private val events = Channel<Map<String, Any?>>(capacity = 512)
     // Admission is a conversation-level invariant. A concurrent HTTP retry
     // must not replace a still-running state after observing a finished one.
     // This lock covers only map admission, never ACP execution.
@@ -109,7 +116,14 @@ internal class WebAgentRunBridge(
     init {
         manager.setSupplementalEventListener(
             key = listenerKey
-        ) { event -> events.trySend(event) }
+        ) { event ->
+            val queued = events.trySend(event)
+            if (queued.isFailure) {
+                // 队列打满说明消费端跟不上（通常是超长会话）。丢事件比 OOM 好，
+                // 但要留下痕迹，否则表现只是「网页端少了几段」。
+                OmniLog.w(TAG, "agent event dropped: queue full")
+            }
+        }
         scope.launch {
             for (event in events) {
                 // 单条事件处理失败（脏数据、数据库异常、JSON 结构变化）不能让消费
@@ -318,7 +332,14 @@ internal class WebAgentRunBridge(
         }
 
         if (changed) {
-            publishMessages(state, finalizeInterruptedEntries = false)
+            // 每个 token 都做「全表读会话 + Gson 序列化 + 广播全量快照」，一小时的会话
+            // 就是 O(N) × token 数，网页端流式会明显卡顿、手机发热。节流到 ~7 次/秒；
+            // 最后一个 token 一定会在 finish 时按最终态推一次，不会丢内容。
+            val now = System.currentTimeMillis()
+            if (now - state.lastPublishAt >= PUBLISH_THROTTLE_MS) {
+                state.lastPublishAt = now
+                publishMessages(state, finalizeInterruptedEntries = false)
+            }
         }
 
         when (update.terminalKind) {

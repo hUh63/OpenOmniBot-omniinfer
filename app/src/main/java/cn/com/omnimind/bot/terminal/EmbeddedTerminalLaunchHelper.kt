@@ -130,7 +130,17 @@ object EmbeddedTerminalLaunchHelper {
             selectedPackageIds = selectedPackageIds,
             workingMode = workingMode
         )
-        scriptFile.writeText(content)
+        // 固定路径 + 直接 writeText 是「先截断再写」：上一次安装启动的会话正在
+        // exec 这个脚本时，第二次安装会把它截断重写，shell 可能读到半套命令或另一套
+        // 包列表。改成临时文件 + rename，读取方只会看到完整内容。
+        val temp = File(scriptFile.parentFile, scriptFile.name + ".tmp")
+        temp.writeText(content)
+        temp.setExecutable(true, false)
+        if (!temp.renameTo(scriptFile)) {
+            // rename 失败（极少数文件系统）时退化为直接覆盖，但先写完整内容。
+            scriptFile.writeText(content)
+            temp.delete()
+        }
         scriptFile.setExecutable(true, false)
         return scriptFile.absolutePath
     }

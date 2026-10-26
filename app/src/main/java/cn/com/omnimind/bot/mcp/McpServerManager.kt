@@ -12,6 +12,7 @@ import cn.com.omnimind.bot.webchat.WorkspaceFileService
 import com.google.gson.Gson
 import io.ktor.http.ContentDisposition
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.Cookie
 import io.ktor.serialization.gson.gson
@@ -484,6 +485,21 @@ object McpServerManager {
                     call.respond(
                         HttpStatusCode.PayloadTooLarge,
                         mapOf("error" to "Request body too large")
+                    )
+                    finish()
+                    return@intercept
+                }
+                // 长度未知（chunked）时上面的上界检查形同虚设：客户端不带
+                // Content-Length 就能绕过 32MB 限制，一个几百 MB 的 body 会在
+                // call.receive() 反序列化阶段直接把进程 OOM。写请求必须声明长度。
+                val method = call.request.httpMethod
+                if (declaredLength < 0 &&
+                    (method == HttpMethod.Post || method == HttpMethod.Put ||
+                        method == HttpMethod.Patch)
+                ) {
+                    call.respond(
+                        HttpStatusCode.LengthRequired,
+                        mapOf("error" to "Content-Length is required for request bodies")
                     )
                     finish()
                     return@intercept

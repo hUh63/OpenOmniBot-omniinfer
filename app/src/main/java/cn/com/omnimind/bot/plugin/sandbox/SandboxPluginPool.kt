@@ -75,6 +75,15 @@ class SandboxPluginPool(
                     }
                     ensureRuntimeCurrent(directory)
                     SandboxPluginProvider(this, directory, manifest)
+                }.onFailure { error ->
+                    // 原来 getOrNull() 把原因全丢了：插件从列表和工具集里静默消失，
+                    // 平台随后把它标成 enabled=false，用户只看到「插件不见了」，logcat
+                    // 里一行都没有。至少留下可排查的日志。
+                    cn.com.omnimind.baselib.util.OmniLog.w(
+                        "SandboxPluginPool",
+                        "load plugin failed for ${directory.name}: " +
+                            "${error.javaClass.simpleName}: ${error.message}"
+                    )
                 }.getOrNull()
             }
             .sortedBy { it.descriptor.name.lowercase() }
