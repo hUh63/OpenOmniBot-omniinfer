@@ -4782,7 +4782,7 @@ private class AcpProcessConnection(
             return emptyList()
         }
         val managed = LinkedHashSet<Int>()
-        var frontier = roots
+        var frontier: Set<Int> = roots
         while (frontier.isNotEmpty()) {
             managed.addAll(frontier)
             frontier = parentByPid

@@ -521,10 +521,10 @@ internal class AcpAgentProfileStore(context: Context) {
      * profile with the legacy id. Migrate that known identity and its stored
      * references, without guessing from user-editable names or commands.
      */
-    @Synchronized
     @Volatile
     private var legacyAliasesMigrated = false
 
+    @Synchronized
     private fun migrateLegacyXiaowanAliases() {
         legacyAliasesMigrated = true
         val stored = readStoredProfiles()

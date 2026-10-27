@@ -313,7 +313,7 @@ class AgentRuntimeManager private constructor(
      * 这里按「不是当前选中 + 没有活跃 turn + 空闲超过阈值」回收；会话本身靠
      * session/load 恢复，不需要留着进程。
      */
-    private fun reclaimIdleAgentRuntimes() {
+    private suspend fun reclaimIdleAgentRuntimes() {
         val selectedId = acpAgentProfileStore.selected().id
         val now = System.currentTimeMillis()
         val stale = localAcpRuntimes.entries.filter { (agentId, runtime) ->
@@ -331,6 +331,8 @@ class AgentRuntimeManager private constructor(
             )
             try {
                 runtime.disconnect()
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 Log.w(LOG_TAG, "Idle ACP runtime teardown failed for $agentId: $error")
             }
