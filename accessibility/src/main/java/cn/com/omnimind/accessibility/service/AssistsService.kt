@@ -34,8 +34,17 @@ open class AssistsService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (!connected || instance !== this) {
+        // 不能无条件 markConnected()：服务被系统重建时新旧实例会短暂并存，旧实例在
+        // onDestroy 前再收到一条事件就会把静态 instance 抢回一个正在销毁的服务，
+        // 之后 isReady() 假阳性、dispatchGesture/takeScreenshot 全部静默失败。
+        if (instance == null) {
+            // 之前被 onUnbind/onDestroy 清空，但本实例仍在收事件 → 重新登记。
             markConnected()
+        } else if (instance !== this) {
+            // 新实例已经接管，旧实例的事件一律丢弃，也不要改写静态 instance。
+            return
+        } else if (!connected) {
+            connected = true
         }
         event.packageName?.toString()?.trim()?.takeIf(String::isNotEmpty)?.let {
             lastPackageName = it

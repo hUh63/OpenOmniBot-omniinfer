@@ -16,6 +16,7 @@ import android.provider.Settings
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import cn.com.omnimind.androidgui.AndroidGuiEnvironment
 import cn.com.omnimind.androidgui.AndroidGuiOverlayHost
 import cn.com.omnimind.assists.HumanTrajectoryLearningSession
@@ -48,7 +49,7 @@ object ManualRecordingControlOverlay {
         } finally {
             withContext(NonCancellable + Dispatchers.Main.immediate) {
                 hidden?.let { (view, visibility) ->
-                    if (overlayView === view && view.isAttachedToWindow) view.visibility = visibility
+                    if (overlayView === view && overlayAddedToWindow) view.visibility = visibility
                 }
             }
         }
@@ -73,6 +74,19 @@ object ManualRecordingControlOverlay {
     private var sessionRunId: String? = null
     private var suppressUnexpectedDetach = false
 
+    /**
+     * addView 成功就为 true、移出/被系统 detach 才复位。
+     * 不能用 View.isAttachedToWindow 判「已显示」：addView 只是把 View 交给 ViewRootImpl，
+     * 真正的 attach 发生在下一帧 traversal，在这之间的 show()/dismiss() 都会误判成「没显示」，
+     * 于是跳过 removeView 把窗口留成无法回收的幽灵悬浮条。
+     */
+    private var overlayAddedToWindow = false
+
+    /** 最近一次 [show] 失败的原因码，供上层组装可给用户的错误信息（成功时清空）。 */
+    @Volatile
+    var lastFailureCode: String? = null
+        private set
+
     enum class State {
         PREPARING,
         READY,
@@ -90,8 +104,16 @@ object ManualRecordingControlOverlay {
         this.state = state
         val fallbackContext = context ?: UIKit.appContext ?: return false
         val overlayHandle = AndroidGuiOverlayHost.resolve(fallbackContext)
+        // 无障碍 overlay 不可用时只能回落 TYPE_APPLICATION_OVERLAY，而那条路必须有
+        // 「显示在其他应用上层」权限；缺权限时 addView 抛 SecurityException 被 runCatching 吞掉，
+        // 用户只看到「像是开始录制了却一条轨迹都没有」。这里提前判定并让上层给出可操作提示。
+        if (!overlayHandle.trusted && !Settings.canDrawOverlays(fallbackContext)) {
+            lastFailureCode = "overlay_permission_required"
+            OmniLog.w(TAG, "show blocked: display over other apps permission missing")
+            return false
+        }
         return synchronized(this) {
-            if (overlayView?.isAttachedToWindow == true) {
+            if (overlayView != null && overlayAddedToWindow) {
                 sessionRunId = runId
                 captureStateCallback = onCaptureState
                 bindState(overlayView, state)
@@ -122,6 +144,9 @@ object ManualRecordingControlOverlay {
             if (!shown) {
                 sessionRunId = null
                 captureStateCallback = null
+                lastFailureCode = "overlay_add_failed"
+            } else {
+                lastFailureCode = null
             }
             shown
         }
@@ -140,14 +165,30 @@ object ManualRecordingControlOverlay {
         if (shown) {
             keepControlsAboveTouchRecorder()
         } else {
+            val hasOverlay = synchronized(this) { overlayView != null }
             recordingControlScope.launch {
                 HumanTrajectoryLearningSession.pauseActive()
                 withContext(Dispatchers.Main) {
                     markPaused()
-                    showTransientStatus(
-                        localizedText("开启悬浮窗权限", "Allow display over other apps"),
-                        1400L,
-                    )
+                    // showTransientStatus 只是改悬浮条标题；悬浮条根本没显示出来时它什么也写不到，
+                    // 用户完全不知道要开权限，所以这里退回 Toast。
+                    if (hasOverlay) {
+                        showTransientStatus(
+                            localizedText("开启悬浮窗权限", "Allow display over other apps"),
+                            1400L,
+                        )
+                    } else {
+                        runCatching {
+                            Toast.makeText(
+                                UIKit.appContext,
+                                localizedText(
+                                    "请开启「显示在其他应用上层」权限后重新开始录制",
+                                    "Allow display over other apps, then start recording again",
+                                ),
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
                 }
             }
         }
@@ -234,13 +275,21 @@ object ManualRecordingControlOverlay {
         overlayView = null
         windowManager = null
         overlayParams = null
+        overlayAddedToWindow = false
         captureStateCallback = null
         sessionRunId = null
-        if (view != null && manager != null && view.isAttachedToWindow) {
+        if (view != null && manager != null) {
             suppressUnexpectedDetach = true
             try {
-                runCatching { manager.removeView(view) }
-                    .onFailure { OmniLog.w(TAG, "dismiss failed: ${it.message}") }
+                // 无条件尝试移除：View 还没 attach 上来时 removeViewImmediate 会抛
+                // IllegalStateException，runCatching 兜住即可；这里若再用 isAttachedToWindow
+                // 做前置判断，attach 窗口期调用就会把窗口永久留在屏幕上。
+                runCatching { manager.removeViewImmediate(view) }
+                    .onFailure { error ->
+                        if (error !is IllegalStateException) {
+                            OmniLog.w(TAG, "dismiss failed: ${error.message}")
+                        }
+                    }
             } finally {
                 suppressUnexpectedDetach = false
             }
@@ -333,6 +382,7 @@ object ManualRecordingControlOverlay {
             windowManager = manager
             overlayView = view
             overlayParams = params
+            overlayAddedToWindow = true
             OmniLog.d(
                 TAG,
                 "manual recording control overlay shown trusted=$trusted state=$state"
@@ -409,6 +459,7 @@ object ManualRecordingControlOverlay {
 
             override fun onViewDetachedFromWindow(view: View) {
                 val unexpected = synchronized(this@ManualRecordingControlOverlay) {
+                    if (overlayView === view) overlayAddedToWindow = false
                     overlayView === view && !suppressUnexpectedDetach
                 }
                 if (unexpected) {

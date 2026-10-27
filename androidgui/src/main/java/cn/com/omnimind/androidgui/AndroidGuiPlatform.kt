@@ -18,6 +18,8 @@ import cn.com.omnimind.accessibility.service.AssistsService
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.OobActionSchema
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -67,6 +69,13 @@ internal interface AndroidGuiPlatform {
 internal class AccessibilityAndroidGuiPlatform(
     private val context: Context,
 ) : AndroidGuiPlatform {
+    /** 截图编码专用的后台线程：截图回调本身跑在主线程，位图拷贝与 JPEG 编码绝不能留在那里。 */
+    private val screenshotExecutor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "android-gui-screenshot").apply { isDaemon = true }
+        }
+    }
+
     override fun isAccessibilityEnabled(): Boolean {
         val expected = ComponentName(context, AssistsService::class.java)
         val enabledServices = Settings.Secure.getString(
@@ -324,8 +333,16 @@ internal class AccessibilityAndroidGuiPlatform(
         val intent = context.packageManager.getLaunchIntentForPackage(packageName)
             ?: return AndroidGuiActionResult(false, "open_app_not_found:$packageName")
         intent.addFlags(OPEN_APP_INTENT_FLAGS)
-        context.startActivity(intent)
-        return AndroidGuiActionResult(true, "open_app_dispatched")
+        // 后台启动 Activity 被系统拦截时 startActivity 不抛异常，但前台 Activity 启动失败
+        // （组件被禁用、任务栈被锁）会抛 SecurityException / ActivityNotFoundException；
+        // 原来没有 runCatching，异常穿透到工具层变成栈，agent 侧拿不到可读失败码。
+        return runCatching { context.startActivity(intent) }.fold(
+            onSuccess = { AndroidGuiActionResult(true, "open_app_dispatched") },
+            onFailure = { throwable ->
+                Log.w("AndroidGuiPlatform", "open app failed: $packageName", throwable)
+                AndroidGuiActionResult(false, "open_app_failed:$packageName")
+            },
+        )
     }
 
     private suspend fun wait(action: Action): AndroidGuiActionResult {
@@ -397,17 +414,28 @@ internal class AccessibilityAndroidGuiPlatform(
             }
             val callback = object : AccessibilityService.TakeScreenshotCallback {
                 override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    // 回调 Executor 是主线程（AssistsService 与 UI 同进程），全屏位图的 copy +
+                    // JPEG 编码在主线程要 30~150ms，会把无障碍事件队列一起顶上 ANR。
+                    // 只在这里把 HardwareBuffer 拿走，重活丢到后台线程再 resume。
                     val buffer = result.hardwareBuffer
-                    val bitmap = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
-                        ?.copy(Bitmap.Config.ARGB_8888, false)
-                    buffer.close()
-                    val bytes = bitmap?.let { image ->
-                        ByteArrayOutputStream().use { output ->
-                            image.compress(Bitmap.CompressFormat.JPEG, 88, output)
-                            output.toByteArray()
-                        }.also { image.recycle() }
+                    val colorSpace = result.colorSpace
+                    screenshotExecutor.execute {
+                        val bytes = runCatching {
+                            val bitmap = Bitmap.wrapHardwareBuffer(buffer, colorSpace)
+                                ?.copy(Bitmap.Config.ARGB_8888, false)
+                            bitmap?.let { image ->
+                                ByteArrayOutputStream().use { output ->
+                                    image.compress(Bitmap.CompressFormat.JPEG, 88, output)
+                                    output.toByteArray()
+                                }.also { image.recycle() }
+                            }
+                        }.getOrElse { throwable ->
+                            Log.w("AndroidGuiPlatform", "Screenshot encode failed", throwable)
+                            null
+                        }
+                        runCatching { buffer.close() }
+                        if (continuation.isActive) continuation.resume(ScreenshotCapture(bytes))
                     }
-                    if (continuation.isActive) continuation.resume(ScreenshotCapture(bytes))
                 }
 
                 override fun onFailure(errorCode: Int) {

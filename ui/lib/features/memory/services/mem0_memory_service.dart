@@ -52,10 +52,42 @@ class Mem0MemoryService {
             : '记忆内容不能为空',
       );
     }
-    final content = await WorkspaceMemoryService.getLongMemory();
-    final lines = content.split('\n');
-    lines.add('- $trimmed');
-    await WorkspaceMemoryService.saveLongMemory(lines.join('\n'));
+    await _applyMutation(
+      (content) {
+        final lines = content.split('\n');
+        lines.add('- $trimmed');
+        return lines.join('\n');
+      },
+    );
+  }
+
+  /// 读-改-写窗口里如果 agent / 夜间 rollup 已经往 MEMORY.md 追加了内容，
+  /// 直接整文件覆盖会把那些行静默抹掉（一次丢多条记忆、没有版本号也没有提示）。
+  /// 这里写完前复核一次：内容变了就在新内容上重放本次修改，最多两次。
+  static Future<void> _applyMutation(
+    String? Function(String content) mutate,
+  ) async {
+    var content = await WorkspaceMemoryService.getLongMemory();
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      final updated = mutate(content);
+      if (updated == null) {
+        throw Exception(
+          LegacyTextLocalizer.isEnglish ? 'Memory not found' : '未找到对应记忆',
+        );
+      }
+      final current = await WorkspaceMemoryService.getLongMemory();
+      if (current != content) {
+        content = current;
+        continue;
+      }
+      await WorkspaceMemoryService.saveLongMemory(updated);
+      return;
+    }
+    throw Exception(
+      LegacyTextLocalizer.isEnglish
+          ? 'Memory is being updated by another task; try again'
+          : '记忆正在被其他任务更新，请稍后重试',
+    );
   }
 
   static Future<void> updateMemory({
@@ -72,25 +104,11 @@ class Mem0MemoryService {
             : '记忆内容不能为空',
       );
     }
-    final content = await WorkspaceMemoryService.getLongMemory();
-    final updated = _replaceById(content, memoryId, trimmed);
-    if (updated == null) {
-      throw Exception(
-        LegacyTextLocalizer.isEnglish ? 'Memory not found' : '未找到对应记忆',
-      );
-    }
-    await WorkspaceMemoryService.saveLongMemory(updated);
+    await _applyMutation((content) => _replaceById(content, memoryId, trimmed));
   }
 
   static Future<void> deleteMemory({required String memoryId}) async {
-    final content = await WorkspaceMemoryService.getLongMemory();
-    final deleted = _deleteById(content, memoryId);
-    if (deleted == null) {
-      throw Exception(
-        LegacyTextLocalizer.isEnglish ? 'Memory not found' : '未找到对应记忆',
-      );
-    }
-    await WorkspaceMemoryService.saveLongMemory(deleted);
+    await _applyMutation((content) => _deleteById(content, memoryId));
   }
 
   static List<Mem0MemoryItem> _parseItems(String content) {
@@ -102,9 +120,8 @@ class Mem0MemoryService {
         .where((line) => line.isNotEmpty)
         .toList();
     return lines.asMap().entries.map((entry) {
-      final index = entry.key;
       final memory = entry.value;
-      final id = _memoryId(index, memory);
+      final id = _memoryId(memory);
       return Mem0MemoryItem(
         id: id,
         memory: memory,
@@ -122,8 +139,11 @@ class Mem0MemoryService {
     }).toList();
   }
 
-  static String _memoryId(int index, String memory) {
-    final raw = base64Url.encode(utf8.encode('$index|$memory'));
+  /// id 只由内容决定。
+  /// 原来把行号编进 id：删掉一条后其后的 index 全部左移，旧快照里的 id 再也
+  /// 匹配不上，表现为「刚删了一条，再改/删另一条就报未找到对应记忆」。
+  static String _memoryId(String memory) {
+    final raw = base64Url.encode(utf8.encode(memory.trim()));
     return raw.replaceAll('=', '');
   }
 
@@ -144,7 +164,7 @@ class Mem0MemoryService {
       bulletValues.add(memory);
     }
     for (var i = 0; i < bulletValues.length; i++) {
-      final id = _memoryId(i, bulletValues[i]);
+      final id = _memoryId(bulletValues[i]);
       if (id == memoryId) {
         lines[bulletIndexes[i]] = '- $nextMemory';
         return lines.join('\n');
@@ -166,7 +186,7 @@ class Mem0MemoryService {
       bulletValues.add(memory);
     }
     for (var i = 0; i < bulletValues.length; i++) {
-      final id = _memoryId(i, bulletValues[i]);
+      final id = _memoryId(bulletValues[i]);
       if (id == memoryId) {
         lines.removeAt(bulletIndexes[i]);
         return lines.join('\n');

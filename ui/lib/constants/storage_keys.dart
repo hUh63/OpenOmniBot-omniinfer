@@ -13,6 +13,12 @@ class StorageKeys {
   static const String autoStartPermissionGranted =
       'auto_start_permission_granted';
 
+  /// 自启动权限手动确认完成的时间（毫秒时间戳）。
+  /// 自启动白名单在系统更新/手机管家清理后会失效，这个「确认过」只是自报状态，
+  /// 靠时间戳让它过期重新引导，不然会一直显示已授权、后台却被杀。
+  static const String autoStartPermissionGrantedAt =
+      'auto_start_permission_granted_at';
+
   /// Termux 终端能力是否已在引导页手动确认完成
   static const String termuxPermissionGranted = 'termux_permission_granted';
 }

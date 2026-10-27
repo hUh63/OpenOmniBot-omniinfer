@@ -204,6 +204,8 @@ class WorkspaceMemoryService(
         private const val TAG = "WorkspaceMemoryService"
         /** 启发式 rollup 单次最多沉淀的长期记忆条数（防止 MEMORY.md 无界膨胀）。 */
         private const val MAX_HEURISTIC_LONG_TERM_PER_ROLLUP = 20
+        /** 长期记忆总条数上限：超过后按「保留最新」淘汰，避免只增不删。 */
+        private const val MAX_LONG_TERM_ENTRIES = 500
         /** rollup 提示词里贴入的长期记忆上限（字符）。 */
         private const val MAX_ROLLUP_LONG_TERM_PROMPT_CHARS = 8_000
         private const val ROLLUP_SUBMIT_TOOL = "submit_memory_rollup_result"
@@ -381,7 +383,12 @@ class WorkspaceMemoryService(
                 }
                 Triple(file, updated, indexes.size)
             }
-            plans.forEach { (file, content, _) -> writeTextAtomically(file, content) }
+            val written = plans.filter { (file, content, _) -> writeTextAtomically(file, content) }
+            if (written.size != plans.size) {
+                // 有文件没写成功就不要动索引：否则索引把条目删了、正文还在，
+                // 变成「删不掉也搜不到」的不一致状态。
+                error("删除短期记忆失败：写入磁盘出错，请重试")
+            }
             // Remove affected derived chunks immediately; the existing search path
             // rebuilds them from the remaining source text on its next query.
             val sources = plans.map { ".omnibot/memory/short-memories/${it.first.name}" }.toSet()
@@ -494,7 +501,33 @@ class WorkspaceMemoryService(
         require(normalized.isNotEmpty()) { "memory text is empty" }
         val file = workspaceManager.longTermMemoryMarkdownFile()
         return synchronized(memoryWriteLock()) {
-            file.appendText("- $normalized\n")
+            val current = if (file.exists()) file.readText() else ""
+            // 去重：同一条偏好/事实会在多个夜晚被 rollup 反复提取（尤其 LLM 分支），
+            // 而 MEMORY.md 只增不删 —— 重复行不仅让文件膨胀、检索成本上升，
+            // 还会产生相同的 slug，使后写入的那条永远无法被 memory_load 定位。
+            val duplicate = current.lineSequence()
+                .map { it.trim().removePrefix("- ").trim() }
+                .any { it.equals(normalized, ignoreCase = false) }
+            if (duplicate) return@synchronized false
+            // 容量上限：保留最近 MAX_LONG_TERM_ENTRIES 条，防止无限增长。
+            val entries = current.lineSequence()
+                .filter { it.startsWith("- ") }
+                .toMutableList()
+            entries += "- $normalized"
+            val trimmed = if (entries.size > MAX_LONG_TERM_ENTRIES) {
+                entries.takeLast(MAX_LONG_TERM_ENTRIES)
+            } else {
+                entries
+            }
+            val rebuilt = if (trimmed.size == entries.size) {
+                // 没超限就保持原样追加（不动其它非条目行）。
+                current + "- $normalized\n"
+            } else {
+                trimmed.joinToString(separator = "\n", postfix = "\n")
+            }
+            if (!writeTextAtomically(file, rebuilt)) {
+                return@synchronized false
+            }
             true
         }
     }
@@ -649,12 +682,21 @@ class WorkspaceMemoryService(
             )
         }
         val rollupSource = if (rollupInference != null) "scene.memory.rollup" else "heuristic"
-        dailyFile.appendText(
-            "\n## Nightly Rollup @ $rollupAt\n" +
-                "- source: $rollupSource\n" +
-                "- inputLines: ${lines.size}\n" +
-                "- $rollupSummary\n"
-        )
+        // 标记行必须与上面的幂等判据同源（都用本地 date）：原来写入用 UTC 的
+        // Instant.now()，负偏移时区（本地 22:00 = 次日 UTC）永远对不上，
+        // 幂等检查恒失效 → 同一晚被重复整理、长期记忆重复沉淀。
+        val rollupBlock = "\n## Nightly Rollup @ $date\n" +
+            "- rollupAt: $rollupAt\n" +
+            "- source: $rollupSource\n" +
+            "- inputLines: ${lines.size}\n" +
+            "- $rollupSummary\n"
+        // 写入必须与 quick-log 编辑共用一把锁并走原子写：原来 appendText 在锁外，
+        // 与「读全文→改→整文件写」的编辑路径交错时，刚追加的 rollup 块会被旧快照覆盖，
+        // 下次因为找不到标记而重复整理。
+        synchronized(memoryWriteLock()) {
+            val existing = if (dailyFile.exists()) dailyFile.readText() else ""
+            writeTextAtomically(dailyFile, existing + rollupBlock)
+        }
         refreshAndLoadIndex(collectChunks(), resolveEmbeddingConfig())
         saveRollupStatus(rollupSummary)
         return mapOf(
@@ -1742,18 +1784,26 @@ class WorkspaceMemoryService(
      * （后台清理、系统回收、闪退）或磁盘写满，用户内容就停在半截或 0 字节 —— 而
      * 短期记忆和 MEMORY.md 都不可重建。索引早就有同样的 .tmp + .bak 保护。
      */
-    private fun writeTextAtomically(file: File, text: String) {
+    private fun writeTextAtomically(file: File, text: String): Boolean {
         val parent = file.parentFile
         parent?.mkdirs()
         val temp = File(parent, file.name + ".tmp")
-        temp.writeText(text)
-        runCatching { temp.renameTo(file) }.onFailure { error ->
-            OmniLog.w(TAG, "atomic rename failed for ${file.name}: ${error.message}")
-        }.onSuccess { renamed ->
-            if (!renamed) {
-                OmniLog.w(TAG, "atomic rename returned false for ${file.name}")
+        val result = runCatching {
+            temp.writeText(text)
+            if (!temp.renameTo(file)) {
+                // rename 返回 false 不会抛异常：原来这条路径既没回退也没上报，
+                // 调用方以为写成功（随后可能把索引里对应条目删掉，导致
+                // 「内容还在、检索找不到」或反之）。这里回退成直接写。
+                OmniLog.w(TAG, "atomic rename returned false for ${file.name}; falling back to direct write")
+                file.writeText(text)
+                temp.delete()
             }
         }
+        result.onFailure { error ->
+            OmniLog.e(TAG, "atomic write failed for ${file.name}: ${error.message}", error)
+            runCatching { temp.delete() }
+        }
+        return result.isSuccess
     }
 
     private fun extractTimestampAndBody(item: String): Pair<String, String> {

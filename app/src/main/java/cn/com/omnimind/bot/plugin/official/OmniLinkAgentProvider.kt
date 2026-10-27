@@ -47,12 +47,23 @@ private const val OMNILINK_AGENT_ID = "omnibot-omnilink-agent"
 /** Events delivered to the current Flutter chat without exposing MCP tokens. */
 object OmniLinkAgentEventBus {
     private val listeners = CopyOnWriteArrayList<(Map<String, Any?>) -> Unit>()
-    private val recentEvents = ArrayDeque<Map<String, Any?>>()
+    private data class BufferedEvent(val atElapsedMs: Long, val event: Map<String, Any?>)
+    private val recentEvents = ArrayDeque<BufferedEvent>()
     private const val MAX_RECENT_EVENTS = 64
+
+    /**
+     * 新订阅者只补最近这段时间内的事件。
+     * 原来是把缓冲区里最近 64 条无条件重放：聊天页重建（切页回来、热重启、插件
+     * 先关后开）时，上一个会话的 AI 主动消息会再出现一遍，跨对话串场且无法去重。
+     */
+    private const val REPLAY_WINDOW_MS = 5_000L
 
     fun subscribe(listener: (Map<String, Any?>) -> Unit): () -> Unit {
         listeners += listener
-        val replay = synchronized(recentEvents) { recentEvents.toList() }
+        val cutoff = SystemClock.elapsedRealtime() - REPLAY_WINDOW_MS
+        val replay = synchronized(recentEvents) {
+            recentEvents.filter { it.atElapsedMs >= cutoff }.map { it.event }
+        }
         replay.forEach { event ->
             runCatching { listener(event) }
         }
@@ -61,10 +72,15 @@ object OmniLinkAgentEventBus {
 
     fun publish(event: Map<String, Any?>) {
         synchronized(recentEvents) {
-            recentEvents.addLast(event)
+            recentEvents.addLast(BufferedEvent(SystemClock.elapsedRealtime(), event))
             while (recentEvents.size > MAX_RECENT_EVENTS) recentEvents.removeFirst()
         }
         listeners.forEach { listener -> runCatching { listener(event) } }
+    }
+
+    /** 插件被停用时清空重放缓冲，避免下次激活时补上一轮会话的旧事件。 */
+    fun clear() {
+        synchronized(recentEvents) { recentEvents.clear() }
     }
 }
 
@@ -103,6 +119,7 @@ class OmniLinkAgentProvider(
         override suspend fun onDisable() {
             poller?.stop()
             poller = null
+            OmniLinkAgentEventBus.clear()
             skillManager.setEnabled(false)
         }
     }

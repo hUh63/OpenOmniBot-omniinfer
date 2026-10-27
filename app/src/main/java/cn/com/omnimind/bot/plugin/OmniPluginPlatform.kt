@@ -20,6 +20,15 @@ class OmniPluginPlatform(
     private val storedStates = linkedMapOf<String, OmniPluginStoredState>()
     private val activePlugins = linkedMapOf<String, ActivePlugin>()
     private val errors = linkedMapOf<String, String>()
+
+    /** ensureInitialized 时的 provider 快照：会话期重试激活不能再枚举一次磁盘（沙箱侧有写操作）。 */
+    private var providerById: Map<String, OmniPluginProvider> = emptyMap()
+
+    /**
+     * 连续激活失败次数。每个回合都会重新构造 handler，瞬时故障（DB 被占、端口占用、
+     * 凭证读取抖动）很常见，所以失败后仍然允许重试，只是设上限避免坏插件拖慢每一轮。
+     */
+    private val activationFailures = linkedMapOf<String, Int>()
     private var initialized = false
 
     suspend fun list(): List<OmniPluginState> = mutex.withLock {
@@ -180,9 +189,7 @@ class OmniPluginPlatform(
 
     suspend fun openSession(): OmniPluginSession = mutex.withLock {
         ensureInitialized()
-        val requiredPluginIds = providers().asSequence()
-            .filter { it.descriptor.required }
-            .mapTo(linkedSetOf()) { it.descriptor.id }
+        retryInactivePlugins()
         val definitions = mutableListOf<OmniPluginToolDefinition>()
         val handlers = mutableListOf<ToolHandler>()
         val failedPluginIds = mutableListOf<String>()
@@ -213,16 +220,49 @@ class OmniPluginPlatform(
         failedPluginIds.forEach { pluginId ->
             val active = activePlugins.remove(pluginId) ?: return@forEach
             runCatching { active.plugin.onDisable() }
-            storedStates[pluginId]?.let { state ->
-                storedStates[pluginId] = state.copy(
-                    enabled = pluginId in requiredPluginIds,
+            // 只熔断本次会话：不要因为「本回合 handler 构造失败」就把插件写成
+            // enabled=false 落盘。那样用户开启过的插件会被永久关闭，下次启动
+            // 连尝试都不会尝试（看起来像是「开关自己变成关了」）。
+            activationFailures[pluginId] = (activationFailures[pluginId] ?: 0) + 1
+            OmniLog.w(
+                TAG,
+                "plugin_session_handler_failed plugin=$pluginId " +
+                    "failures=${activationFailures[pluginId]}",
+            )
+        }
+        OmniPluginSession(toolDefinitions = definitions, toolHandlers = handlers)
+    }
+
+    /**
+     * 把「用户已启用但当前没有活跃实例」的插件重新激活一次。
+     * 每次会话都会新建 handler，瞬时失败不该让插件永久消失；连续失败超过
+     * [MAX_ACTIVATION_RETRIES] 次才停止重试（保留错误信息供 UI 展示）。
+     */
+    private suspend fun retryInactivePlugins() {
+        val candidates = storedStates.values.filter { state ->
+            state.enabled && !activePlugins.containsKey(state.pluginId)
+        }
+        candidates.forEach { state ->
+            val failures = activationFailures[state.pluginId] ?: 0
+            if (failures >= MAX_ACTIVATION_RETRIES) return@forEach
+            val provider = providerById[state.pluginId] ?: return@forEach
+            runCatching {
+                requireCompatible(provider.descriptor)
+                activePlugins[state.pluginId] = activate(provider)
+            }.onSuccess {
+                activationFailures.remove(state.pluginId)
+                errors.remove(state.pluginId)
+            }.onFailure { error ->
+                activationFailures[state.pluginId] = failures + 1
+                errors[state.pluginId] = error.message ?: error.javaClass.simpleName
+                OmniLog.e(
+                    TAG,
+                    "plugin_reactivate_failed plugin=${state.pluginId} " +
+                        "attempt=${failures + 1} error=${error.message ?: error.javaClass.simpleName}",
+                    error,
                 )
             }
         }
-        if (failedPluginIds.isNotEmpty()) {
-            runCatching { persist(storedStates.values) }
-        }
-        OmniPluginSession(toolDefinitions = definitions, toolHandlers = handlers)
     }
 
     suspend fun listActionDefinitions(): List<OmniPluginActionDefinition> = mutex.withLock {
@@ -267,6 +307,7 @@ class OmniPluginPlatform(
     private suspend fun ensureInitialized() {
         if (initialized) return
         val providerMap = providers().associateBy { it.descriptor.id }
+        providerById = providerMap
         val requiredPluginIds = providerMap.values.asSequence()
             .filter { it.descriptor.required }
             .mapTo(linkedSetOf()) { it.descriptor.id }
@@ -314,7 +355,10 @@ class OmniPluginPlatform(
         reconciled.values.filter { it.enabled || it.installPending }.forEach { state ->
             val provider = providerMap[state.pluginId]
             if (provider == null) {
-                storedStates[state.pluginId] = state.copy(enabled = false)
+                // 枚举期（沙箱 runtime 注入、manifest 读取）失败会让 provider 临时缺席。
+                // 那不是「用户关掉了插件」，不能把 enabled 改写成 false 落盘，
+                // 否则下次枚举恢复正常后插件回来时是关着的。
+                errors[state.pluginId] = "Plugin provider unavailable"
                 return@forEach
             }
             runCatching {
@@ -349,9 +393,12 @@ class OmniPluginPlatform(
                         installPending = true,
                     )
                 } else {
-                    storedStates[state.pluginId] = state.copy(
-                        enabled = state.pluginId in requiredPluginIds,
-                    )
+                    // 激活失败不改写用户意图：一次瞬时失败（本地端口被上次进程残留占用、
+                    // Termux 命令暂不可用、磁盘忙）不该把「用户开着的插件」永久写成
+                    // disabled —— 一旦落盘，之后每次启动都会被过滤掉、连重试都没有。
+                    // 失败只记在 errors / activationFailures 里，由 retryInactivePlugins 重试。
+                    activationFailures[state.pluginId] =
+                        (activationFailures[state.pluginId] ?: 0) + 1
                 }
             }
         }
@@ -514,5 +561,7 @@ class OmniPluginPlatform(
     private companion object {
         val PLUGIN_ID = Regex("^[a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*)+$")
         val TOOL_NAME = Regex("^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+        const val MAX_ACTIVATION_RETRIES = 3
+        const val TAG = "[OmniPluginPlatform]"
     }
 }

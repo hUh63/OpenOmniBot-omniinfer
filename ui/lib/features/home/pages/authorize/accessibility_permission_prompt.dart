@@ -75,20 +75,30 @@ class _AccessibilityPermissionDialogState
       _error = null;
     });
     try {
-      for (var attempt = 0; attempt < 20; attempt += 1) {
+      for (var attempt = 0; attempt < _readyPollAttempts; attempt += 1) {
         if (await _isAccessibilityReady()) {
           if (mounted) Navigator.of(context).pop(true);
           return;
         }
-        await Future<void>.delayed(const Duration(milliseconds: 200));
+        await Future<void>.delayed(_readyPollInterval);
       }
       if (!mounted) return;
+      // 超时不等于「没开启」：不少机型从设置切回后要几秒才把服务重新绑上，
+      // 这段时间 isAndroidGuiAccessibilityReady 为 false 但 enabled 已为 true。
+      final enabled = await _isAccessibilityEnabled();
+      if (!mounted) return;
       setState(() {
-        _error = _text(
-          context,
-          '尚未开启无障碍，请打开系统开关后返回。',
-          'Accessibility is still disabled. Turn on the switch and return.',
-        );
+        _error = enabled
+            ? _text(
+                context,
+                '无障碍已开启，但系统还没把服务连上。请稍等几秒，或切到桌面再切回。',
+                'Accessibility is on, but the service has not connected yet. Wait a few seconds, or switch to home and back.',
+              )
+            : _text(
+                context,
+                '尚未开启无障碍，请打开系统开关后返回。',
+                'Accessibility is still disabled. Turn on the switch and return.',
+              );
       });
     } finally {
       if (mounted) setState(() => _checking = false);
@@ -140,7 +150,8 @@ class _AccessibilityPermissionDialogState
       ),
       actions: [
         TextButton(
-          onPressed: _checking ? null : () => Navigator.of(context).pop(false),
+          // 等待连接最长 15s，期间不能让用户点不了取消。
+          onPressed: () => Navigator.of(context).pop(false),
           child: Text(_text(context, '取消', 'Cancel')),
         ),
         FilledButton(
@@ -164,6 +175,22 @@ Future<bool> _isAccessibilityReady() async {
     return false;
   }
 }
+
+Future<bool> _isAccessibilityEnabled() async {
+  try {
+    return await spePermission.invokeMethod<bool>(
+          'isAndroidGuiAccessibilityEnabled',
+        ) ??
+        false;
+  } on PlatformException {
+    return false;
+  }
+}
+
+/// 与原生 ACCESSIBILITY_READY_TIMEOUT_MS(15s) 对齐：从系统设置切回后，
+/// 部分机型要几秒才重新绑定服务，等太短会把「正在连接」误报成「没开启」。
+const int _readyPollAttempts = 60;
+const Duration _readyPollInterval = Duration(milliseconds: 250);
 
 String _text(BuildContext context, String zh, String en) =>
     Localizations.localeOf(context).languageCode == 'en' ? en : zh;

@@ -585,7 +585,7 @@ function resolveVisibleMessages(taskMessages: ChatMessage[], primary: ChatMessag
   return visibleMessages.sort(compareOldestFirst);
 }
 
-function buildRunGroup(taskMessages: ChatMessage[], active: boolean): RunGroup | null {
+function buildRunGroup(taskId: string, taskMessages: ChatMessage[], active: boolean): RunGroup | null {
   const requestMessages = taskMessages.filter(isCodexRequestMessage);
   if (taskMessages.length < 2 && !requestMessages.length) return null;
   const primary = resolvePrimaryVisibleMessage(taskMessages, active, requestMessages);
@@ -642,7 +642,7 @@ function buildGroups(messages: ChatMessage[], activeTaskId: string | null): Rend
       if (!isAgentRunCandidateMessage(message)) items.push({ kind: "single", message });
       continue;
     }
-    const group = buildRunGroup(byTaskId.get(taskId) ?? [], taskId === normalizedActiveTaskId);
+    const group = buildRunGroup(taskId, byTaskId.get(taskId) ?? [], taskId === normalizedActiveTaskId);
     if (!group) {
       items.push({ kind: "single", message });
       continue;

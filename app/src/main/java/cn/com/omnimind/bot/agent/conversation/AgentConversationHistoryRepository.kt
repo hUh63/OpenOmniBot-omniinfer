@@ -99,7 +99,7 @@ class AgentConversationHistoryRepository(
             entries: Flow<List<AgentConversationEntry>>,
             compactedMessages: List<ChatCompletionMessage>,
             afterEntryId: Long,
-        ): Long = withTimeoutOrNull(30_000) {
+        ): Long = withTimeoutOrNull(12_000) {
             entries.map { resolveCompactionToolCutoff(it, compactedMessages, afterEntryId) }
                 .filterNotNull().first()
         } ?: error("工具历史尚未完成保存，未提交不完整的压缩检查点。")

@@ -83,6 +83,10 @@ class PermissionSpec {
 class PermissionRegistry {
   PermissionRegistry._();
 
+  /// 自启动这类「无法查询、只能用户自报」的权限，确认状态的有效期（天）。
+  /// 过期后重新引导一次，避免系统清理白名单后权限页仍显示「已开启」。
+  static const int autoStartConfirmationValidDays = 30;
+
   /// 获取指定品牌的权限列表
   ///
   /// [brand] 设备品牌，如 'huawei', 'xiaomi', 'oppo', 'vivo' 等
@@ -190,10 +194,25 @@ class PermissionRegistry {
             openMethod: 'openAutoStartSettings',
             applicableLevels: const {PermissionLevel.fullExecution},
             customCheckMethod: () async {
-              return StorageService.getBool(
+              final granted =
+                  StorageService.getBool(
                     StorageKeys.autoStartPermissionGranted,
                   ) ??
                   false;
+              if (!granted) return false;
+              // 自启动白名单无法查询，只能靠用户自报。但系统更新、手机管家一键清理
+              // 都会把它清掉，所以「确认过」必须带时效：超过 30 天重新确认一次，
+              // 否则会出现「授权页显示已开启、后台实际被系统杀掉」的静默失效。
+              final confirmedAt = StorageService.getInt(
+                StorageKeys.autoStartPermissionGrantedAt,
+              );
+              if (confirmedAt == null) return false;
+              final age = DateTime.now()
+                  .difference(
+                    DateTime.fromMillisecondsSinceEpoch(confirmedAt),
+                  )
+                  .inDays;
+              return age <= autoStartConfirmationValidDays;
             },
             customAuthMethod: (BuildContext context) async {
               await AutoStartGuideBottomSheet.show(
@@ -205,6 +224,10 @@ class PermissionRegistry {
                   await StorageService.setBool(
                     StorageKeys.autoStartPermissionGranted,
                     true,
+                  );
+                  await StorageService.setInt(
+                    StorageKeys.autoStartPermissionGrantedAt,
+                    DateTime.now().millisecondsSinceEpoch,
                   );
                 },
               );

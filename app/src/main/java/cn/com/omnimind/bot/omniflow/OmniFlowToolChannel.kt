@@ -130,10 +130,28 @@ class OmniFlowToolChannel(context: Context) {
                         message = "悬浮窗无法显示，手动录制已取消",
                     )
                 }
-                finalizedPayload(
+                val overlayFailureCode = ManualRecordingControlOverlay.lastFailureCode
+                val finalized = finalizedPayload(
                     result = learningResult.await(),
                     phase = if (overlayShown) "finished" else "cancelled",
                 )
+                if (!overlayShown) {
+                    // 把「为什么没显示出来」透出去：缺悬浮窗权限是最常见原因，
+                    // 只回 phase=cancelled 时前端无法给出可操作提示。
+                    finalized + if (overlayFailureCode == "overlay_permission_required") {
+                        mapOf(
+                            "error_code" to "OOB_OVERLAY_PERMISSION_REQUIRED",
+                            "error_message" to "需要「显示在其他应用上层」权限才能显示录制控制条",
+                        )
+                    } else {
+                        mapOf(
+                            "error_code" to "OOB_OVERLAY_UNAVAILABLE",
+                            "error_message" to "悬浮窗无法显示，手动录制已取消",
+                        )
+                    }
+                } else {
+                    finalized
+                }
             }.getOrElse { error ->
                 OmniLog.e(TAG, "startHumanTrajectoryLearning failed: ${error.message}", error)
                 mapOf(

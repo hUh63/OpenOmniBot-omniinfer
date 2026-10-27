@@ -68,6 +68,10 @@ open class AgentConversationContextCompactor(
         private const val AUTO_COMPACTION_RESERVE_DIVISOR = 8
         const val DEFAULT_AGENT_MODEL_SCENE = "scene.dispatch.model"
         private const val TAG = "AgentConversationContextCompactor"
+        /** 单条 user 消息超过这个长度才值得转存（太短就只是普通的超预算输入）。 */
+        private const val OVERSIZED_USER_OFFLOAD_MIN_CHARS = 2_000
+        /** 转存后留在 prompt 里的开头长度。 */
+        private const val OVERSIZED_USER_OFFLOAD_HEAD_CHARS = 2_000
         private val EPHEMERAL_CACHE_CONTROL = mapOf("type" to "ephemeral")
         private const val COMPACTION_REQUEST_PROMPT = """
 You are a context compaction engine. Your summary will REPLACE the original messages in the conversation context window — the agent will rely on it to continue working. Write the summary in the same language the user used in the conversation.
@@ -323,18 +327,31 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
             // Offloading preserves message positions, but shrinks their estimates.
             // For provider overflow, choose the existing cut boundary from the
             // rejected input before replacing its bodies with small references.
-            val cut = AgentContextBudget.cutPoint(if (force) messages else bounded, keepRecent)
+            var working = if (force) messages else bounded
+            var cut = AgentContextBudget.cutPoint(working, keepRecent)
+            val prefixIsEmpty = working.take(cut ?: 0).none { isCompressiblePrefixMessage(it) }
+            if (cut == null || prefixIsEmpty) {
+                // 唯一的超限单元就是最后一条 user（用户一次性粘了超长日志/正文）时，
+                // 数学上不存在合法的消息级切点。原来这里直接 error，每回合都失败、
+                // 会话永久报废。降级：把这条超长输入转存到 workspace 并只保留开头，
+                // 全文仍可用 read_file 取回，不丢信息。
+                val reduced = offloadOversizedUserMessage(working, keepRecent)
+                if (reduced !== working) {
+                    working = reduced
+                    cut = AgentContextBudget.cutPoint(working, keepRecent)
+                }
+            }
+            val cutPointValue = cut
                 ?: error("上下文超过预算，当前输入没有可安全压缩的已完成片段。请减小本次输入。")
-            val prefix = messages.take(cut).filter { it.role != "system" &&
-                !AgentConversationHistorySupport.isContextSummaryMessage(it) }
+            val prefix = working.take(cutPointValue).filter(::isCompressiblePrefixMessage)
             check(prefix.isNotEmpty()) { "上下文没有可压缩内容；未发送超限请求。" }
-            val previousSummary = bounded.firstOrNull(AgentConversationHistorySupport::isContextSummaryMessage)
+            val previousSummary = working.firstOrNull(AgentConversationHistorySupport::isContextSummaryMessage)
                 ?.let(AgentConversationHistorySupport::extractContextSummaryText)
             val summary = summarizeWithinBudget(previousSummary, prefix, capacity)
             // Summary input and continuing history have separate existing budgets.
             // Let each retain its own newest result's completion/cursor metadata.
-            val keptTail = boundToolOutputs(bounded.drop(cut), outputBudget)
-            val rebuilt = AgentContextBudget.rebuild(bounded.take(cut) + keptTail, cut, summary)
+            val keptTail = boundToolOutputs(working.drop(cutPointValue), outputBudget)
+            val rebuilt = AgentContextBudget.rebuild(working.take(cutPointValue) + keptTail, cutPointValue, summary)
             check(AgentContextBudget.estimate(rebuilt) <= messageBudget) {
                 "压缩后上下文仍超过预算；原始历史已保留，未发送超限请求。"
             }
@@ -342,20 +359,33 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
                 // Resolve the journal boundary only by canonical message identity.
                 // The repository awaits that completed group when ACP projection
                 // is still committing; a timeout must not claim a durable summary.
-                val latestUser = messages.indexOfLast { it.role == "user" }
-                val cutoff = if (cut == latestUser) {
-                    historyRepository.getContextCompactionCandidate(conversationId, conversationMode)?.cutoffEntryDbId
-                } else {
-                    // 只有「以工具结果结尾」的边界能从工具 header 反查检查点；切在 user /
-                    // assistant 边界时必须回退到按消息身份重放，否则摘要算完就丢，下一回合
-                    // 重新加载全量历史、再次超预算、再调一次摘要模型 —— 会话越长越贵。
-                    historyRepository.findCompactionToolCutoff(conversationId, conversationMode, messages.take(cut))
-                        ?: historyRepository.findCompactionMessageCutoff(
+                val latestUser = working.indexOfLast { it.role == "user" }
+                // 检查点解析本身也可能失败（ACP 投影还没落库时会等一段时间，超时抛错）。
+                // 这条路径以前在 try 之外，超时会把「已经算好摘要、rebuilt 可用」的整轮请求
+                // 打挂并让用户白等 30 秒。现在解析失败只意味着本回合不落检查点。
+                val cutoff = runCatching {
+                    if (cutPointValue == latestUser) {
+                        historyRepository.getContextCompactionCandidate(conversationId, conversationMode)?.cutoffEntryDbId
+                    } else {
+                        // 只有「以工具结果结尾」的边界能从工具 header 反查检查点；切在 user /
+                        // assistant 边界时必须回退到按消息身份重放，否则摘要算完就丢，下一回合
+                        // 重新加载全量历史、再次超预算、再调一次摘要模型 —— 会话越长越贵。
+                        historyRepository.findCompactionToolCutoff(
                             conversationId,
                             conversationMode,
-                            messages.take(cut)
+                            working.take(cutPointValue)
+                        ) ?: historyRepository.findCompactionMessageCutoff(
+                            conversationId,
+                            conversationMode,
+                            working.take(cutPointValue)
                         )
-                }
+                    }
+                }.onFailure { error ->
+                    OmniLog.w(
+                        "ContextCompaction",
+                        "compaction cutoff resolution failed conversation=$conversationId: ${error.message}"
+                    )
+                }.getOrNull()
                 if (cutoff != null) {
                     // 检查点竞争失败（压缩期间历史变了）不该让整轮请求失败：本次请求已经
                     // 用上了 rebuilt，最坏是下一回合再算一次摘要。原来这里直接把异常抛给
@@ -380,6 +410,39 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
         } finally {
             callback?.onContextCompactionStateChanged(false, promptTokens, capacity)
         }
+    }
+
+    private fun isCompressiblePrefixMessage(message: ChatCompletionMessage): Boolean =
+        message.role != "system" && !AgentConversationHistorySupport.isContextSummaryMessage(message)
+
+    /**
+     * 单条消息超出预算时的降级：把最后一条 user 的超长正文转存到 workspace，
+     * 原地只保留开头一段 + 文件路径。消息位置不变，因此不影响切点计算，
+     * 全文仍可通过 read_file 取回（不丢信息，只换载体）。
+     */
+    private suspend fun offloadOversizedUserMessage(
+        messages: List<ChatCompletionMessage>,
+        keepRecentTokens: Int,
+    ): List<ChatCompletionMessage> = withContext(Dispatchers.IO) {
+        val offload = offloadToolOutput ?: return@withContext messages
+        val index = messages.indexOfLast { it.role == "user" }
+        if (index < 0) return@withContext messages
+        val message = messages[index]
+        if (AgentContextBudget.messageTokens(message) <= keepRecentTokens) return@withContext messages
+        val text = message.contentText()
+        if (text.length < OVERSIZED_USER_OFFLOAD_MIN_CHARS) return@withContext messages
+        val path = runCatching { offload(text) }.getOrElse { error ->
+            OmniLog.w(TAG, "oversized user offload failed: ${error.message}")
+            return@withContext messages
+        }
+        val head = text.take(OVERSIZED_USER_OFFLOAD_HEAD_CHARS)
+        val replacement = message.copy(
+            content = JsonPrimitive(
+                "$head\n\n…（原文过长已转存到 workspace：$path。" +
+                    "需要完整内容时用 read_file 读取该文件，不要凭空推测未显示的部分。）"
+            )
+        )
+        messages.toMutableList().also { it[index] = replacement }
     }
 
     private suspend fun boundToolOutputs(messages: List<ChatCompletionMessage>, budget: Int): List<ChatCompletionMessage> = withContext(Dispatchers.IO) {
