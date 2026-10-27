@@ -33,7 +33,8 @@ class OverlayChannel {
 
     fun setChannel(flutterEngine: FlutterEngine) {
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-        methodChannel?.setMethodCallHandler { call, result ->
+        methodChannel?.setMethodCallHandler { call, rawResult ->
+            val result = OnceResult(rawResult, "[OverlayChannel]")
             handleMethodCall(call, result)
         }
     }

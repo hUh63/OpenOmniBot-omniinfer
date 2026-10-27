@@ -5,14 +5,18 @@ import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.mcp.McpServerManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class McpServerChannel {
     private val EVENT_CHANNEL = "cn.com.omnimind.bot/McpServer"
-    private val scope = CoroutineScope(Dispatchers.IO)
+    // SupervisorJob：单个调用失败不能把整个 channel 的 scope 打掉
+    // （普通 Job 下，一次逃逸异常之后所有 MCP 调用都静默不执行、也不回包）。
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var channel: MethodChannel? = null
     private var appContext: Context? = null
 
@@ -22,7 +26,8 @@ class McpServerChannel {
 
     fun setChannel(flutterEngine: FlutterEngine) {
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL)
-        channel?.setMethodCallHandler { call, result ->
+        channel?.setMethodCallHandler { call, rawResult ->
+            val result = OnceResult(rawResult, "[McpServerChannel]")
             val context = appContext
             if (context == null) {
                 result.error("MCP_INIT_ERROR", "Context not initialized", null)
@@ -52,6 +57,7 @@ class McpServerChannel {
                         else -> withContext(Dispatchers.Main) { result.notImplemented() }
                     }
                 } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
                     OmniLog.e("[McpServerChannel]", "channel error: ${t.message}")
                     withContext(Dispatchers.Main) {
                         result.error("MCP_ERROR", t.message ?: t.javaClass.simpleName, null)

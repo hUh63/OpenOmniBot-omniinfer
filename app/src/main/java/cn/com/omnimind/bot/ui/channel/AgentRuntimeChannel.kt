@@ -7,6 +7,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -75,6 +76,7 @@ class AgentRuntimeChannel {
             }.onSuccess { payload ->
                 result.success(payload)
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 val detail = AgentRuntimeErrorSupport.safeDiagnosticMessage(error)
                 val failureKind = AgentRuntimeErrorSupport.failureKind(error)
                 result.error(

@@ -9,14 +9,16 @@ import cn.com.omnimind.bot.mcp.RemoteMcpDiscoveryRegistry
 import cn.com.omnimind.bot.mcp.RemoteMcpServerConfig
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class RemoteMcpConfigChannel {
     private val channelName = "cn.com.omnimind.bot/RemoteMcpConfig"
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var channel: MethodChannel? = null
     private var appContext: Context? = null
 
@@ -26,7 +28,8 @@ class RemoteMcpConfigChannel {
 
     fun setChannel(flutterEngine: FlutterEngine) {
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        channel?.setMethodCallHandler { call, result ->
+        channel?.setMethodCallHandler { call, rawResult ->
+            val result = OnceResult(rawResult, "[RemoteMcpConfigChannel]")
             scope.launch {
                 try {
                     when (call.method) {
@@ -71,6 +74,7 @@ class RemoteMcpConfigChannel {
                         else -> withContext(Dispatchers.Main) { result.notImplemented() }
                     }
                 } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
                     OmniLog.e("[RemoteMcpConfigChannel]", "channel error: ${t.message}", t)
                     withContext(Dispatchers.Main) {
                         result.error("REMOTE_MCP_ERROR", t.message, null)

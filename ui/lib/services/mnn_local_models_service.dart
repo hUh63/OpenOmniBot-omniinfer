@@ -389,10 +389,16 @@ class MnnLocalModelsService {
     return MnnLocalMarketPayload.fromMap(result);
   }
 
+  /// 平台通道超时：原生侧加载/停止模型期间异常或进程回收时，invokeMethod
+  /// 永不返回，按钮的 busy 态就永久不恢复。分档给出上限。
+  static const Duration _configTimeout = Duration(seconds: 20);
+  static const Duration _operationTimeout = Duration(seconds: 90);
+  static const Duration _loadTimeout = Duration(minutes: 10);
+
   static Future<MnnLocalConfig> getConfig() async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'getConfig',
-    );
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>('getConfig')
+        .timeout(_configTimeout);
     return MnnLocalConfig.fromMap(result);
   }
 
@@ -446,10 +452,12 @@ class MnnLocalModelsService {
     String? modelId, {
     String? backend,
   }) async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'setActiveModel',
-      {'modelId': modelId, if (backend != null) 'backend': backend},
-    );
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>(
+          'setActiveModel',
+          {'modelId': modelId, if (backend != null) 'backend': backend},
+        )
+        .timeout(_operationTimeout);
     return MnnLocalConfig.fromMap(result);
   }
 
@@ -457,10 +465,12 @@ class MnnLocalModelsService {
     String? modelId,
     String? backend,
   }) async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'startApiService',
-      {'modelId': modelId, if (backend != null) 'backend': backend},
-    );
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>(
+          'startApiService',
+          {'modelId': modelId, if (backend != null) 'backend': backend},
+        )
+        .timeout(_loadTimeout);
     return MnnLocalConfig.fromMap(result);
   }
 
@@ -480,9 +490,9 @@ class MnnLocalModelsService {
   }
 
   static Future<MnnLocalConfig> stopApiService() async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'stopApiService',
-    );
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>('stopApiService')
+        .timeout(_operationTimeout);
     return MnnLocalConfig.fromMap(result);
   }
 
@@ -514,23 +524,25 @@ class MnnLocalModelsService {
   }
 
   static Future<List<MnnLocalModel>> deleteModel(String modelId) async {
-    final result = await _channel.invokeMethod<List<dynamic>>('deleteModel', {
-      'modelId': modelId,
-    });
+    final result = await _channel
+        .invokeMethod<List<dynamic>>('deleteModel', {'modelId': modelId})
+        .timeout(_operationTimeout);
     return (result ?? const [])
         .map((item) => MnnLocalModel.fromMap(item as Map?))
         .toList();
   }
 
   static Future<String> getBackend() async {
-    final result = await _channel.invokeMethod<String>('getBackend');
+    final result = await _channel
+        .invokeMethod<String>('getBackend')
+        .timeout(_configTimeout);
     return normalizeInferenceBackend(result);
   }
 
   static Future<String> setBackend(String backend) async {
-    final result = await _channel.invokeMethod<String>('setBackend', {
-      'backend': backend,
-    });
+    final result = await _channel
+        .invokeMethod<String>('setBackend', {'backend': backend})
+        .timeout(_operationTimeout);
     return normalizeInferenceBackend(result ?? backend);
   }
 

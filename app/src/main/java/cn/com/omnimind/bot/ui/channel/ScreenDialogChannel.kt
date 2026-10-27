@@ -6,18 +6,27 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class ScreenDialogChannel {
     private val eventChannel = "cn.com.omnimind.bot/ScreenDialogEvent"
     private var channel: MethodChannel? = null
-    private var mainJob: CoroutineScope = CoroutineScope(Dispatchers.Main)
+    // 这个 scope 会在 clear() 里被 cancel —— 必须能在下次 setChannel 时重建，
+    // 否则 Flutter view 重建之后所有对话框调用都落在一个已取消的 scope 上：
+    // 不回包、也不报错，Dart 侧永久 loading。
+    private var mainJob: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     fun setChannel(flutterEngine: FlutterEngine) {
+        if (!mainJob.isActive) {
+            mainJob = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        }
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, eventChannel)
-        channel?.setMethodCallHandler { call, result ->
+        channel?.setMethodCallHandler { call, rawResult ->
+            val result = OnceResult(rawResult, "[ScreenDialogChannel]")
             when (call.method) {
                 "closeDialog" -> {
                     mainJob.launch {

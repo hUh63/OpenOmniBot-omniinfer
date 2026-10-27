@@ -4,8 +4,10 @@ import cn.com.omnimind.baselib.database.DatabaseHelper
 import com.tencent.mmkv.MMKV
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -17,14 +19,15 @@ class CacheChannel {
     private val EVENT_CHANNEL = "cn.com.omnimind.bot/CacheDataEvent" // Flutter 事件通道
     private var channel: MethodChannel? = null
 
-    private var mainJob: CoroutineScope = CoroutineScope(Dispatchers.Main)
+    private var mainJob: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     fun setChannel(flutterEngine: FlutterEngine) {
         channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             EVENT_CHANNEL
         )
-        channel?.setMethodCallHandler { call, result ->
+        channel?.setMethodCallHandler { call, rawResult ->
+            val result = OnceResult(rawResult, "[CacheChannel]")
             when (call.method) {
                 "doMMKVEncodeString" -> {
                     call.argument<String>("value")?.let {
@@ -152,6 +155,7 @@ class CacheChannel {
                                 )
                             })
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("GET_APP_ICON_ERROR", e.message, null)
                         }
                     }
@@ -176,6 +180,7 @@ class CacheChannel {
                                 )
                             })
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("GET_APP_ICONS_ERROR", e.message, null)
                         }
                     }
@@ -194,6 +199,7 @@ class CacheChannel {
                             }
                             result.success(success)
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("INSERT_APP_ICON_ERROR", e.message, null)
                         }
                     }
@@ -223,6 +229,7 @@ class CacheChannel {
                             }
                             result.success(id)
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("INSERT_MESSAGE_ERROR", e.message, null)
                         }
                     }
@@ -256,6 +263,7 @@ class CacheChannel {
                             }
                             result.success(true)
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("UPDATE_MESSAGE_ERROR", e.message, null)
                         }
                     }
@@ -287,6 +295,7 @@ class CacheChannel {
                                 result.success(null)
                             }
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("GET_MESSAGE_BY_ID_ERROR", e.message, null)
                         }
                     }
@@ -318,6 +327,7 @@ class CacheChannel {
                                 )
                             )
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("GET_MESSAGES_BY_PAGE_ERROR", e.message, null)
                         }
                     }
@@ -335,6 +345,7 @@ class CacheChannel {
                             }
                             result.success(true)
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("DELETE_MESSAGE_BY_ID_ERROR", e.message, null)
                         }
                     }
@@ -348,6 +359,7 @@ class CacheChannel {
                             }
                             result.success(true)
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             result.error("DELETE_ALL_MESSAGES_ERROR", e.message, null)
                         }
                     }

@@ -53,7 +53,8 @@ class SpecialPermissionChannel {
         embeddedTerminalInitListener?.let {
             EmbeddedTerminalInitCoordinator.addListener(it)
         }
-        methodChannel?.setMethodCallHandler { call, result ->
+        methodChannel?.setMethodCallHandler { call, rawResult ->
+            val result = OnceResult(rawResult, "[SpecialPermissionChannel]")
                 when (call.method) {
                     "getNotificationAccessSettings", "openNotificationAccessSettings", "setNotificationAppAllowed", "setAllNotificationAppsAllowed" -> {
                         try {

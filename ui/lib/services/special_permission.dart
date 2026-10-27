@@ -393,6 +393,31 @@ class EmbeddedTerminalAutoStartTaskRunResult {
   }
 }
 
+/// 终端相关平台调用的统一超时。
+///
+/// 这些方法被设置页 / onboarding / 终端浮层直接 `await`：原生 handler 抛异常、
+/// Activity 不在、进程被回收时 invokeMethod 永不返回，按钮就永久停在「无反应」
+/// 或「初始化中」。统一在这里兜底，调用方拿 null 走默认值即可。
+const Duration _kTerminalInvokeTimeout = Duration(seconds: 10);
+
+/// 带超时与异常兜底的 `spePermission` 调用。
+Future<T?> invokeSpecialPermission<T>(String method, [dynamic arguments]) async {
+  try {
+    return await spePermission
+        .invokeMethod<T>(method, arguments)
+        .timeout(_kTerminalInvokeTimeout);
+  } on TimeoutException {
+    debugPrint('[SpecialPermission] $method timed out');
+    return null;
+  } on PlatformException catch (error) {
+    debugPrint('[SpecialPermission] $method failed: ${error.message}');
+    return null;
+  } on MissingPluginException catch (error) {
+    debugPrint('[SpecialPermission] $method missing: ${error.message}');
+    return null;
+  }
+}
+
 Stream<EmbeddedTerminalInitProgress>? _embeddedTerminalInitProgressBroadcast;
 
 /// 终端初始化进度：全 App 共用一个原生订阅。
@@ -402,36 +427,73 @@ Stream<EmbeddedTerminalInitProgress>? _embeddedTerminalInitProgressBroadcast;
 /// termux 设置页 / onboarding / 初始化浮层三个地方各订阅一份，谁先 dispose
 /// 谁的 cancel 就会把另外两处的进度流也断掉（表现为一直停在“初始化中”）。
 Stream<EmbeddedTerminalInitProgress> get embeddedTerminalInitProgressStream {
-  return _embeddedTerminalInitProgressBroadcast ??=
-      _specialPermissionEvents.receiveBroadcastStream().map((event) {
-        final payload = event is Map
-            ? Map<dynamic, dynamic>.from(event)
-            : const <dynamic, dynamic>{};
-        return EmbeddedTerminalInitProgress.fromMap(payload);
-      });
+  final cached = _embeddedTerminalInitProgressBroadcast;
+  if (cached != null) return cached;
+
+  StreamSubscription<dynamic>? nativeSubscription;
+  late final StreamController<EmbeddedTerminalInitProgress> controller;
+  late final Stream<EmbeddedTerminalInitProgress> stream;
+  controller = StreamController<EmbeddedTerminalInitProgress>.broadcast(
+    onListen: () {
+      nativeSubscription ??=
+          _specialPermissionEvents.receiveBroadcastStream().listen(
+        (event) {
+          final payload = event is Map
+              ? Map<dynamic, dynamic>.from(event)
+              : const <dynamic, dynamic>{};
+          if (!controller.isClosed) {
+            controller.add(EmbeddedTerminalInitProgress.fromMap(payload));
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!controller.isClosed) controller.addError(error, stackTrace);
+        },
+        onDone: () {
+          // 原生侧拆了分发（进程重启 / 服务被回收）：必须复位缓存，
+          // 否则这条流永久 done，三个页面都停在「初始化中」不再刷新。
+          nativeSubscription = null;
+          if (identical(_embeddedTerminalInitProgressBroadcast, stream)) {
+            _embeddedTerminalInitProgressBroadcast = null;
+          }
+          if (!controller.isClosed) controller.close();
+        },
+        cancelOnError: true,
+      );
+    },
+    onCancel: () {
+      nativeSubscription?.cancel();
+      nativeSubscription = null;
+      if (identical(_embeddedTerminalInitProgressBroadcast, stream)) {
+        _embeddedTerminalInitProgressBroadcast = null;
+      }
+    },
+  );
+  stream = controller.stream;
+  _embeddedTerminalInitProgressBroadcast = stream;
+  return stream;
 }
 
 Future<EmbeddedTerminalInitSnapshot> getEmbeddedTerminalInitSnapshot() async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'getEmbeddedTerminalInitSnapshot',
   );
   return EmbeddedTerminalInitSnapshot.fromMap(result ?? const {});
 }
 
 Future<bool> cancelEmbeddedTerminalInit() async {
-  return await spePermission.invokeMethod<bool>('cancelEmbeddedTerminalInit') ??
+  return await invokeSpecialPermission<bool>('cancelEmbeddedTerminalInit') ??
       false;
 }
 
 Future<EmbeddedTerminalRuntimeStatus> getEmbeddedTerminalRuntimeStatus() async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'getEmbeddedTerminalRuntimeStatus',
   );
   return EmbeddedTerminalRuntimeStatus.fromMap(result ?? const {});
 }
 
 Future<EmbeddedTerminalSetupStatus> getEmbeddedTerminalSetupStatus() async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'getEmbeddedTerminalSetupStatus',
   );
   return EmbeddedTerminalSetupStatus.fromMap(result ?? const {});
@@ -439,14 +501,14 @@ Future<EmbeddedTerminalSetupStatus> getEmbeddedTerminalSetupStatus() async {
 
 Future<EmbeddedTerminalSetupInventory>
 getEmbeddedTerminalSetupInventory() async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'getEmbeddedTerminalSetupInventory',
   );
   return EmbeddedTerminalSetupInventory.fromMap(result ?? const {});
 }
 
 Future<EmbeddedTerminalDistribution> getEmbeddedTerminalDistribution() async {
-  final result = await spePermission.invokeMethod<String>(
+  final result = await invokeSpecialPermission<String>(
     'getEmbeddedTerminalDistribution',
   );
   return EmbeddedTerminalDistribution.fromId(result);
@@ -455,7 +517,7 @@ Future<EmbeddedTerminalDistribution> getEmbeddedTerminalDistribution() async {
 Future<EmbeddedTerminalDistribution> setEmbeddedTerminalDistribution(
   EmbeddedTerminalDistribution distribution,
 ) async {
-  final result = await spePermission.invokeMethod<String>(
+  final result = await invokeSpecialPermission<String>(
     'setEmbeddedTerminalDistribution',
     <String, dynamic>{'distribution': distribution.id},
   );
@@ -465,7 +527,7 @@ Future<EmbeddedTerminalDistribution> setEmbeddedTerminalDistribution(
 Future<EmbeddedTerminalDistribution> switchEmbeddedTerminalDistribution(
   EmbeddedTerminalDistribution distribution,
 ) async {
-  final result = await spePermission.invokeMethod<String>(
+  final result = await invokeSpecialPermission<String>(
     'switchEmbeddedTerminalDistribution',
     <String, dynamic>{'distribution': distribution.id},
   );
@@ -474,7 +536,7 @@ Future<EmbeddedTerminalDistribution> switchEmbeddedTerminalDistribution(
 
 Future<EmbeddedTerminalSetupSessionSnapshot>
 getEmbeddedTerminalSetupSessionSnapshot() async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'getEmbeddedTerminalSetupSessionSnapshot',
   );
   return EmbeddedTerminalSetupSessionSnapshot.fromMap(result ?? const {});
@@ -483,7 +545,7 @@ getEmbeddedTerminalSetupSessionSnapshot() async {
 Future<EmbeddedTerminalSetupResult> installEmbeddedTerminalPackages(
   List<String> packageIds,
 ) async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'installEmbeddedTerminalPackages',
     {'packageIds': packageIds},
   );
@@ -493,7 +555,7 @@ Future<EmbeddedTerminalSetupResult> installEmbeddedTerminalPackages(
 Future<EmbeddedTerminalSetupSessionSnapshot> startEmbeddedTerminalSetupSession(
   List<String> packageIds,
 ) async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'startEmbeddedTerminalSetupSession',
     {'packageIds': packageIds},
   );
@@ -501,12 +563,12 @@ Future<EmbeddedTerminalSetupSessionSnapshot> startEmbeddedTerminalSetupSession(
 }
 
 Future<void> dismissEmbeddedTerminalSetupSession() async {
-  await spePermission.invokeMethod<void>('dismissEmbeddedTerminalSetupSession');
+  await invokeSpecialPermission<void>('dismissEmbeddedTerminalSetupSession');
 }
 
 Future<EmbeddedTerminalAutoStartTaskList>
 getEmbeddedTerminalAutoStartTasks() async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'getEmbeddedTerminalAutoStartTasks',
   );
   return EmbeddedTerminalAutoStartTaskList.fromMap(result ?? const {});
@@ -519,7 +581,7 @@ Future<EmbeddedTerminalAutoStartTask> saveEmbeddedTerminalAutoStartTask({
   String? workingDirectory,
   required bool enabled,
 }) async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'saveEmbeddedTerminalAutoStartTask',
     <String, dynamic>{
       'id': id,
@@ -533,7 +595,7 @@ Future<EmbeddedTerminalAutoStartTask> saveEmbeddedTerminalAutoStartTask({
 }
 
 Future<void> deleteEmbeddedTerminalAutoStartTask(String id) async {
-  await spePermission.invokeMethod<void>(
+  await invokeSpecialPermission<void>(
     'deleteEmbeddedTerminalAutoStartTask',
     {'id': id},
   );
@@ -542,7 +604,7 @@ Future<void> deleteEmbeddedTerminalAutoStartTask(String id) async {
 Future<EmbeddedTerminalAutoStartTaskRunResult> runEmbeddedTerminalAutoStartTask(
   String id,
 ) async {
-  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+  final result = await invokeSpecialPermission<Map<dynamic, dynamic>>(
     'runEmbeddedTerminalAutoStartTask',
     <String, dynamic>{'id': id},
   );
@@ -553,7 +615,7 @@ Future<void> openNativeTerminal({
   bool openSetup = false,
   List<String> setupPackageIds = const <String>[],
 }) async {
-  await spePermission.invokeMethod<void>('openNativeTerminal', {
+  await invokeSpecialPermission<void>('openNativeTerminal', {
     'openSetup': openSetup,
     'setupPackageIds': setupPackageIds,
   });

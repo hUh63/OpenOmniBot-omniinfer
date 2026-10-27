@@ -1,6 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+
+/// 朗读/暂停/重播都是消息卡片上的按钮：原生不回包时 await 会挂死，
+/// 卡片语音状态就永久停在「合成中」。
+const Duration _invokeTimeout = Duration(seconds: 30);
 
 const MethodChannel _voicePlaybackChannel = MethodChannel(
   'cn.com.omnimind.bot/VoicePlayback',
@@ -103,9 +108,13 @@ class VoicePlaybackChannelService {
             'text': text,
             'enqueue': enqueue,
             'preferStreaming': preferStreaming,
-          });
+          })
+          .timeout(_invokeTimeout);
       return result == true;
     } on PlatformException {
+      return false;
+    } catch (error) {
+      debugPrint('[VoicePlayback] request failed: $error');
       return false;
     }
   }
@@ -115,48 +124,68 @@ class VoicePlaybackChannelService {
     required String text,
   }) async {
     try {
-      final result = await _voicePlaybackChannel.invokeMethod<bool>(
-        'replayText',
-        {'messageId': messageId, 'text': text},
-      );
+      final result = await _voicePlaybackChannel
+          .invokeMethod<bool>(
+            'replayText',
+            {'messageId': messageId, 'text': text},
+          )
+          .timeout(_invokeTimeout);
       return result == true;
     } on PlatformException {
+      return false;
+    } catch (error) {
+      debugPrint('[VoicePlayback] request failed: $error');
       return false;
     }
   }
 
   static Future<bool> pausePlayback(String messageId) async {
     try {
-      final result = await _voicePlaybackChannel.invokeMethod<bool>(
-        'pausePlayback',
-        {'messageId': messageId},
-      );
+      final result = await _voicePlaybackChannel
+          .invokeMethod<bool>(
+            'pausePlayback',
+            {'messageId': messageId},
+          )
+          .timeout(_invokeTimeout);
       return result == true;
     } on PlatformException {
+      return false;
+    } catch (error) {
+      debugPrint('[VoicePlayback] request failed: $error');
       return false;
     }
   }
 
   static Future<bool> resumePlayback(String messageId) async {
     try {
-      final result = await _voicePlaybackChannel.invokeMethod<bool>(
-        'resumePlayback',
-        {'messageId': messageId},
-      );
+      final result = await _voicePlaybackChannel
+          .invokeMethod<bool>(
+            'resumePlayback',
+            {'messageId': messageId},
+          )
+          .timeout(_invokeTimeout);
       return result == true;
     } on PlatformException {
+      return false;
+    } catch (error) {
+      debugPrint('[VoicePlayback] request failed: $error');
       return false;
     }
   }
 
   static Future<bool> stopPlayback(String messageId) async {
     try {
-      final result = await _voicePlaybackChannel.invokeMethod<bool>(
-        'stopPlayback',
-        {'messageId': messageId},
-      );
+      final result = await _voicePlaybackChannel
+          .invokeMethod<bool>(
+            'stopPlayback',
+            {'messageId': messageId},
+          )
+          .timeout(_invokeTimeout);
       return result == true;
     } on PlatformException {
+      return false;
+    } catch (error) {
+      debugPrint('[VoicePlayback] request failed: $error');
       return false;
     }
   }

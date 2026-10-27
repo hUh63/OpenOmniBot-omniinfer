@@ -1,5 +1,6 @@
 import 'dart:collection';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:ui/services/storage_service.dart';
 
@@ -63,14 +64,19 @@ class ChatTerminalEnvironmentService {
   ) async {
     final normalized = normalizeVariables(variables);
     try {
-      await _nativeChannel.invokeMethod<Object?>(
-        'syncTerminalEnvironmentVariables',
-        <String, dynamic>{
-          'variables': normalized.map((item) => item.toMap()).toList(),
-        },
-      );
+      await _nativeChannel
+          .invokeMethod<Object?>(
+            'syncTerminalEnvironmentVariables',
+            <String, dynamic>{
+              'variables': normalized.map((item) => item.toMap()).toList(),
+            },
+          )
+          .timeout(const Duration(seconds: 10));
     } on MissingPluginException {
       // Flutter unit tests and web builds do not have the Android channel.
+    } catch (error) {
+      // 原生侧异常不能把「保存」按钮打断在半路（用户会以为保存成功）。
+      debugPrint('[TerminalEnv] sync failed: $error');
     }
   }
 

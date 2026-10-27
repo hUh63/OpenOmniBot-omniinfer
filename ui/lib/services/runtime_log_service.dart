@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class RuntimeLogEntry {
@@ -47,18 +48,29 @@ class RuntimeLogService {
     'cn.com.omnimind.bot/AssistCoreEvent',
   );
 
+  /// 日志页直接 await：原生不回包时列表永久 loading，必须给上限。
+  static const Duration _invokeTimeout = Duration(seconds: 10);
+
   static Future<List<RuntimeLogEntry>> listRecent({int limit = 100}) async {
-    final result = await _assistCore.invokeMethod<List<dynamic>>(
-      'listRuntimeLogs',
-      {'limit': limit},
-    );
-    return (result ?? const [])
-        .whereType<Map>()
-        .map((item) => RuntimeLogEntry.fromMap(item))
-        .toList();
+    try {
+      final result = await _assistCore
+          .invokeMethod<List<dynamic>>('listRuntimeLogs', {'limit': limit})
+          .timeout(_invokeTimeout);
+      return (result ?? const [])
+          .whereType<Map>()
+          .map((item) => RuntimeLogEntry.fromMap(item))
+          .toList();
+    } catch (error) {
+      debugPrint('[RuntimeLog] listRecent failed: $error');
+      return const <RuntimeLogEntry>[];
+    }
   }
 
   static Future<void> clear() async {
-    await _assistCore.invokeMethod('clearRuntimeLogs');
+    try {
+      await _assistCore.invokeMethod('clearRuntimeLogs').timeout(_invokeTimeout);
+    } catch (error) {
+      debugPrint('[RuntimeLog] clear failed: $error');
+    }
   }
 }

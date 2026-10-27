@@ -8,6 +8,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CancellationException
 
 /**
  * ACP voice scene bridge.  Keeping this separate from the general assists
@@ -41,7 +42,9 @@ class VoicePlaybackChannel : EventChannel.StreamHandler {
         manager?.setEventEmitter { payload ->
             mainHandler.post { eventSink?.success(payload) }
         }
-        methodChannel?.setMethodCallHandler { call, result -> handle(call, result) }
+        methodChannel?.setMethodCallHandler { call, rawResult ->
+            handle(call, OnceResult(rawResult, "[VoicePlayback]"))
+        }
         eventChannel?.setStreamHandler(this)
     }
 
@@ -71,6 +74,7 @@ class VoicePlaybackChannel : EventChannel.StreamHandler {
                 else -> result.notImplemented()
             }
         } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             result.error("VOICE_REQUEST_FAILED", error.message ?: "语音请求失败", null)
         }
     }

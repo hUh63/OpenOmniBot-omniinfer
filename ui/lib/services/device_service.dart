@@ -1,13 +1,21 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 
 /// 设备信息服务
 class DeviceService {
   static const MethodChannel _methodChannel = MethodChannel('device_info');
 
+  /// 平台通道超时：原生 handler 抛异常 / Activity 不在 / 进程被回收时
+  /// invokeMethod 会永不返回，调用方（权限引导页首屏）就永久 loading。
+  static const Duration _invokeTimeout = Duration(seconds: 5);
+
   /// 获取Android设备ID
   static Future<String?> getAndroidId() async {
     try {
-      final String? androidId = await _methodChannel.invokeMethod('getAndroidId');
+      final String? androidId = await _methodChannel
+          .invokeMethod('getAndroidId')
+          .timeout(_invokeTimeout);
       return androidId;
     } on PlatformException catch (e) {
       print('获取Android ID失败: ${e.message}');
@@ -21,7 +29,9 @@ class DeviceService {
   /// 获取设备信息
   static Future<Map<String, dynamic>?> getDeviceInfo() async {
     try {
-      final result = await _methodChannel.invokeMethod('getDeviceInfo');
+      final result = await _methodChannel
+          .invokeMethod('getDeviceInfo')
+          .timeout(_invokeTimeout);
       return _mapFromResult(result);
     } on PlatformException catch (e) {
       print('获取设备信息失败: ${e.message}');
@@ -35,7 +45,9 @@ class DeviceService {
   /// 获取设备IP地址
   static Future<String?> getIpAddress() async {
     try {
-      final String? ipAddress = await _methodChannel.invokeMethod('getIpAddress');
+      final String? ipAddress = await _methodChannel
+          .invokeMethod('getIpAddress')
+          .timeout(_invokeTimeout);
       return ipAddress;
     } on PlatformException catch (e) {
       print('获取IP地址失败: ${e.message}');
@@ -49,7 +61,9 @@ class DeviceService {
   /// 获取应用版本信息（版本号、平台类型）
   static Future<Map<String, dynamic>?> getAppVersion() async {
     try {
-      final result = await _methodChannel.invokeMethod('getAppVersion');
+      final result = await _methodChannel
+          .invokeMethod('getAppVersion')
+          .timeout(_invokeTimeout);
       if (result == null) {
         return null;
       }

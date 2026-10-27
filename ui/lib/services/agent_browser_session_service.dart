@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 
@@ -75,7 +77,8 @@ class AgentBrowserSessionService {
             'maxWidth': maxWidth,
             if (requestedWorkspaceId.isNotEmpty)
               'workspaceId': requestedWorkspaceId,
-          });
+          })
+          .timeout(_invokeTimeout);
       final normalizedResult = _normalizeMap(rawResult);
       if (normalizedResult == null ||
           normalizedResult['available'] != true ||
@@ -88,8 +91,12 @@ class AgentBrowserSessionService {
         return null;
       }
       return frame;
-    } on PlatformException {
-      rethrow;
+    } on TimeoutException {
+      debugPrint('[BrowserSession] capturePreviewFrame timed out');
+      return null;
+    } on PlatformException catch (error) {
+      debugPrint('[BrowserSession] capturePreviewFrame failed: ${error.message}');
+      return null;
     } on MissingPluginException {
       return null;
     }
@@ -371,19 +378,32 @@ class AgentBrowserSessionService {
     });
   }
 
+  /// 浏览器浮层调用的统一超时。
+  ///
+  /// 调用方全是 UI 按钮（导航/开关 AI 接管/关标签）：原生不回包时 await 会挂死，
+  /// 按钮就永久禁用、浮层永久转圈。
+  static const Duration _invokeTimeout = Duration(seconds: 15);
+
   static Future<ChatBrowserSessionSnapshot?> _invokeSnapshot(
     String method, [
     Map<String, dynamic>? arguments,
   ]) async {
     try {
-      final rawResult = await _channel.invokeMethod<dynamic>(method, arguments);
+      final rawResult = await _channel
+          .invokeMethod<dynamic>(method, arguments)
+          .timeout(_invokeTimeout);
       final normalizedResult = _normalizeMap(rawResult);
       if (normalizedResult == null || normalizedResult['available'] != true) {
         return null;
       }
       return ChatBrowserSessionSnapshot.fromMap(normalizedResult);
-    } on PlatformException {
-      rethrow;
+    } on TimeoutException {
+      debugPrint('[BrowserSession] $method timed out');
+      return null;
+    } on PlatformException catch (error) {
+      // 不再 rethrow：UI 回调拿不到"失败态"只会崩溃或静默断链。
+      debugPrint('[BrowserSession] $method failed: ${error.message}');
+      return null;
     } on MissingPluginException {
       return null;
     }

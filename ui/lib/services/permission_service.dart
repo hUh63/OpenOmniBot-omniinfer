@@ -96,10 +96,22 @@ class PermissionService {
         onAuthorize: () async {
           // 优先使用 spec 中定义的自定义授权方法
           if (spec.customAuthMethod != null) {
-            await spec.customAuthMethod!(context);
-          } else {
-            // 使用默认的原生方法
-            await spePermission.invokeMethod(spec.openMethod);
+            try {
+              await spec.customAuthMethod!(context);
+            } catch (error) {
+              debugPrint('[Permission] ${spec.id} authorize failed: $error');
+            }
+            return;
+          }
+          // 使用默认的原生方法。
+          // 原生不回包（Activity 不在 / handler 抛异常）时按钮会永久「点了没反应」，
+          // 这里统一给 20s 超时并把异常收敛掉。
+          try {
+            await spePermission
+                .invokeMethod(spec.openMethod)
+                .timeout(const Duration(seconds: 20));
+          } catch (error) {
+            debugPrint('[Permission] ${spec.id} authorize failed: $error');
           }
         },
         checkAuthorization: () async {

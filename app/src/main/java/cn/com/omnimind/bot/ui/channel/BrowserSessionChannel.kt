@@ -4,6 +4,7 @@ import cn.com.omnimind.bot.agent.LiveAgentBrowserSessionManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +40,7 @@ class BrowserSessionChannel {
             }.onSuccess {
                 result.success(it)
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 if (error is NoSuchMethodError) {
                     result.notImplemented()
                 } else {
