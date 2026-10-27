@@ -808,6 +808,9 @@ class _ChatHistoryPageState extends State<ChatHistoryPage> {
         conversation,
         archived: !widget.archivedOnly,
       ),
+      // 全滑归档后这一行可能还留在列表里（「全部」视图 / 搜索结果）。
+      // 不重建 Slidable 的话，控制器已被 dismiss 折叠，这一行就再也滑不动了。
+      resetAfterFullSwipe: true,
       child: Column(
         children: [
           Material(

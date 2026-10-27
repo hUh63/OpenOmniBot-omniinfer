@@ -33,7 +33,50 @@
 
 ## 未合并（附原因）
 
-### 上游 `v0.6.3.6` 之后的 2 个提交（2026-10-26）
+### 2026-10-27 复核：`26ac7f4d` / `a5334740` 逐文件三方比对
+
+这次不是「大概看一眼」，而是把两个提交的 **26 个 lib 文件**全部拉齐三份内容
+（ours = 本分支 `omniinfer-apk`，base = 上游 `9ba1263e`，theirs = 上游对应提交），
+逐文件跑 `git merge-file -p --diff3` 并统计冲突：
+
+| 三方状态 | 文件数 | 文件 |
+| --- | --- | --- |
+| 与上游父提交完全一致（可直接套用） | 3 | `conversation_slidable.dart`、`pages/environment_progress_page.dart`、`widgets/onboarding_footer.dart` |
+| 本分支不存在（上游新增/我们已删） | 8 | `home_search_header.dart`(新)、`provider_selection_page.dart`(新)、`home_drawer_home.dart`、`chat_input_compact_actions.dart`、`chat_input_compact_composer.dart`、`agent_run_details_sheet.dart`、`omni_circle_button.dart`、`settings_ui.dart` |
+| 已分叉 | 15 | `chat_page.dart`、`chat_page_ui.dart`、`chat_app_bar.dart`、`chat_spotlight_tour.dart`、`chat_input_agent_controls.dart`、`chat_input_area.dart`、`home_drawer.dart`、`home_drawer_conversation_list.dart`、`onboarding_choice_page.dart`、`onboarding_definitions.dart`、`pages/provider_page.dart`、`common_app_bar.dart`、`glass_popup.dart`、`omni_segmented_slider.dart` |
+
+分叉文件的三方合并共产出 **32 处冲突**，其中 `home_drawer.dart` 的合并结果还会
+引入 5 个我们根本不存在的依赖（`home_search_header` / `omni_circle_button` /
+`settings_ui` / `omni_menu` / `conversation_context_menu`）—— 说明整块套用这条路
+在本分支走不通：我们的抽屉、顶栏、引导、输入区都是自己重写的一套。
+
+**本次实际拿到的（已提交）**
+
+- `conversation_slidable.dart`：整文件换成上游新版（全滑 dismiss 后按
+  `_dismissalGeneration` 重建 Slidable key，解决「归档/删除失败回滚或搜索结果
+  仍在时，这一行永久滑不动」）。新增 `followHabitualHand` / `resetAfterFullSwipe`
+  两个开关。
+- 调用点补 `resetAfterFullSwipe: true`：`chat_history_page.dart`、
+  `chat_history_conversation_item.dart` —— 归档页/搜索结果里全滑后行会留下，
+  必须重建控制器。
+
+**本次明确不取的（不是漏了，是取了会坏）**
+
+- `chat_app_bar` 的菜单锚点对齐、`omni_circle_button` 的尺寸常量：我们顶栏是重写的，
+  锚点计算路径不同，套 hunk 只会得到半新半旧。
+- `glass_popup` 动画时长/`RepaintBoundary`/`shadowProgress`：视觉调优，且我们版本已
+  分叉（9 处冲突），收益低于回归风险。
+- `home_search_header.dart`（429 行新文件）+ `home_drawer_home.dart` 重构：我们抽屉
+  搜索用 `home_drawer_search_field.dart` + `home_drawer_search.dart`，两套实现不在
+  一个坐标系里。
+- `a5334740` 的 onboarding 改版（`provider_selection_page` 新增 + `provider_page`
+  41/-110 + `onboarding_choice_page` 133/-70 + `environment_progress_page` 删回调 +
+  `onboarding_footer`）：联动改动，枚举/构造/调用方必须同时改。若要做，应按「重写
+  onboarding provider 选择流程」单独立项，而不是当作同步。
+- `chat_spotlight_tour` 的步骤重构（`ChatSpotlightTour.modelStep` 常量、去掉 pet/island
+  锚点）：我们 tour 的锚点集合与上游不同（有 pet/island），取常量会与本地锚点错位。
+
+### 上游 `v0.6.3.6` 之后的 2 个提交（2026-10-26，初判）
 
 | 提交 | 内容 | 为什么不合并 |
 | --- | --- | --- |

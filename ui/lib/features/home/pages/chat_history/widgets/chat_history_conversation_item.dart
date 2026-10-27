@@ -47,6 +47,9 @@ class ChatHistoryConversationItem extends StatelessWidget {
       isBusy: isBusy,
       actions: actions,
       onDismissed: onDelete,
+      // 删除/归档失败回滚、或动作后行还留在列表里时，必须重建 Slidable，
+      // 否则控制器停在 dismissed 状态，这一行永久滑不动。
+      resetAfterFullSwipe: true,
       margin: EdgeInsets.only(bottom: compact ? 8 : 12),
       child: Material(
         color: Colors.transparent,
