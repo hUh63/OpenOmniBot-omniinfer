@@ -840,7 +840,10 @@ class AssistsMessageService {
       return Map<String, dynamic>.from(result ?? const {});
     } catch (e) {
       print('保存闹钟设置失败: $e');
-      return {'success': false, 'message': e.message ?? '保存失败'};
+      return {
+        'success': false,
+        'message': e is PlatformException ? (e.message ?? '保存失败') : e.toString(),
+      };
     }
   }
 
