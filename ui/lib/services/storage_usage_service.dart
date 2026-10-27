@@ -338,10 +338,14 @@ class StorageUsageService {
     'cn.com.omnimind.bot/StorageUsage',
   );
 
+  /// 存储页首屏 / 「清理」按钮都直接 await：原生不回包时按钮会永久转圈。
+  static const Duration _summaryTimeout = Duration(seconds: 15);
+  static const Duration _cleanTimeout = Duration(minutes: 2);
+
   static Future<StorageUsageSummary> getStorageUsageSummary() async {
-    final result = await _channel.invokeMethod<dynamic>(
-      'getStorageUsageSummary',
-    );
+    final result = await _channel
+        .invokeMethod<dynamic>('getStorageUsageSummary')
+        .timeout(_summaryTimeout);
     if (result is! Map) {
       throw PlatformException(
         code: 'INVALID_STORAGE_USAGE_RESULT',
@@ -360,7 +364,8 @@ class StorageUsageService {
           'categoryId': categoryId,
           if (olderThanDays != null && olderThanDays > 0)
             'olderThanDays': olderThanDays,
-        });
+        })
+        .timeout(_cleanTimeout);
     if (result is! Map) {
       throw PlatformException(
         code: 'INVALID_STORAGE_CLEAN_RESULT',
@@ -384,7 +389,8 @@ class StorageUsageService {
             'olderThanDays': olderThanDays,
           if (targetReleaseBytes != null && targetReleaseBytes > 0)
             'targetReleaseBytes': targetReleaseBytes,
-        });
+        })
+        .timeout(_cleanTimeout);
     if (result is! Map) {
       throw PlatformException(
         code: 'INVALID_STORAGE_STRATEGY_RESULT',

@@ -150,14 +150,18 @@ class OmniFlowToolClient {
     required String description,
     bool enableDebugScreenshots = false,
   }) async {
-    final result = await AssistsMessageService.assistCore.invokeMethod<Object?>(
-      'startHumanTrajectoryLearning',
-      <String, dynamic>{
-        'name': name,
-        'description': description,
-        'enable_debug_screenshots': enableDebugScreenshots,
-      },
-    );
+    // 原生不回包时这里会永久挂住，而调用方在它之前已经把原生浮层藏起来了
+    // （用户看到悬浮控件消失、也没有任何提示）。给一个上限让它走进 catch 恢复。
+    final result = await AssistsMessageService.assistCore
+        .invokeMethod<Object?>(
+          'startHumanTrajectoryLearning',
+          <String, dynamic>{
+            'name': name,
+            'description': description,
+            'enable_debug_screenshots': enableDebugScreenshots,
+          },
+        )
+        .timeout(const Duration(seconds: 30));
     if (result is! Map) {
       throw StateError('Manual recording returned an invalid response');
     }

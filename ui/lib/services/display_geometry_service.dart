@@ -74,13 +74,16 @@ class DisplayGeometryService {
 
   static Future<ScreenCornerRadii> _readScreenCornerRadii() async {
     try {
-      final value = await _channel.invokeMethod<Object?>(
-        'getScreenCornerRadii',
-      );
+      final value = await _channel
+          .invokeMethod<Object?>('getScreenCornerRadii')
+          .timeout(const Duration(seconds: 3));
       return ScreenCornerRadii.fromPlatform(value);
-    } on PlatformException {
-      return const ScreenCornerRadii.zero();
-    } on MissingPluginException {
+    } catch (_) {
+      // 原生不回包时原来会把一个永不完成的 Future 缓存起来 —— 之后所有
+      // 调用方都在等它，圆角相关布局永久不渲染。这里给上限，并在失败时
+      // 清掉缓存，下次调用重新测量。
+      _cached = null;
+      _lastRefresh = null;
       return const ScreenCornerRadii.zero();
     }
   }

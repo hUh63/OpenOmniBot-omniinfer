@@ -87,14 +87,18 @@ class OmnibotPdfPreviewService {
     required int pageIndex,
     required int targetWidthPx,
   }) async {
-    final result = await _channel.invokeMethod<Uint8List>(
-      'renderPdfPage',
-      <String, dynamic>{
-        'path': path.trim(),
-        'pageIndex': pageIndex,
-        'targetWidthPx': targetWidthPx,
-      },
-    );
+    // 同文件的 getPdfInfo 已经有 30s 上限，renderPage 原来没有：
+    // 原生不回包时这一页永久白屏转圈（重进仍复现）。
+    final result = await _channel
+        .invokeMethod<Uint8List>(
+          'renderPdfPage',
+          <String, dynamic>{
+            'path': path.trim(),
+            'pageIndex': pageIndex,
+            'targetWidthPx': targetWidthPx,
+          },
+        )
+        .timeout(const Duration(seconds: 20));
     if (result == null || result.isEmpty) {
       throw StateError('PDF 页面渲染结果为空');
     }

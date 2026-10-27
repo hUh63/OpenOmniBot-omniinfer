@@ -209,12 +209,17 @@ class ScheduledTaskSchedulerService {
     _currentCountdownTask = task;
     _isShowingReminder = true;
 
-    // 调用原生层显示悬浮提醒
-    await AssistsMessageService.showScheduledTaskReminder(
-      taskId: task.id,
-      taskName: task.title,
-      countdownSeconds: 5,
-    );
+    // 调用原生层显示悬浮提醒。原生不回包时不能把 onTaskAboutToExecute 一起挂死，
+    // 否则倒计时提醒永远不出现、这一轮任务也就再也不会被执行。
+    try {
+      await AssistsMessageService.showScheduledTaskReminder(
+        taskId: task.id,
+        taskName: task.title,
+        countdownSeconds: 5,
+      ).timeout(const Duration(seconds: 10));
+    } catch (error) {
+      print('ScheduledTaskSchedulerService: show reminder failed: $error');
+    }
 
     onTaskAboutToExecute?.call(task);
   }
@@ -226,8 +231,14 @@ class ScheduledTaskSchedulerService {
     _isShowingReminder = false;
     _currentCountdownTask = null;
 
-    // 隐藏提醒
-    await AssistsMessageService.hideScheduledTaskReminder();
+    // 隐藏提醒。这行原来在 try 之外：一旦它抛异常，下面整个执行体被跳过，
+    // 任务既不执行、也不会被重排/删除 —— 永久停在「待执行」并反复触发。
+    try {
+      await AssistsMessageService.hideScheduledTaskReminder()
+          .timeout(const Duration(seconds: 10));
+    } catch (error) {
+      print('ScheduledTaskSchedulerService: hide reminder failed: $error');
+    }
 
     try {
       final prompt = task.subagentPrompt?.trim() ?? '';

@@ -204,6 +204,9 @@ class SceneOperationConfig {
 }
 
 class SceneModelConfigService {
+  /// 这些是「保存」按钮直接 await 的写接口：原生不回包时按钮会永久禁用。
+  static const Duration _invokeTimeout = Duration(seconds: 20);
+
   static Future<List<SceneCatalogItem>> getSceneCatalog() async {
     try {
       final result = await AssistsMessageService.assistCore
@@ -245,7 +248,8 @@ class SceneModelConfigService {
           'sceneId': sceneId,
           'providerProfileId': providerProfileId,
           'modelId': modelId,
-        });
+        })
+        .timeout(_invokeTimeout);
     return (result ?? const [])
         .map((item) => SceneModelBindingEntry.fromMap(item as Map?))
         .where(
@@ -296,7 +300,8 @@ class SceneModelConfigService {
         .invokeMethod<List<dynamic>>('saveSceneModelOverride', {
           'sceneId': sceneId,
           'model': model,
-        });
+        })
+        .timeout(_invokeTimeout);
     return (result ?? const [])
         .map((item) => SceneModelOverrideEntry.fromMap(item as Map?))
         .where((item) => item.sceneId.isNotEmpty && item.model.isNotEmpty)
@@ -309,7 +314,8 @@ class SceneModelConfigService {
     final result = await AssistsMessageService.assistCore
         .invokeMethod<List<dynamic>>('clearSceneModelOverride', {
           'sceneId': sceneId,
-        });
+        })
+        .timeout(_invokeTimeout);
     return (result ?? const [])
         .map((item) => SceneModelOverrideEntry.fromMap(item as Map?))
         .where((item) => item.sceneId.isNotEmpty && item.model.isNotEmpty)
@@ -343,7 +349,8 @@ class SceneModelConfigService {
           if (replacementCustomCurlCommand != null)
             'replaceCustomCurlCommand': true,
           if (clearCustomCurlCommand) 'clearCustomCurlCommand': true,
-        });
+        })
+        .timeout(_invokeTimeout);
     return SceneVoiceConfig.fromMap(result);
   }
 
@@ -363,7 +370,8 @@ class SceneModelConfigService {
     final result = await AssistsMessageService.assistCore
         .invokeMethod<Map<dynamic, dynamic>>('saveSceneOperationConfig', {
           'useOfficialService': config.useOfficialService,
-        });
+        })
+        .timeout(_invokeTimeout);
     return SceneOperationConfig.fromMap(result);
   }
 
