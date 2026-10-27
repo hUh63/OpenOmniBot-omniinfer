@@ -30,6 +30,9 @@ class LiveAgentBrowserSessionStore<T : AgentBrowserLiveSessionHandle> {
     @Volatile
     private var currentWorkspaceId: String? = null
 
+    /** 按 workspaceId 串行化「未命中 → 创建 → 回填」，避免同一 workspace 造出两个引擎。 */
+    private val createLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
     fun acquire(workspaceId: String, create: () -> T): T {
         var existing: T? = null
         val evicted = mutableListOf<T>()
@@ -56,8 +59,23 @@ class LiveAgentBrowserSessionStore<T : AgentBrowserLiveSessionHandle> {
         // closeSession 会销毁 WebView（非主线程时还要 post 到主线程等待），
         // 必须在锁外执行，避免和主线程抢同一把锁。
         evicted.forEach { handle -> runCatching { handle.closeSession() } }
-        return existing ?: create().also { engine ->
-            synchronized(this) { sessions[workspaceId] = engine }
+        existing?.let { return it }
+
+        // create() 原来在锁外执行：同一 workspace 的两个并发 browser_use
+        // （screenshot / get_text 属并行安全动作，同轮会真并发）双双未命中，
+        // 各建一个引擎；后写覆盖 map，先建的那个丢失引用、永远不会 closeSession
+        // （WebView/mainScope/DownloadManager 常驻），而且它操作的页面与 UI 快照分叉。
+        val createLock = createLocks.computeIfAbsent(workspaceId) { Any() }
+        synchronized(createLock) {
+            synchronized(this) { sessions[workspaceId] }?.let { return it }
+            val created = create()
+            val raced = synchronized(this) { sessions[workspaceId] }
+            if (raced != null) {
+                runCatching { created.closeSession() }
+                return raced
+            }
+            synchronized(this) { sessions[workspaceId] = created }
+            return created
         }
     }
 

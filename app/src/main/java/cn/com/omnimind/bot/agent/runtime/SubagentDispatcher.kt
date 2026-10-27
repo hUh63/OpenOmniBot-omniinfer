@@ -34,6 +34,21 @@ import kotlinx.serialization.json.JsonPrimitive
 /** 单个子任务的时间预算（见 dispatch 里的 withTimeoutOrNull）。 */
 private const val SINGLE_SUBAGENT_TIMEOUT_MS = 10L * 60L * 1000L
 
+/**
+ * 子 agent 允许的嵌套层数。
+ * 父 catalog 里包含 subagent_dispatch 自身，模型一旦自问自答式拆任务就会递归；
+ * 每层还能各自并发 4 个、单个最长 10 分钟，深度 3 就是 64 套完整 orchestrator
+ * （各自带 tool catalog 和多轮 LLM）。这里硬性封顶，超出直接拒绝并告知模型。
+ */
+private const val MAX_SUBAGENT_DEPTH = 2
+
+/** 从 agentRunId 反解嵌套层数：主 agent 为 0，`subagent-1-xxxx` 为 1。 */
+internal fun subagentDepthOf(agentRunId: String): Int {
+    val rest = agentRunId.removePrefix("subagent-")
+    if (rest == agentRunId) return 0
+    return rest.substringBefore('-').toIntOrNull() ?: 1
+}
+
 class SubagentDispatcher(
     private val llmClient: AgentLlmClient,
     private val toolExecutorProvider: () -> AgentToolExecutor,
@@ -143,7 +158,21 @@ class SubagentDispatcher(
         progressSequence: AtomicLong
     ): SubagentRunResult {
         val profile = SubagentProfileRegistry.get(spec.profileId)
-        val subagentId = "subagent-${UUID.randomUUID().toString().take(8)}"
+        val depth = subagentDepthOf(parentEnv.agentRunId) + 1
+        // runId 里编码嵌套层数，子 agent 再派子 agent 时能算出真实深度。
+        val subagentId = "subagent-$depth-${UUID.randomUUID().toString().take(8)}"
+        if (depth > MAX_SUBAGENT_DEPTH) {
+            // 不允许无限递归：超出深度直接把结果还给模型，而不是继续建 orchestrator。
+            return SubagentRunResult(
+                subagentId = subagentId,
+                profileId = profile.id,
+                taskIndex = taskIndex,
+                status = "rejected",
+                finalContent = "",
+                toolCallSummaries = emptyList(),
+                errorMessage = "子任务嵌套层数超过上限（$MAX_SUBAGENT_DEPTH 层），请在当前层级完成任务。"
+            )
+        }
         return try {
             emitProgress(
                 progressReporter,

@@ -310,11 +310,31 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       final files = await FilePicker.pickFiles(type: FileType.any);
       if (files.isEmpty || !mounted) return;
 
+      final skipped = <String>[];
       setState(() {
         for (final file in files) {
+          if (_pendingAttachments.length >= _maxAttachmentCount) {
+            skipped.add(
+              _isEnglishUi
+                  ? 'At most $_maxAttachmentCount attachments per message'
+                  : '每条消息最多 $_maxAttachmentCount 个附件',
+            );
+            break;
+          }
           final metadata = pickedAttachmentMetadata(file);
-          if (metadata == null) continue;
+          if (metadata == null) {
+            skipped.add(file.name);
+            continue;
+          }
           final path = metadata.path;
+          if (metadata.size != null && metadata.size! > _maxAttachmentBytes) {
+            skipped.add(
+              _isEnglishUi
+                  ? '${file.name} exceeds ${_maxAttachmentBytes ~/ (1024 * 1024)}MB'
+                  : '${file.name} 超过 ${_maxAttachmentBytes ~/ (1024 * 1024)}MB',
+            );
+            continue;
+          }
           final exists = _pendingAttachments.any((item) => item.path == path);
           if (exists) continue;
           final displayName = (file.name.trim().isNotEmpty)
@@ -335,10 +355,28 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
           );
         }
       });
+      if (skipped.isNotEmpty) {
+        _showSnackBar(
+          _isEnglishUi
+              ? 'Skipped: ${skipped.take(3).join(', ')}'
+              : '已跳过：${skipped.take(3).join('、')}',
+        );
+      }
     } catch (e) {
-      _showSnackBar('添加附件失败：$e');
+      _showSnackBar(
+        _isEnglishUi ? 'Failed to add attachment: $e' : '添加附件失败：$e',
+      );
     }
   }
+
+  /// 附件数量与单文件体积上限。
+  /// 没有上限时一次选 10 张原图会被 Kotlin 侧逐张整文件 base64（峰值≈原图 2.7 倍），
+  /// 低端机直接 OOM；这里在入口就挡掉。
+  int get _maxAttachmentCount => 9;
+  int get _maxAttachmentBytes => 32 * 1024 * 1024;
+
+  bool get _isEnglishUi =>
+      Localizations.localeOf(context).languageCode == 'en';
 
   @override
   void _removePendingAttachment(String id) {
@@ -580,7 +618,11 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       }
       final messageText = (submittedText ?? text ?? _messageController.text)
           .trim();
-      final inputAttachments = submittedAttachments ?? _pendingAttachments;
+      // 一进来就快照：下面还有 bootstrap / 模型配置两个 await，直接持有 live 列表
+      // 会在窗口期把用户新加的附件算进本次发送（并被 consume 掉），或让已删除的附件
+      // 仍被算作「已发送」。
+      final inputAttachments =
+          submittedAttachments ?? List<ChatInputAttachment>.of(_pendingAttachments);
       final hasAttachments = inputAttachments.isNotEmpty;
       if ((messageText.isEmpty && !hasAttachments) || _isAiResponding) return;
       if (!hasAttachments &&
@@ -588,8 +630,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         await _startManualRecordingCommand(messageText);
         return;
       }
-      if (!await _ensureNormalChatModelConfigurationForSend()) return;
-
+      // 模型配置检查只在 _dispatchUserMessage 里做一次。这里再检查一遍会让每次发送
+      // 跑两轮「读 provider 文档 + 场景目录」并 setState 覆盖模型列表，
+      // 明显拉长「点发送 → 出现用户气泡」的时延（_dispatchUserMessage 在乐观插入前
+      // 才检查，所以去掉这里不影响「未配置就不插入消息」的行为）。
       final attachments = inputAttachments.map((item) => item.toMap()).toList();
       await _dispatchUserMessage(
         messageText,
@@ -755,6 +799,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     try {
       await _ensureActiveConversationReadyForStreaming();
     } catch (error) {
+      // 附件在乐观插入时就被从输入区消费掉了：发送失败后若不还回去，
+      // 用户只能看到「一条已存在的用户消息 + 空输入区」，而这些本地文件可能
+      // 已经失效（SAF 临时授权被回收），重试永远失败。
+      _restoreAttachmentsAfterFailedSend(attachments);
       if (mounted) {
         handleAgentError('Conversation setup failed. Please retry. $error');
       }
@@ -773,8 +821,36 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     if (!handled &&
         mounted &&
         _currentDispatchTurnId == messageIds.aiMessageId) {
+      _restoreAttachmentsAfterFailedSend(attachments);
       handleAgentError('统一 Agent 启动失败，请检查模型提供商与场景模型配置。');
     }
+  }
+
+  /// 发送失败后把附件还回输入区（按 path 去重，避免用户已重新选过同一文件时重复）。
+  void _restoreAttachmentsAfterFailedSend(
+    List<Map<String, dynamic>> attachments,
+  ) {
+    if (attachments.isEmpty || !mounted) return;
+    final restored = <ChatInputAttachment>[];
+    for (final raw in attachments) {
+      final path = (raw['path'] ?? '').toString().trim();
+      if (path.isEmpty) continue;
+      if (_pendingAttachments.any((item) => item.path == path)) continue;
+      restored.add(
+        ChatInputAttachment(
+          id: '${path}_${DateTime.now().microsecondsSinceEpoch}',
+          name: (raw['name'] ?? _fileNameFromPath(path)).toString(),
+          path: path,
+          size: (raw['size'] as num?)?.toInt(),
+          mimeType: raw['mimeType']?.toString(),
+          isImage: raw['isImage'] == true,
+          promptPath: raw['promptPath']?.toString(),
+          sendToModel: raw['sendToModel'] != false,
+        ),
+      );
+    }
+    if (restored.isEmpty) return;
+    setState(() => _pendingAttachments.addAll(restored));
   }
 
   void _syncUserMessageLinkPreviews(String messageId) {

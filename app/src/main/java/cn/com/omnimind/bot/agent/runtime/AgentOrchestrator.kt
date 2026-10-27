@@ -11,8 +11,10 @@ import cn.com.omnimind.baselib.llm.ChatCompletionTool
 import cn.com.omnimind.baselib.llm.contentText
 import cn.com.omnimind.baselib.util.OmniLog
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -529,6 +531,34 @@ class AgentOrchestrator(
             // Agent boundary so Android does not rethrow a pending coroutine
             // exception from the protocol dispatcher; the ACP adapter maps
             // this result to PromptResponse(CANCELLED).
+            //
+            // 取消也必须回填未完成的 tool_call：assistant 消息（含本轮全部 tool_calls）
+            // 在第一个工具完成时就已经落库，缺配对的 tool 结果会让 provider 直接判
+            // 「tool_call_id 没有响应」400，而且这条脏历史每轮都会被重新构建出来，
+            // 用户除了新建会话没有别的出路。这段回填必须在 NonCancellable 里跑。
+            withContext(NonCancellable) {
+                val interruptedCalls = interruptableToolCalls
+                if (interruptedCalls.isNotEmpty()) {
+                    runCatching {
+                        appendSyntheticToolResultMessages(
+                            memory = memory,
+                            env = input.executionEnv,
+                            callback = callback,
+                            assistantMessage = interruptableAssistantMessage ?: return@runCatching,
+                            toolCalls = interruptedCalls,
+                            descriptorMap = interruptableDescriptorMap,
+                            writtenToolCallIds = interruptableWrittenIds,
+                            round = completedModelRounds,
+                            reason = t(
+                                "本回合已取消，未完成的工具调用已标记为未完成。",
+                                "The turn was cancelled, so unfinished tool calls were marked as not completed."
+                            )
+                        )
+                    }.onFailure { error ->
+                        logInfo(tag, "cancel backfill failed: ${error.message}")
+                    }
+                }
+            }
             return AgentResult.Error("Agent execution cancelled", e)
         } catch (e: Exception) {
             val interruptedCalls = interruptableToolCalls
@@ -563,7 +593,14 @@ class AgentOrchestrator(
         } finally {
             recordPerformance(input, "turn", completedModelRounds, runStarted)
             if (ownsToolRouter) {
-                runCatching { toolRouter.dispose() }
+                // dispose() 是 suspend：在已被取消的协程里第一个挂起点就抛
+                // CancellationException，被 runCatching 静默吞掉 → 终端/插件/浏览器
+                // 会话不回收，用户取消后不再对话就一直挂着。必须在 NonCancellable 里清理。
+                withContext(NonCancellable) {
+                    runCatching { toolRouter.dispose() }.onFailure { error ->
+                        logInfo(tag, "tool router dispose failed: ${error.message}")
+                    }
+                }
             }
         }
 
@@ -682,6 +719,15 @@ class AgentOrchestrator(
             } else {
                 throw error
             }
+        } catch (error: Throwable) {
+            // 单个工具抛异常（插件/MCP handler 未按契约返回 Error）不该连坐：
+            // 同批并行兄弟会被 coroutineScope 一起 cancel（可能正在写盘/发请求），
+            // 整轮也会被放大成失败。这里收敛成该 call 的 Error 结果。
+            logInfo(tag, "tool ${toolCall.function.name} threw: ${error.message}")
+            ToolExecutionResult.Error(
+                toolName = toolCall.function.name,
+                message = error.message ?: error.javaClass.simpleName
+            )
         } finally {
             toolHandle.complete()
         }

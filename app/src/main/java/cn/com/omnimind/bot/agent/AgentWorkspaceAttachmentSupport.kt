@@ -70,12 +70,36 @@ internal object AgentWorkspaceAttachmentSupport {
             ?: throw AgentAttachmentPreparationException("无法创建附件工作区")
         return try {
             val prepared = rawAttachments.map { attachment ->
-                prepareSingleAttachment(
-                    context = context,
-                    workspaceManager = workspaceManager,
-                    batchDirectory = batchDirectory,
-                    rawAttachment = attachment
-                )
+                // 单个附件不可读（SAF 临时授权被回收、缓存被清、文件被移走）时
+                // 不要让整批失败：原来 map 里任何一张抛错都会带上整批一起失败，
+                // 而 Dart 侧已经把附件从输入区消费掉了 —— 用户看到一条已存在的
+                // 用户消息 + 空输入区，且重试也永远失败。这里降级成
+                // 「仅在消息里展示、不参与本次模型输入」，并带上原因。
+                runCatching {
+                    prepareSingleAttachment(
+                        context = context,
+                        workspaceManager = workspaceManager,
+                        batchDirectory = batchDirectory,
+                        rawAttachment = attachment
+                    )
+                }.getOrElse { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    OmniLog.w(
+                        TAG,
+                        "attachment unavailable, excluded from prompt: " +
+                            "${attachment["name"]} / ${error.message}"
+                    )
+                    linkedMapOf<String, Any?>(
+                        "name" to attachment["name"],
+                        "path" to attachment["path"],
+                        "size" to attachment["size"],
+                        "mimeType" to attachment["mimeType"],
+                        "isImage" to AgentImageAttachmentSupport.isImageAttachment(attachment),
+                        "sendToModel" to false,
+                        "unavailable" to true,
+                        "error" to (error.message ?: error.javaClass.simpleName)
+                    )
+                }
             }
             if (batchDirectory.listFiles().isNullOrEmpty()) {
                 runCatching { batchDirectory.delete() }

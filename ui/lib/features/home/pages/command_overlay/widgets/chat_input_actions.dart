@@ -92,6 +92,19 @@ extension _ChatInputActionSupport on _ChatInputAreaStateBase {
           onSubmitted: useKeyboardNewline
               ? null
               : (_) {
+                  // 上一轮还在回复时 _sendMessage 会静默 return：文本留在框里、
+                  // 界面没有任何反馈，用户只会觉得「按了没反应」。
+                  if (widget.isProcessing) {
+                    showToast(
+                      Localizations.localeOf(context).languageCode == 'en'
+                          ? 'Still replying; stop or wait before sending'
+                          : '正在回复中，请先停止或等待本轮结束',
+                      type: ToastType.info,
+                    );
+                    widget.onRequestFocus?.call();
+                    widget.focusNode.requestFocus();
+                    return;
+                  }
                   if (widget.controller.text.trim().isNotEmpty) {
                     widget.onSendMessage();
                   } else {

@@ -2296,8 +2296,11 @@ internal fun toolResultAcpPayload(result: ToolExecutionResult): JsonObject {
             payload["toolName"] = result.toolName
             putContent(result.previewJson, result.rawResultJson)
             val localImage = result.artifacts.singleOrNull()?.takeIf {
-                result.toolName == "file_read" && it.mimeType.startsWith("image/") &&
-                    it.androidPath.isNotBlank()
+                // 不只看 file_read：browser_use 的 screenshot 同样已经落盘成
+                // workspace 图片 artifact，之前因为 toolName 不匹配仍把 data URL
+                // 整条塞进 payload（数百 KB~数 MB，Flutter 卡片/历史 JSON 各存一份），
+                // 正是下面注释要避免的情况。
+                it.mimeType.startsWith("image/") && it.androidPath.isNotBlank()
             }
             if (localImage != null) {
                 // The original is already a workspace artifact. Passing its

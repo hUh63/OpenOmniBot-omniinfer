@@ -332,13 +332,24 @@ class TerminalManager private constructor(
 
             withCancellableHiddenExecProcess(process) {
                 coroutineScope {
-                    val outputChannel = Channel<String>(Channel.UNLIMITED)
+                    // 有界队列：消费方（ACP 进度事件）被反压时不要把每一行都囤起来。
+                    val outputChannel = Channel<String>(Channel.BUFFERED)
                     val outputBuffer = StringBuilder()
                     val reader = launch {
                         try {
                             process.inputStream.bufferedReader().useLines { lines ->
                                 lines.forEach { line ->
                                     val chunk = "$line\n"
+                                    // 只保留尾部：超限就从头删掉等价长度，保证内存有上界。
+                                    val overflow =
+                                        outputBuffer.length + chunk.length - HIDDEN_EXEC_MAX_OUTPUT_CHARS
+                                    if (overflow > 0) {
+                                        if (overflow >= outputBuffer.length) {
+                                            outputBuffer.setLength(0)
+                                        } else {
+                                            outputBuffer.delete(0, overflow)
+                                        }
+                                    }
                                     outputBuffer.append(chunk)
                                     outputChannel.trySend(chunk)
                                 }
@@ -732,6 +743,13 @@ internal fun terminateHiddenExecProcess(process: Process) {
 
 private const val HIDDEN_EXEC_TERMINATION_GRACE_MS = 500L
 private const val HIDDEN_EXEC_READER_DRAIN_TIMEOUT_MS = 250L
+
+/**
+ * 隐藏命令输出在内存里的上限（字符）。`yes` / `cat huge.log` / `find /` 这类命令会
+ * 刷出几百 MB，原来全量 append 进 StringBuilder 且 channel 无界，峰值是输出的两份拷贝，
+ * 低端机直接 OOM；而结果下游本来只保留尾部若干 KB。
+ */
+private const val HIDDEN_EXEC_MAX_OUTPUT_CHARS = 256 * 1024
 private const val HIDDEN_EXEC_ENVIRONMENT_TIMEOUT_MS = 45_000L
 
 internal fun isExpectedHiddenExecReaderTermination(error: Throwable): Boolean {

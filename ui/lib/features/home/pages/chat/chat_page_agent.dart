@@ -2262,7 +2262,9 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       final agentState = _modeState(ChatPageMode.agent);
       agentState.isAiResponding = false;
       agentState.isDeepThinking = false;
-      agentState.activeAcpTurnId = null;
+      // activeAcpTurnId 属于 conversation runtime（由 coordinator 持有），
+      // 不在 mode state 上；这里清的是本页的派发游标。
+      agentState.currentDispatchTurnId = null;
     });
     showToast(reason, type: ToastType.warning);
   }

@@ -12,6 +12,7 @@ import 'package:ui/services/model_vendor_catalog.dart';
 import 'package:ui/services/special_permission.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/theme_context.dart';
+import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/provider_vendor_icon.dart';
 import 'package:ui/widgets/glass_popup.dart';
 import 'package:ui/widgets/image_preview_overlay.dart';
