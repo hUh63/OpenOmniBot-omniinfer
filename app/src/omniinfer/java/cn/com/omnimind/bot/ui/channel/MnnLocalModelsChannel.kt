@@ -17,6 +17,8 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import cn.com.omnimind.baselib.util.OmniLog
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -206,28 +208,77 @@ class MnnLocalModelsChannel {
         return merged.values.toList()
     }
 
+    /**
+     * 只允许提交一次回包的 Result 包装。
+     *
+     * MethodChannel 的 Result 一旦 reply 过，再 reply 会抛
+     * `IllegalStateException: Reply already submitted`；在协程里这个异常没人接住，
+     * 直接冒成 FATAL（用户侧表现就是「点某个按钮闪退」）。这里把「可能被两条路径
+     * 同时回包」的地方（同步分支 + runSuspend 的 catch + 外层 catch）统一收敛到
+     * 一个原子标记上，先到先得，后来的静默丢弃并记日志。
+     */
+    private class OnceResult(
+        private val delegate: MethodChannel.Result,
+    ) : MethodChannel.Result {
+        private val replied = AtomicBoolean(false)
+
+        override fun success(result: Any?) {
+            if (!replied.compareAndSet(false, true)) {
+                OmniLog.w(TAG, "duplicate reply dropped: success()")
+                return
+            }
+            // delegate 自己也可能抛（engine 已 detach 时 reply 会失败）；
+            // 这些异常绝不能冒到协程里变成 FATAL。
+            runCatching { delegate.success(result) }
+                .onFailure { OmniLog.w(TAG, "reply success failed: ${it.message}") }
+        }
+
+        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+            if (!replied.compareAndSet(false, true)) {
+                OmniLog.w(TAG, "duplicate reply dropped: error($errorCode)")
+                return
+            }
+            runCatching { delegate.error(errorCode, errorMessage, errorDetails) }
+                .onFailure { OmniLog.w(TAG, "reply error failed: ${it.message}") }
+        }
+
+        override fun notImplemented() {
+            if (!replied.compareAndSet(false, true)) {
+                OmniLog.w(TAG, "duplicate reply dropped: notImplemented()")
+                return
+            }
+            runCatching { delegate.notImplemented() }
+                .onFailure { OmniLog.w(TAG, "reply notImplemented failed: ${it.message}") }
+        }
+    }
+
     private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
         // 同步分支（getApiAuth / saveApiAuth / getBackend / setBackend / getConfig /
         // setActiveModel ...）此前是裸调的：ensureContext() 未初始化、MMKV 异常、
         // provider 刷新抛错都会直接冒到 Flutter 的 MethodChannel handler —— 主线程
         // FATAL，同时 Dart 侧那次 invokeMethod 永远收不到回包（页面永久 loading）。
+        val once = OnceResult(result)
         try {
-            handleMethodCallInternal(call, result)
+            handleMethodCallInternal(call, once)
         } catch (error: Throwable) {
-            runCatching {
-                result.error(
-                    ERROR_CODE,
-                    error.message ?: error.javaClass.simpleName,
-                    null,
-                )
-            }
+            if (error is CancellationException) throw error
+            once.error(
+                ERROR_CODE,
+                error.message ?: error.javaClass.simpleName,
+                null,
+            )
         }
     }
 
     private fun handleMethodCallInternal(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "listAllInstalledModels" -> runSuspend(result) {
-                listAllInstalledModels()
+            // 这里必须显式 return：下面还有一段「按 backend 分派」的 when，
+            // 少了 return 会把同一次调用再喂给 handleXxxCall，走到那里的
+            // else -> result.notImplemented()，于是同一个 Result 被 reply 两次，
+            // 抛 Reply already submitted（打开「模型市场 / 高级设置」时闪退）。
+            "listAllInstalledModels" -> {
+                runSuspend(result) { listAllInstalledModels() }
+                return
             }
 
             "getApiAuth" -> {
@@ -800,6 +851,8 @@ class MnnLocalModelsChannel {
                 val value = block()
                 withContext(Dispatchers.Main) { result.success(value) }
             } catch (error: Throwable) {
+                // 取消是正常收摊，不能当成业务错误回给 Dart（也会打破 StructuredConcurrency）。
+                if (error is CancellationException) throw error
                 withContext(Dispatchers.Main) {
                     result.error(
                         ERROR_CODE,

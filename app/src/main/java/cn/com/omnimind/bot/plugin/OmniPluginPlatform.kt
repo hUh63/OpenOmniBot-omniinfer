@@ -31,9 +31,20 @@ class OmniPluginPlatform(
     private val activationFailures = linkedMapOf<String, Int>()
     private var initialized = false
 
+    /**
+     * 全部插件状态，按「用户操作顺序」排列。
+     *
+     * 顺序规则：已安装/已启用过的按 activationSeq 升序（谁先被启用谁在前），
+     * 从来没装过的补充在最后（provider 自带顺序）。这份顺序同时也是激活顺序与
+     * 工具注册顺序 —— 同名工具冲突时先注册的生效，所以它决定了实际的「插件优先级」。
+     */
     suspend fun list(): List<OmniPluginState> = mutex.withLock {
         ensureInitialized()
-        providers().map(::stateFor)
+        val all = providers()
+        val byId = all.associateBy { it.descriptor.id }
+        val ordered = storedStates.values.mapNotNull { byId[it.pluginId] }
+        val rest = all.filter { !storedStates.containsKey(it.descriptor.id) }
+        (ordered + rest).map(::stateFor)
     }
 
     suspend fun install(pluginId: String): OmniPluginState = mutex.withLock {
@@ -61,6 +72,7 @@ class OmniPluginPlatform(
             pluginId = pluginId,
             enabled = true,
             installPending = false,
+            activationSeq = allocateActivationSeq(),
         )
         try {
             persist(
@@ -101,7 +113,12 @@ class OmniPluginPlatform(
                 }
             }
             val active = activate(provider)
-            val nextState = current.copy(enabled = true, installPending = false)
+            // 重新启用算一次新的操作：刷新序号，让它排到「最近启用」的位置。
+            val nextState = current.copy(
+                enabled = true,
+                installPending = false,
+                activationSeq = allocateActivationSeq(),
+            )
             try {
                 persist(storedStates.values.map { if (it.pluginId == pluginId) nextState else it })
             } catch (error: Throwable) {
@@ -349,10 +366,15 @@ class OmniPluginPlatform(
                     installPending = true,
                 )
         }
-        reconciled.values.forEach { state -> storedStates[state.pluginId] = state }
+        // 恢复顺序 = 用户启用顺序（activationSeq），不是 pluginId 字母序：
+        // 激活顺序同时决定工具定义顺序与同名工具的归属，必须与用户操作一致。
+        val orderedStates = reconciled.values.sortedWith(
+            compareBy({ it.activationSeq }, { it.pluginId }),
+        )
+        orderedStates.forEach { state -> storedStates[state.pluginId] = state }
         initialized = true
 
-        reconciled.values.filter { it.enabled || it.installPending }.forEach { state ->
+        orderedStates.filter { it.enabled || it.installPending }.forEach { state ->
             val provider = providerMap[state.pluginId]
             if (provider == null) {
                 // 枚举期（沙箱 runtime 注入、manifest 读取）失败会让 provider 临时缺席。
@@ -552,6 +574,16 @@ class OmniPluginPlatform(
         require(descriptor.downloadSizeBytes >= 0) {
             "Plugin ${descriptor.id} has a negative download size"
         }
+    }
+
+    /**
+     * 分配一个「用户操作序号」：始终大于当前已记录的任何序号。
+     *
+     * 升级前的老数据 activationSeq 全是 0，所以第一次启用后从 1 开始；升级后
+     * 用户接下来的每次启用/重新启用都会拿到更大值，于是「最近动过的排在后面」。
+     */
+    private fun allocateActivationSeq(): Long {
+        return (storedStates.values.maxOfOrNull { it.activationSeq } ?: 0L) + 1L
     }
 
     private fun persist(states: Collection<OmniPluginStoredState>) {

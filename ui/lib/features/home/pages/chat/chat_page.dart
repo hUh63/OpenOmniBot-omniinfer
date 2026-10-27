@@ -324,6 +324,16 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   double _pageHorizontalDragDelta = 0;
   double _pageVerticalDragDelta = 0;
   int _surfaceSwitchRequestId = 0;
+
+  /// 「停止」按钮的去抖时间戳：连点/悬浮按钮与卡片按钮同时触发时只发一次 cancel。
+  DateTime? _lastStopRequestAt;
+
+  /// 正在把某个模式的草稿写进输入框（程序化改动）。
+  ///
+  /// 输入框的监听器（slash 面板、@ 提及、自动保存）只应响应用户的真实输入。
+  /// 切换会话模式时恢复草稿是一次程序化赋值，如果不打标记，会顺带把 slash
+  /// 面板弹出来、把旧文本当成用户刚敲的内容。
+  bool _isApplyingDraft = false;
   bool _isSurfacePageScrolling = false;
   final HdPadPaneLayoutResolver _hdPadPaneLayoutResolver =
       const HdPadPaneLayoutResolver();

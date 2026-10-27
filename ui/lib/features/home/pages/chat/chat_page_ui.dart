@@ -1462,10 +1462,11 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                       controller: _messageController,
                       focusNode: _inputFocusNode,
                       onRequestFocus: _armComposerLiftIntent,
+                      // 停止入口必须在所有运行态可点。此前 `!_hasPendingAgentUserInputRequest`
+                      // 会在 agent 等待用户回答澄清时把按钮变回「添加附件」——那也是一种
+                      // 运行中状态，用户想中断却没有入口。
                       isProcessing:
-                          _isAiResponding &&
-                          _editingUserMessageId == null &&
-                          !_hasPendingAgentUserInputRequest,
+                          _isAiResponding && _editingUserMessageId == null,
                       onSendMessage: this._handleComposerSendMessage,
                       onCancelTask: _onCancelTask,
                       onPopupVisibilityChanged: _onPopupVisibilityChanged,

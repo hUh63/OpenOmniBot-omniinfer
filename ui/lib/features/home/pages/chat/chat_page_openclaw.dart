@@ -72,6 +72,9 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
 
   @override
   void _handleSlashCommandInput() {
+    // 恢复草稿/切换模式时会程序化改写输入框，那不是用户输入：
+    // 不能据此弹 slash 面板或重新解析 @ 提及。
+    if (_isApplyingDraft) return;
     if (_editingUserMessageId != null) {
       if (!mounted ||
           (!_showSlashCommandPanel &&

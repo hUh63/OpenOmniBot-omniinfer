@@ -8,7 +8,9 @@ internal class SharedPreferencesOmniPluginStateStore(context: Context) : OmniPlu
     override fun read(): List<OmniPluginStoredState> {
         return preferences.getStringSet(STATES_KEY, emptySet()).orEmpty()
             .mapNotNull(::decode)
-            .sortedBy { it.pluginId }
+            // 按「用户启用插件的操作顺序」排序；seq 相同的（历史数据）退回 pluginId，
+            // 保证结果稳定、不会每次启动抖动。
+            .sortedWith(compareBy({ it.activationSeq }, { it.pluginId }))
     }
 
     override fun readWithDefaults(
@@ -20,7 +22,7 @@ internal class SharedPreferencesOmniPluginStateStore(context: Context) : OmniPlu
         val current = read()
         val currentIds = current.mapTo(mutableSetOf()) { it.pluginId }
         val seeded = (current + defaults.filter { currentIds.add(it.pluginId) })
-            .sortedBy { it.pluginId }
+            .sortedWith(compareBy({ it.activationSeq }, { it.pluginId }))
         val encoded = seeded.mapTo(linkedSetOf(), ::encode)
         check(
             preferences.edit()
@@ -45,12 +47,14 @@ internal class SharedPreferencesOmniPluginStateStore(context: Context) : OmniPlu
             state.pluginId,
             if (state.enabled) ENABLED else DISABLED,
             if (state.installPending) PENDING else READY,
+            // 第 4 段是启用顺序。老版本只写 3 段，读取时按 seq=0 兼容。
+            state.activationSeq.toString(),
         ).joinToString(SEPARATOR)
     }
 
     private fun decode(value: String): OmniPluginStoredState? {
         val parts = value.split(SEPARATOR)
-        if (parts.size !in 2..3) return null
+        if (parts.size !in 2..4) return null
         val pluginId = parts[0].takeIf(String::isNotBlank) ?: return null
         val enabled = when (parts[1]) {
             ENABLED -> true
@@ -62,10 +66,12 @@ internal class SharedPreferencesOmniPluginStateStore(context: Context) : OmniPlu
             PENDING -> true
             else -> return null
         }
+        val activationSeq = parts.getOrNull(3)?.toLongOrNull() ?: 0L
         return OmniPluginStoredState(
             pluginId = pluginId,
             enabled = enabled,
             installPending = installPending,
+            activationSeq = activationSeq,
         )
     }
 

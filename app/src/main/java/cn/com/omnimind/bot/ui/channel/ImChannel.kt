@@ -9,16 +9,55 @@ import cn.com.omnimind.bot.im.TelegramImConfig
 import cn.com.omnimind.bot.im.WechatImConfig
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class ImChannel {
     private val channelName = "cn.com.omnimind.bot/ImChannel"
-    private val scope = CoroutineScope(Dispatchers.IO)
+    // SupervisorJob：单个调用失败（含非 Exception 的 Error）不能把整个 channel
+    // 的 scope 打掉 —— 用普通 Job 时一次崩溃之后所有 IM 调用都静默不执行。
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var channel: MethodChannel? = null
     private var appContext: Context? = null
+
+    /** 同 MnnLocalModelsChannel.OnceResult：同一个 Result 只允许回一次包。 */
+    private class OnceResult(
+        private val delegate: MethodChannel.Result,
+    ) : MethodChannel.Result {
+        private val replied = AtomicBoolean(false)
+
+        override fun success(result: Any?) {
+            if (!replied.compareAndSet(false, true)) {
+                OmniLog.w("[ImChannel]", "duplicate reply dropped: success()")
+                return
+            }
+            runCatching { delegate.success(result) }
+                .onFailure { OmniLog.w("[ImChannel]", "reply success failed: ${it.message}") }
+        }
+
+        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+            if (!replied.compareAndSet(false, true)) {
+                OmniLog.w("[ImChannel]", "duplicate reply dropped: error($errorCode)")
+                return
+            }
+            runCatching { delegate.error(errorCode, errorMessage, errorDetails) }
+                .onFailure { OmniLog.w("[ImChannel]", "reply error failed: ${it.message}") }
+        }
+
+        override fun notImplemented() {
+            if (!replied.compareAndSet(false, true)) {
+                OmniLog.w("[ImChannel]", "duplicate reply dropped: notImplemented()")
+                return
+            }
+            runCatching { delegate.notImplemented() }
+                .onFailure { OmniLog.w("[ImChannel]", "reply notImplemented failed: ${it.message}") }
+        }
+    }
 
     fun onCreate(context: Context) {
         appContext = context.applicationContext
@@ -27,9 +66,10 @@ class ImChannel {
     fun setChannel(flutterEngine: FlutterEngine) {
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
         channel?.setMethodCallHandler { call, result ->
+            val once = OnceResult(result)
             val context = appContext
             if (context == null) {
-                result.error("IM_INIT_ERROR", "Context not initialized", null)
+                once.error("IM_INIT_ERROR", "Context not initialized", null)
                 return@setMethodCallHandler
             }
             scope.launch {
@@ -64,15 +104,17 @@ class ImChannel {
                         "requestWechatQr" -> ImChannelManager.requestWechatQr(context)
                         "clearPeerSessions" -> ImChannelManager.clearPeerSessions(context)
                         else -> {
-                            withContext(Dispatchers.Main) { result.notImplemented() }
+                            withContext(Dispatchers.Main) { once.notImplemented() }
                             return@launch
                         }
                     }
-                    respondSuccess(result, response)
+                    respondSuccess(once, response)
                 } catch (error: Throwable) {
+                    // 取消是正常收摊（页面销毁 / channel clear），不能再回一个 error。
+                    if (error is CancellationException) throw error
                     OmniLog.e("[ImChannel]", "channel error: ${error.message}")
                     withContext(Dispatchers.Main) {
-                        result.error("IM_ERROR", error.message ?: error.javaClass.simpleName, null)
+                        once.error("IM_ERROR", error.message ?: error.javaClass.simpleName, null)
                     }
                 }
             }

@@ -1185,11 +1185,15 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         : ChatPageMode.normal;
     await _ensureConversationModeReady(targetConversationMode);
     if (isStaleRequest()) return;
+    // 上面这个 await 期间用户可能还在打字：切模式前再快照一次，把这段间隙的内容
+    // 并回旧模式的草稿槽；否则紧接着的 _applyDraftForConversationMode 会整体覆盖掉它。
+    // 快照 → 恢复 → 切模式三件事必须在同一段同步代码里完成（中间不能再有 await）。
+    _storeDraftForActiveConversationMode();
+    _applyDraftForConversationMode(targetConversationMode);
     setState(() {
       _activeSurfaceMode = ChatSurfaceMode.normal;
       _activeConversationMode = targetConversationMode;
     });
-    _applyDraftForConversationMode(targetConversationMode);
     await _persistVisibleThreadTargetIfNeeded();
     unawaited(_syncVisibleChatConversation());
     if (isStaleRequest()) return;
@@ -1213,11 +1217,25 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
 
   @override
   void _applyDraftForConversationMode(ChatPageMode mode) {
+    // 时序要点（这里被三处调用，必须自洽）：
+    // 1. 取值与赋值放在同一段同步代码里：中间只要有一次 await，用户在间隙里
+    //    敲的字就会被下面的赋值整体覆盖。
+    // 2. 用 _isApplyingDraft 把它标成「程序化变更」，否则 TextEditingController
+    //    的监听器会把恢复出来的草稿当成用户输入（slash 面板弹出来、@ 提及被
+    //    重新解析、自动保存把旧模式的内容写到新模式）。
+    // 3. 光标落在文本末尾；draft 为空时也显式给 (0,0)，避免沿用上一个模式的
+    //    选区导致 Sliver 崩溃（TextSelection 超出文本长度会抛断言）。
     final draft = _modeState(mode).draftMessage;
-    _messageController.value = TextEditingValue(
-      text: draft,
-      selection: TextSelection.collapsed(offset: draft.length),
-    );
+    final offset = draft.length;
+    _isApplyingDraft = true;
+    try {
+      _messageController.value = TextEditingValue(
+        text: draft,
+        selection: TextSelection.collapsed(offset: offset),
+      );
+    } finally {
+      _isApplyingDraft = false;
+    }
   }
 
   Future<ConversationThreadTarget> _overrideTargetWithSharedDraftIfNeeded(

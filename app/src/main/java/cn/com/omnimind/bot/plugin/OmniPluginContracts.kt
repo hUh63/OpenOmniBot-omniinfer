@@ -104,6 +104,16 @@ data class OmniPluginStoredState(
     val pluginId: String,
     val enabled: Boolean,
     val installPending: Boolean = false,
+    /**
+     * 用户「启用」这个插件的操作序号（单调递增）。
+     *
+     * 插件之间没有优先级字段，谁的工具有效、同名工具谁先占位，取决于激活顺序。
+     * 以前这个顺序是丢失的：状态存在 SharedPreferences 的 StringSet 里，读出来还
+     * 按 pluginId 字母序排 —— 于是「先启用的插件」反而可能排在后面，工具定义顺序
+     * 每次启动都可能变。这里把用户操作顺序落盘，激活/注册/列表统一按它排序。
+     * 0 表示历史数据（升级前启用过、没有记录序号），排在有序项之前。
+     */
+    val activationSeq: Long = 0L,
 )
 
 interface OmniPluginStateStore {

@@ -1374,8 +1374,58 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     return const <Map<String, dynamic>>[];
   }
 
+  /// 「停止」的唯一入口（输入区主按钮 / 语音/快捷键都走这里）。
   @override
   void _onCancelTask() {
+    _stopActiveTurn(source: 'composer');
+  }
+
+  @override
+  void _onCancelTaskFromCard(String taskId) {
+    _stopActiveTurn(source: 'card', taskId: taskId);
+  }
+
+  /// 停止语义 —— 全应用唯一的实现。
+  ///
+  /// 定义（所有入口一致，不再各自发明）：
+  /// 1. 停止只中止**当前活跃回合**：保留用户消息、保留已经产出的助手内容；
+  ///    不删除会话、不切换会话、不关闭页面。
+  /// 2. 本轮以 cancelled 收敛（不是 error）：思考卡/工具卡改写成「已停止」；
+  ///    纯占位（loading / 等待用户回答的卡）移除，避免留下空气泡。
+  /// 3. 幂等：连续点击只发一次 cancel（700ms 去抖），同一轮不会被取消两次。
+  /// 4. 一定能收尾：ACP 回合以官方 cancel + 终态为准（另有 12s 本地兜底）；
+  ///    本地/无 ACP 回合直接收尾。任何情况下都不会让输入框被永久占住。
+  /// 5. 「停止」≠「结束会话」≠「关闭页面」≠「停止本地模型服务」，后三者各有入口。
+  void _stopActiveTurn({required String source, String? taskId}) {
+    final now = DateTime.now();
+    final last = _lastStopRequestAt;
+    if (last != null &&
+        now.difference(last) < const Duration(milliseconds: 700)) {
+      debugPrint('[stop] $source ignored (debounced)');
+      return;
+    }
+    _lastStopRequestAt = now;
+
+    final isAcpOwnedMode =
+        _activeConversationMode == ChatPageMode.agent ||
+        (_activeConversationMode == ChatPageMode.normal &&
+            activeConversationModeValue != ConversationMode.chatOnly);
+    final normalizedTaskId = taskId?.trim();
+    if (normalizedTaskId != null &&
+        normalizedTaskId.isNotEmpty &&
+        isAcpOwnedMode) {
+      final conversationId = _currentConversationId;
+      if (conversationId == null ||
+          !_runtimeCoordinator.isTaskActive(
+            taskId: normalizedTaskId,
+            conversationId: conversationId,
+            mode: _modeKey(_activeConversationMode),
+          )) {
+        // 旧回合的卡片不能取消当前回合（终态由共享 runtime 自己围栏）。
+        debugPrint('[stop] $source: task $normalizedTaskId is not active');
+        return;
+      }
+    }
     try {
       if (_activeConversationMode == ChatPageMode.agent) {
         // ACP owns the terminal transition. Do not unregister the task or
@@ -1415,21 +1465,28 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         );
       }
 
-      setState(() {
-        _isAiResponding = false;
-        _isContextCompressing = false;
-        _isCheckingExecutableTask = false;
-        _isExecutingTask = false;
-        _isInputAreaVisible = true;
-        _messages.removeWhere(
-          (msg) => msg.isLoading || _isOpenClawWaitingCardMessage(msg),
-        );
-      });
-
-      debugPrint('Task cancelled, all states reset');
+      _convergeStoppedState();
+      debugPrint('[stop] $source: local fallback converged');
     } catch (e) {
-      debugPrint('onCancelTask error: $e');
+      debugPrint('[stop] $source failed: $e');
+      // 停止绝不能因为一次异常而让 UI 卡在「运行中」。
+      _convergeStoppedState();
     }
+  }
+
+  /// 停止后的统一收尾：保留已产出内容，只移除纯占位卡，复位 busy 标志。
+  void _convergeStoppedState() {
+    if (!mounted) return;
+    setState(() {
+      _isAiResponding = false;
+      _isContextCompressing = false;
+      _isCheckingExecutableTask = false;
+      _isExecutingTask = false;
+      _isInputAreaVisible = true;
+      _messages.removeWhere(
+        (msg) => msg.isLoading || _isOpenClawWaitingCardMessage(msg),
+      );
+    });
   }
 
   @override
@@ -1494,83 +1551,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     }
   }
 
-  @override
-  void _onCancelTaskFromCard(String taskId) {
-    try {
-      final runtimeIdentity = _activeRuntime?.activeRunIdentity;
-      final agentSessionId =
-          runtimeIdentity?.normalizedSessionId ?? _activeAgentThreadId?.trim();
-      final agentTurnId =
-          runtimeIdentity?.normalizedTurnId ?? _activeAgentTurnId?.trim();
-      final normalIdentity = _runtimeForMode(ChatPageMode.normal)
-          ?.activeRunIdentity;
-      final normalSessionId =
-          normalIdentity?.normalizedSessionId ?? _normalAcpSessionId?.trim();
-      final normalTurnId =
-          normalIdentity?.normalizedTurnId ?? _normalAcpTurnId?.trim();
-      final isAcpMode =
-          _activeConversationMode == ChatPageMode.agent ||
-          (_activeConversationMode == ChatPageMode.normal &&
-              activeConversationModeValue != ConversationMode.chatOnly);
-      final activeConversationId = _currentConversationId;
-      if (isAcpMode &&
-          (activeConversationId == null ||
-              !_runtimeCoordinator.isTaskActive(
-                taskId: taskId,
-                conversationId: activeConversationId,
-                mode: _modeKey(_activeConversationMode),
-              ))) {
-        // A card from an older turn must not cancel the currently active ACP
-        // turn. Its terminal event is already fenced by the shared runtime.
-        return;
-      }
-      if (_activeConversationMode == ChatPageMode.normal &&
-          activeConversationModeValue != ConversationMode.chatOnly) {
-        unawaited(
-          cancelAcpPromptForMode(
-            mode: ChatPageMode.normal,
-            sessionId: normalSessionId,
-            turnId: normalTurnId,
-          ),
-        );
-        return;
-      }
-      if (_activeConversationMode == ChatPageMode.agent) {
-        unawaited(_interruptAgentTurn());
-        return;
-      }
-      interruptActiveToolCard();
-      if (!(_activeConversationMode == ChatPageMode.normal &&
-          activeConversationModeValue != ConversationMode.chatOnly)) {
-        unawaited(
-          cancelAcpPromptForMode(
-            mode: _activeConversationMode,
-            sessionId: agentSessionId,
-            turnId: agentTurnId,
-          ),
-        );
-      }
-      _runtimeCoordinator.unregisterTask(
-        taskId,
-        conversationId: _currentConversationId,
-        mode: _modeKey(_activeConversationMode),
-      );
-      _updateThinkingCardToCancelled(taskId);
-      _upsertCancelledAgentRunMessage(taskId);
-      _collapseAgentRunTrace(taskId);
-      if (_activeConversationMode != ChatPageMode.agent) {
-        clearAgentStreamSessionState();
-        resetDispatchState();
-      }
-      setState(() {
-        _messages.removeWhere(
-          (msg) => msg.isLoading || _isOpenClawWaitingCardMessage(msg),
-        );
-      });
-    } catch (e) {
-      debugPrint('onCancelTaskFromCard error: $e');
-    }
-  }
 
   @override
   void _updateThinkingCardToCancelled(String taskId) {
