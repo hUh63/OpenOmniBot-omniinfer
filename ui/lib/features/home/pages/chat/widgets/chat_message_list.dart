@@ -753,7 +753,10 @@ class _ChatMessageListState extends State<ChatMessageList> {
     // 只为「这一组」建索引：原来的写法在流式输出的每一帧都为整个会话
     // 重建一次 {id: message}（上千条时每帧一次大分配），与上面的
     // structureRevision 缓存优化正好相反。
-    final groupIds = <String>{for (final message in group.messages) message.id};
+    final groupIds = <String>{
+      for (final segment in group.segmentsOldestFirst)
+        for (final message in segment.messages) message.id,
+    };
     if (groupIds.isEmpty) {
       return group.withRefreshedMessages(const <String, ChatMessageModel>{});
     }

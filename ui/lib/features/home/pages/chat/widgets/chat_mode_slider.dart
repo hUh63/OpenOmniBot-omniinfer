@@ -134,7 +134,7 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
                   child: Semantics(
                     button: true,
                     selected: _isVisibleModeSelected(ChatSurfaceMode.normal),
-                    label: context.trLegacy('对话'),
+                    label: LegacyTextLocalizer.localize('对话'),
                     onTap: () => widget.onChanged(ChatSurfaceMode.normal),
                     child: _buildModeIcon(
                     isSelected: _isVisibleModeSelected(ChatSurfaceMode.normal),
@@ -161,7 +161,7 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
                   child: Semantics(
                     button: true,
                     selected: _isVisibleModeSelected(ChatSurfaceMode.workspace),
-                    label: context.trLegacy('工作区'),
+                    label: LegacyTextLocalizer.localize('工作区'),
                     onTap: () => widget.onChanged(ChatSurfaceMode.workspace),
                     child: _buildModeIcon(
                     isSelected: _isVisibleModeSelected(ChatSurfaceMode.workspace),

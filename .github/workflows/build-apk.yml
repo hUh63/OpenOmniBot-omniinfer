@@ -113,82 +113,70 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.7
-          # Without this the tag lands on the default branch's HEAD (which is how
-          # v1/v2/v3 all ended up pointing at the same old commit) instead of the
-          # commit this build actually checked out. Mirrors release.yml:302.
+          tag_name: v0.6.3-omniinfer-v6.5.8
+          # Without this the tag lands on the default branch's HEAD instead of the
+          # commit this build actually checked out.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 浏览器 AI 接管 / 上游同步 / 安装与并发卡死 (v0.6.3-omniinfer-v6.5.7)"
+          name: "OmniInfer 版 · 闪退修复 / 停止语义统一 / 通道与网络加固 (v0.6.3-omniinfer-v6.5.8)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6.5.7)：29 个提交，主题是「让 AI 真的能操作浏览器」+「把会永久卡死的锁和
-            标志位拆掉」，并同步了上游 v0.6.3.4~v0.6.3.6 中适用于本分支的修复。
+            本轮 (v6.5.8)：8 个提交，主题是「修掉会闪退的那一条 + 把『永久卡死』从通道层
+            到 UI 层扫干净」，并把上游两个 UI 提交逐个 hunk 核过一遍。
 
-            一、浏览器会话：AI 可以接管，你也可以随时收回
-            - AI 能控制页面了：移除 browser_use / webfetch 的「所有文件访问」权限前置检查
-              （浏览器只在内置 WebView 里跑、产物落在 app 私有目录，本来不需要存储权限）。
-              之前这条检查会让工具直接不可用，表现就是「AI 调不了浏览器」。
-            - 控制权状态机：新增 aiControlEnabled。用户在页面上任何一次触摸（ACTION_DOWN）
-              都会自动把 AI 暂停，只读动作（读文字 / 截图 / 取页面信息）不受影响，AI 仍然
-              看得懂你把页面操作到哪了。
-            - 提示与恢复：浏览器面板顶部常驻横幅，显示「AI 正在控制」还是「你正在操作、
-              AI 已暂停」，一键「我来操作 / 恢复 AI 控制」，任何时刻都能双向切换。
-            - 智能弹出：AI 开始改页面时自动把面板摆出来；你手动关掉之后本次不再打扰，
-              除非它卡在弹窗 / 权限 / 风控等你必须处理的环节。
-            - 每轮新 run 重新授权 AI，避免上一次触摸导致之后所有动作都被拒（而面板没打开、
-              你看不到恢复按钮）。
+            一、点「模型市场 / 高级设置」闪退
+            - 根因：本地模型通道的 listAllInstalledModels 分支漏了 return —— 异步回包之后代码
+              继续落到「按 backend 分派」的 when，走 else -> notImplemented()，同一个 Result
+              被 reply 两次（Reply already submitted）；第二次 reply 又发生在 runSuspend 的
+              catch 里，协程直接 FATAL。
+            - 通道层统一 OnceResult（AtomicBoolean 只放行第一次回包），同一缺陷的另外 6 个
+              形态（McpServer / RemoteMcpConfig / Cache / VoicePlayback / SpecialPermission /
+              Overlay）一并收掉。
 
-            二、会永久卡死的锁与标志位（本轮逐行审计的结果）
-            - evaluateJavascript 加 15s 上限。页面弹窗 / 死循环脚本 / renderer 卡住时回调永不
-              触发，而这个协程持有浏览器动作锁 —— AI 等 JS、JS 等用户关弹窗、用户关弹窗的
-              请求在等锁，三方死锁，整条链路（含取快照）一起冻住。
-            - 快照 / 预览 / 停止加载 / 弹窗与权限应答 / 控制权切换改为不进动作锁：停止按钮
-              此前必须等 30s 导航超时才拿到锁，拿到时再 stopLoading 已经没有意义。
-            - 浏览器引擎被 LRU 淘汰时跳过正在执行的引擎，destroy 后禁止再建 WebView；标签页
-              封顶 8、先校验 transport 再建 tab；关闭引擎时清掉挂起的弹窗/权限/外链请求。
+            二、「停止」有了统一定义
+            - 只中止当前回合：保留用户消息与已产出内容，以 cancelled 收敛，只移除纯占位卡；
+              700ms 去抖；ACP 回合以官方 cancel 为准则 + 12s 本地兜底；本地回合直接收尾。
+            - 入口补全：agent 正在等你回答澄清时，停止按钮不再消失。
 
-            三、装不上的预置 Agent（Codex / DeepSeek Harness）
-            - 「重新安装」现在真的会安装。当前连着别的 Agent 时走的那条分支只做「构造启动
-              环境 + 检查命令存在」，而构造环境的约定就是「只给已安装的 Harness 用，绝不装
-              依赖」，于是永远只检查、永远装不上。
-            - 一次 prepare 不再跑两遍完整 npm 脚本（第二遍失败会把「已装好」的状态覆盖成
-              失败，用户看到「安装失败」而包其实装好了）。
-            - 安装器真实报错不再被压成「助手未能启动，请重试」；且「应用自有安装错误」优先于
-              timeout / command not found 判定，npm 失败不会再被改写成「等待回复超时」。
-            - 取消不再被当成失败：离开设置页 / 切 Agent 不会再把该 Harness 永久标成离线。
-            - 可用性探针整体失败（终端冷启动超时、脚本异常）不再被当成「所有 Agent 都没装」
-              并批量写 missing —— 那会让装好的 Codex / DSH 全显示「未安装」并引导重装。
-            - ACP prompt 增加空闲看门狗：适配器活着但不回话时，turn 预约会永久不释放，之后
-              同一会话每次请求都被拒；10 分钟无任何响应即判失败并释放。
+            三、切会话模式的草稿交接
+            - 「存旧草稿 → 恢复新草稿 → 切模式」放进同一段同步代码，await 间隙里敲的字不会再
+              被覆盖；恢复草稿不再触发 slash 面板 / 自动保存。
 
-            四、本地模型
-            - 暂停后立刻重新下载不会再把新任务的表项摘掉（否则暂停变空操作、两个任务并发写
-              同一个 .part，最后仍被判成功，得到一个损坏的模型目录）；QNN / LiteRT 也不会
-              把暂停的任务报成「已完成」。
-            - 删除未完成下载改为「先取消再删目录」：否则下载协程会把刚删的目录建回来继续写。
-            - 下载 / 暂停不再在主线程递归遍历目录 + StatFs；模型通道的同步分支统一兜异常
-              （原来任何异常都会让主线程 FATAL，且 Dart 侧永久 await）。
-            - 推荐模型探测不再顺手切后端（那会停掉你正在跑的 MNN/QNN/LiteRT 引擎和局域网代理）。
+            四、插件按「操作顺序」生效
+            - 启用顺序落盘（activationSeq）：先启用的先注册、同名工具先到先得；UI 列表顺序与
+              你的操作顺序一致（升级前这个顺序是丢的）。
 
-            五、WebChat（浏览器里那个网页端）
-            - 运行态按会话隔离：切会话不再被上一会话的「运行中」锁死，停止按钮也不会取消到
-              别的会话；别的会话的任务完成事件不再清掉当前运行态。
-            - 401 有出口了：MCP 服务重启 / 会话过期后回登录页，而不是停在「已登录」并每 3 秒
-              重试一次 401。
-            - SSE 断线重连后补一次快照（服务端不重放事件，最终回答和任务结束会丢）。
-            - 侧边栏分组按 agentId：服务端把 mode 归一成 agent，原来 Codex / Claude / OpenCode
-              / DeepSeek 四个分组永远是空的、标签全显示「小万」。
-            - 请求加 30s 超时、消息加载只接受最新一次结果、草稿按会话隔离。
+            五、通道层与 UI 层的「永久卡死」大扫除
+            - Kotlin：7 个 channel 接入 OnceResult；3 个 scope 换 SupervisorJob（一次逃逸异常
+              会让整个通道静默失效）；ScreenDialogChannel 的 scope 取消后不重建；7 处把取消当
+              业务错误回包 → 改为 CancellationException 穿透。
+            - Dart：device / permission / 上传 / 浏览器会话 / 本地模型 / 运行日志 / 语音 /
+              快捷记录 / 存储 / PDF / 场景模型 / 浮层关闭 / 定时任务 等 20+ 处平台调用补超时与
+              兜底；终端初始化进度流在原生分发被拆后会复位缓存（不再永久「初始化中」）。
+            - AssistCore 的 42 个原生调用补分档超时（10s~120s），4 处裸 await 补容错，回调分发
+              改为快照遍历 + 逐个隔离（一个监听器抛异常不再让其余监听器全收不到）。
 
-            六、上游同步
-            - 取上游 v0.6.3.4~v0.6.3.6 中与本分支同源、可独立验证的修复：模型缓存字段写死
-              JSON key、发布包关闭标识符混淆（保留可读崩溃堆栈）、dex 压缩打包、WebChat
-              请求体改 Gson 解析（异构 map 交给 kotlinx 转换器会整请求失败）、Agent 展示顺序
-              统一（含 WebChat 新建菜单里「小万」重复一条）。
-            - OmniInfer：核对后无需更新 —— 上游 android/ 目录在 2026-09-18 之后没有任何提交，
-              v0.3.29~v0.3.31 的增量全在桌面端与 gateway；本分支内嵌的 SDK 已覆盖到 09-18 的
-              全部内容，并额外带了我们自己的 JNI 串行化与 session 生命周期加固。
+            六、网络 / 文件 / 大响应
+            - OkHttp：429 与取消分支不关 Response 导致连接泄漏；SSE 每次新建 client（线程池
+              泄漏 + 每次重做 DNS/TCP/TLS）；下载非 2xx 不关流、失败留半截文件、循环里调
+              System.gc()（整进程 STW）。
+            - HttpChannel：响应体整包进内存（大响应 OOM）→ 4MB 上限 + truncated 标记；
+              multipart 上传所有文件硬写成 image/*、且无视 method 强制 POST。
+            - FileSaveChannel：分享时在主线程整文件复制（大文件 ANR）→ 64MB 上限 + 分块复制 +
+              失败清理。
+
+            七、上游同步（逐个 hunk 核过，不只三方比对）
+            - 已合：conversation_slidable 整文件（全滑后重建 Slidable key）+ 归档页两处调用点。
+            - 其余 25 个文件按四类理由写入 docs/reference/upstream-sync-ledger.md：依赖我们已
+              删除的组件、依赖我们未采用的版式、tour 步数模型不同（我们 6 步、上游 4 步）、
+              onboarding 联动。要真正跟上这三块 UI 需要单独立项。
+
+            八、性能与无障碍
+            - 长会话消息列表：findChildIndexCallback 从每帧 O(n×可见数) 降到 O(1)；流式刷新
+              不再每帧重建全量 {id: message}。
+            - Agent 会话页 3 秒轮询不再每次 setState 两遍。
+            - 模式切换器补读屏语义（原来纯图标 GestureDetector 不可操作）；提示条在 1.5~2.0x
+              大字体下不再裁字。
 
             全部改动只经过编译门（verify-omniinfer）验证，尚未做真机回归；安装后如遇异常请反馈
             具体操作路径。
