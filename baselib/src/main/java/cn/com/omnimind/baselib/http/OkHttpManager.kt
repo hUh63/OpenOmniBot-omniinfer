@@ -3,7 +3,6 @@ package cn.com.omnimind.baselib.http
 import android.annotation.SuppressLint
 import android.util.Log
 import androidx.annotation.VisibleForTesting
-import cn.com.omnimind.baselib.BaseApplication
 import cn.com.omnimind.baselib.http.interceptor.CommonParamsInterceptor
 import cn.com.omnimind.baselib.http.interceptor.HeaderInterceptor
 import cn.com.omnimind.baselib.service.DeviceInfoService
@@ -94,7 +93,8 @@ object OkHttpManager {
     /** 真实 versionName；拿不到（早期初始化/单元测试）时退回 1.0.0。 */
     private fun resolveAppVersionName(): String {
         return runCatching {
-            DeviceInfoService.getAppVersion(BaseApplication.instance)["versionName"]?.toString()
+            val appBuildConfig = Class.forName("cn.com.omnimind.bot.BuildConfig")
+            appBuildConfig.getField("VERSION_NAME").get(null) as String
         }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.0.0"
     }
 

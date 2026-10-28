@@ -143,21 +143,24 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
       fontFamily: 'PingFang SC',
     );
 
+    final label = _labelFor(_elapsedSeconds, isEnglish, running);
+
     final Widget labelWidget = ValueListenableBuilder<int>(
       valueListenable: _elapsed,
       builder: (context, elapsedSeconds, _) {
-        final label = _labelFor(elapsedSeconds, isEnglish, running);
+        final stepLabel =
+            _labelFor(elapsedSeconds, isEnglish, running);
         return running
             ? ShimmeringStatusText(
                 baseColor: labelColor,
                 child: Text(
-                  label,
+                  stepLabel,
                   key: const ValueKey('acp-processing-label'),
                   style: textStyle,
                 ),
               )
             : Text(
-                label,
+                stepLabel,
                 key: const ValueKey('acp-processed-label'),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
