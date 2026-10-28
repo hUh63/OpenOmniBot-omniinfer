@@ -180,11 +180,13 @@ class HttpChannel {
             }
             
             // multipart 分支原来无条件 post()：PUT/PATCH 上传会被改成 POST。
-            val multipartBody = multipartBuilder.build()
+            // 注意这里的 builder 是 OkHttpManager.RequestBuilder（自定义包装），
+            // put()/patch()/post() 都是无参动词，body 必须先 setRequestBody。
+            builder.setRequestBody(multipartBuilder.build())
             when (method.uppercase()) {
-                "PUT" -> builder.put(multipartBody)
-                "PATCH" -> builder.patch(multipartBody)
-                else -> builder.post(multipartBody)
+                "PUT" -> builder.put()
+                "PATCH" -> builder.patch()
+                else -> builder.post()
             }
         } else {
             // 添加请求方法
