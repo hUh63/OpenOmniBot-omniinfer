@@ -76,6 +76,52 @@
 - `chat_spotlight_tour` 的步骤重构（`ChatSpotlightTour.modelStep` 常量、去掉 pet/island
   锚点）：我们 tour 的锚点集合与上游不同（有 pet/island），取常量会与本地锚点错位。
 
+### 2026-10-28 复核结论：能合的都合完了，剩下的是「不该合」
+
+把两个提交里 **全部 26 个 lib 文件**的 hunk 逐个过了一遍（不是只看三方状态），结论分三类：
+
+**A. 已落地（1 个文件 + 2 个调用点）**
+- `conversation_slidable.dart` 整文件（全滑 dismiss 后重建 Slidable key）。
+- `chat_history_page.dart` / `chat_history_conversation_item.dart` 补
+  `resetAfterFullSwipe: true`。
+
+**B. 与我们同名但 hunk 无法独立落地（15 个，逐个给过理由）**
+- `chat_app_bar` / `omni_circle_button` / `settings_ui` / `common_app_bar`：
+  上游在给 `OmniCircleButton` 加 `iconSize`/`_navigationButtonSize`，并把菜单锚点
+  对齐到「可见圆」；我们顶栏是重写的（不用 OmniCircleButton），套 hunk 只能得到
+  半新半旧。
+- `glass_popup`：动画时长/`RepaintBoundary`/`shadowProgress` 三处视觉调优，
+  我们版本已分叉 9 处冲突，收益 < 回归风险。
+- `omni_segmented_slider`：只加 `splashFactory/highlightColor` 两行去水波纹；我们的
+  该组件结构不同，对应位置不存在这两个参数。
+- `home_drawer` / `home_drawer_conversation_list` / `home_drawer_home` /
+  `home_search_header`（新 429 行）：上游把抽屉搜索头抽成独立组件、并给「首页
+  会话列表」加滑动归档；我们抽屉是 `home_drawer_search_field` +
+  `home_drawer_search` + 自己的行组件，且抽屉列表本来就支持滑动归档 —— 取上游
+  这组等于换一套实现。
+- `chat_spotlight_tour` / `chat_page` / `chat_page_ui`：上游把 tour 从 5 步压成 4 步
+  （去掉 pet/island 锚点，新增 actions 锚点）并抽 `ChatSpotlightTour.modelStep`；
+  我们是 **6 步**且保留了 pet/island，常量与本地锚点会错位。
+- `chat_input_agent_controls` / `chat_input_area` / `chat_input_compact_*`：
+  配合上游 compact composer（我们未采用这套版式）。
+- `onboarding_choice_page` / `pages/provider_page` / `pages/provider_selection_page`
+  （新 123 行）/ `pages/environment_progress_page` / `widgets/onboarding_footer` /
+  `onboarding_definitions`：一整组联动改动（新增独立「provider 选择页」、把
+  onBack/onContinue/onRetry 从进度页挪进 footer、加 `TutorialPage.providerSelection`
+  枚举值）。我们的 onboarding 与之分叉 170+ 行，只取任意一两个文件都编译不过或
+  半新半旧。
+- `agent_run_details_sheet` / `chat_input_compact_composer` 等：本分支不存在。
+- `settings_ui` 的 `OmniMenuStyle.panelRadius`：我们既没有 `settings_ui.dart` 也没有
+  `OmniMenuStyle`。
+
+**C. 要真正跟上这几块 UI，只能单独立项（不是「同步」）**
+1. onboarding 的 provider 选择流程重写（含新页、枚举、footer 分工）。
+2. spotlight tour 步数模型改造（4 步 + actions 锚点），要连带动画/测试。
+3. 抽屉搜索头抽组件（`home_search_header`）+ 首页会话列表滑动归档。
+
+这三块各自都是 8~10 个文件的联动改动、必须真机验证，放进「同步」里做只会得到
+编译门能过但体验半新半旧的版本。需要时单独排期。
+
 ### 上游 `v0.6.3.6` 之后的 2 个提交（2026-10-26，初判）
 
 | 提交 | 内容 | 为什么不合并 |

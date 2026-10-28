@@ -177,6 +177,9 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         _hasLoadedMore = loadMore;
         _isLoading = false;
         _error = null;
+        // 与下面的 catch 一起收掉 finally 里的第二次 setState：轮询每 3 秒
+        // 一跑，原来每次都要重建两遍整棵树（第二次是纯 _isRefreshing）。
+        _isRefreshing = false;
       });
     } catch (error) {
       if (!mounted) return;
@@ -186,13 +189,8 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         }
         _isLoading = false;
         _error = error.toString();
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _isRefreshing = false);
-      } else {
         _isRefreshing = false;
-      }
+      });
     }
   }
 

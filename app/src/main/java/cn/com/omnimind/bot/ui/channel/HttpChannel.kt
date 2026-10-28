@@ -74,20 +74,24 @@ class HttpChannel {
                     )
                     val response = OkHttpManager.enqueue(request)
 
-                    val responseBody = response.body?.string()
-                    val responseHeaders = mutableMapOf<String, String>()
-                    response.headers.forEach { (name, value) ->
-                        responseHeaders[name] = value
-                    }
+                    // use{}：无论成功失败都关掉连接；body 有上限，避免大响应体
+                    // （日志/工作区预览/导出）整个进内存再被 codec 复制一遍 → OOM。
+                    response.use { resp ->
+                        val responseBody = readResponseBody(resp)
+                        val responseHeaders = mutableMapOf<String, String>()
+                        resp.headers.forEach { (name, value) ->
+                            responseHeaders[name] = value
+                        }
 
-                    val responseMap = mapOf(
-                        "statusCode" to response.code,
-                        "body" to responseBody,
-                        "headers" to responseHeaders
-                    )
+                        val responseMap = mapOf(
+                            "statusCode" to resp.code,
+                            "body" to responseBody,
+                            "headers" to responseHeaders
+                        )
 
-                    withContext(Dispatchers.Main) {
-                        result.success(responseMap)
+                        withContext(Dispatchers.Main) {
+                            result.success(responseMap)
+                        }
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
@@ -102,6 +106,46 @@ class HttpChannel {
             result.error("INVALID_PARAMETERS", e.message, e.toString())
         }
     }
+
+    /** 单个 HTTP 响应最多允许进内存的字节数；超出截断并显式标记。 */
+    private val MAX_RESPONSE_BYTES = 4L * 1024 * 1024
+
+    private fun readResponseBody(response: okhttp3.Response): String? {
+        val body = response.body ?: return null
+        val contentLength = body.contentLength()
+        if (contentLength in 0..MAX_RESPONSE_BYTES) {
+            return body.string()
+        }
+        val buffer = okio.Buffer()
+        body.source().use { source ->
+            var remaining = MAX_RESPONSE_BYTES
+            while (remaining > 0) {
+                val read = source.read(buffer, minOf(remaining, 64L * 1024))
+                if (read == -1L) break
+                remaining -= read
+            }
+        }
+        return buffer.readUtf8() + "\n…[truncated at $MAX_RESPONSE_BYTES bytes]"
+    }
+
+    private fun mediaTypeFor(file: File) = when (file.extension.lowercase()) {
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "webp" -> "image/webp"
+        "gif" -> "image/gif"
+        "pdf" -> "application/pdf"
+        "zip" -> "application/zip"
+        "txt", "md", "log", "json", "csv", "xml" -> "text/plain"
+        "doc" -> "application/msword"
+        "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "xls" -> "application/vnd.ms-excel"
+        "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "ppt" -> "application/vnd.ms-powerpoint"
+        "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        "mp3" -> "audio/mpeg"
+        "mp4" -> "video/mp4"
+        else -> "application/octet-stream"
+    }.toMediaTypeOrNull()
 
     private fun buildRequest(
         url: String,
@@ -123,7 +167,9 @@ class HttpChannel {
                 if (path is String) {
                     val file = File(path)
                     if (file.exists()) {
-                        val requestBody = file.asRequestBody("image/*".toMediaTypeOrNull())
+                        // 原来所有文件都硬写成 image/*：pdf/zip/docx 附件会被服务端
+                        // 按图片解析而静默失败。
+                        val requestBody = file.asRequestBody(mediaTypeFor(file))
                         multipartBuilder.addFormDataPart(
                             "files",
                             file.name,
@@ -133,8 +179,13 @@ class HttpChannel {
                 }
             }
             
-            builder.setRequestBody(multipartBuilder.build())
-            builder.post()
+            // multipart 分支原来无条件 post()：PUT/PATCH 上传会被改成 POST。
+            val multipartBody = multipartBuilder.build()
+            when (method.uppercase()) {
+                "PUT" -> builder.put(multipartBody)
+                "PATCH" -> builder.patch(multipartBody)
+                else -> builder.post(multipartBody)
+            }
         } else {
             // 添加请求方法
             when (method.uppercase()) {

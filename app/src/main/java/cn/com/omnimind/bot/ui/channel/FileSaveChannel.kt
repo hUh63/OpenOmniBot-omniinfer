@@ -28,6 +28,15 @@ class FileSaveChannel {
         private const val REQUEST_CODE_CREATE_DOCUMENT = 39121
         private const val SHARED_EXPORT_DIR = "shared_exports"
         private const val MAX_SHARED_EXPORT_FILES = 24
+
+        /**
+         * 需要「转存到 cache 再分享」的单个文件上限。
+         *
+         * stageFileInCache 跑在 MethodCallHandler（主线程）上：原来整文件 copyTo，
+         * 分享一个几百 MB 的录屏/日志就是必然 ANR，而且 cache 里还要占双份磁盘。
+         * 超限直接拒绝并回错误，让上层提示用「保存到 Downloads」。
+         */
+        private const val MAX_SHARED_EXPORT_BYTES = 64L * 1024 * 1024
         private const val SHARED_EXPORT_RETENTION_MS = 2L * 24L * 60L * 60L * 1000L
 
         @Volatile
@@ -451,6 +460,10 @@ class FileSaveChannel {
     }
 
     private fun stageFileInCache(context: Context, sourceFile: File): File {
+        val size = sourceFile.length()
+        require(size <= MAX_SHARED_EXPORT_BYTES) {
+            "File too large to share (${size}B > ${MAX_SHARED_EXPORT_BYTES}B); save it to Downloads instead"
+        }
         val exportDir = File(context.cacheDir, SHARED_EXPORT_DIR)
         if (!exportDir.exists()) {
             exportDir.mkdirs()
@@ -460,10 +473,21 @@ class FileSaveChannel {
         val safeName = sourceFile.name.ifBlank { "shared_file" }
         val prefix = System.currentTimeMillis().toString()
         val stagedFile = File(exportDir, "${prefix}_$safeName")
-        sourceFile.inputStream().use { input ->
-            stagedFile.outputStream().use { output ->
-                input.copyTo(output)
+        try {
+            sourceFile.inputStream().use { input ->
+                stagedFile.outputStream().use { output ->
+                    val buffer = ByteArray(256 * 1024)
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        output.write(buffer, 0, read)
+                    }
+                    output.flush()
+                }
             }
+        } catch (error: Throwable) {
+            // 别留半截临时文件在 cache 里。
+            runCatching { stagedFile.delete() }
+            throw error
         }
         return stagedFile
     }

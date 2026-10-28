@@ -750,9 +750,21 @@ class _ChatMessageListState extends State<ChatMessageList> {
     ObservableChatMessageList messages,
     AgentRunTimelineGroup group,
   ) {
-    return group.withRefreshedMessages(<String, ChatMessageModel>{
-      for (final message in messages) message.id: message,
-    });
+    // 只为「这一组」建索引：原来的写法在流式输出的每一帧都为整个会话
+    // 重建一次 {id: message}（上千条时每帧一次大分配），与上面的
+    // structureRevision 缓存优化正好相反。
+    final groupIds = <String>{for (final message in group.messages) message.id};
+    if (groupIds.isEmpty) {
+      return group.withRefreshedMessages(const <String, ChatMessageModel>{});
+    }
+    final lookup = <String, ChatMessageModel>{};
+    for (final message in messages) {
+      if (groupIds.contains(message.id)) {
+        lookup[message.id] = message;
+        if (lookup.length == groupIds.length) break;
+      }
+    }
+    return group.withRefreshedMessages(lookup);
   }
 
   Widget _buildTimelineListRow({
@@ -899,6 +911,13 @@ class _ChatMessageListState extends State<ChatMessageList> {
         break;
       }
     }
+    // findChildIndexCallback 对每个可见子项各回调一次，原来每次都要
+    // indexWhere 全表线性扫描（长会话 = 每帧 O(n × 可见数) → 掉帧）。
+    // 预先建一张 key→dataIndex 的表，让回调变成 O(1)。
+    final entryIndexByKey = <String, int>{
+      for (var i = 0; i < timelineEntries.length; i++)
+        timelineEntries[i].key: i,
+    };
     Widget listView = ListView.builder(
       controller: widget.scrollController,
       reverse: false,
@@ -915,10 +934,8 @@ class _ChatMessageListState extends State<ChatMessageList> {
           return null;
         }
         final entryKey = key.value.substring(_kListEntryKeyPrefix.length);
-        final dataIndex = timelineEntries.indexWhere(
-          (entry) => entry.key == entryKey,
-        );
-        return dataIndex == -1 ? null : timelineEntries.length - 1 - dataIndex;
+        final dataIndex = entryIndexByKey[entryKey];
+        return dataIndex == null ? null : timelineEntries.length - 1 - dataIndex;
       },
       itemBuilder: (context, index) {
         final dataIndex = timelineEntries.length - 1 - index;

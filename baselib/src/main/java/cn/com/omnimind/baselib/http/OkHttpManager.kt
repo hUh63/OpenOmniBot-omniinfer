@@ -207,10 +207,18 @@ object OkHttpManager {
 
             override fun onResponse(call: Call, response: Response) {
                 if (response.code == 429) {
-                    continuation.resumeWithException(Http429Exception("小万忙不过来了，等会儿再试试吧!"))
+                    // 不关掉会把连接一直占着：限流时会连续触发，连接池/socket 一路泄漏，
+                    // 之后所有请求都排队等连接（表现为「一直转圈最后超时」）。
+                    runCatching { response.close() }
+                    if (!continuation.isCancelled) {
+                        continuation.resumeWithException(Http429Exception("小万忙不过来了，等会儿再试试吧!"))
+                    }
                     return
                 }
-                if (continuation.isCancelled) return
+                if (continuation.isCancelled) {
+                    runCatching { response.close() }
+                    return
+                }
                 continuation.resume(response)
             }
         })
@@ -218,13 +226,25 @@ object OkHttpManager {
 
     private val doTask = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // 流式执行请求 - 协程方式，基于SSE实现
-    suspend fun enqueueWithStream(request: Request, event: EventSourceListener): EventSource {
-        val streamClient = OkHttpClient.Builder()
+    /**
+     * SSE 专用 client：必须复用。
+     *
+     * 原来每次 enqueueWithStream 都 new 一个 OkHttpClient —— 每个实例自带独立
+     * Dispatcher 线程池和空连接池（不共享、也不会被 shutdown），配合 60s readTimeout，
+     * 流一多就是线程池泄漏 + 每次重新 DNS/TCP/TLS（首字延迟越来越长）。
+     */
+    private val streamClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
             .connectTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
+            // 保留 60s：流式期间服务端会发心跳；设 0 会在服务端静默僵死时永久挂住。
             .readTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
             .writeTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
+    }
+
+    // 流式执行请求 - 协程方式，基于SSE实现
+    suspend fun enqueueWithStream(request: Request, event: EventSourceListener): EventSource {
 
         return EventSources.createFactory(streamClient)
             .newEventSource(request, object : EventSourceListener() {
@@ -460,48 +480,43 @@ object OkHttpManager {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (!response.isSuccessful) {
-                    callback?.onError(IOException("Unexpected code $response"))
-                    return
-                }
-
-                response.body?.let { responseBody ->
+                // use{} 保证 Response/流一定被关闭：原来非 2xx 直接 return 会漏连接，
+                // 中途异常时 input/output 也没关（fd 泄漏 + 半截文件）。
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        callback?.onError(IOException("Unexpected code $resp"))
+                        return
+                    }
+                    val responseBody = resp.body
+                    if (responseBody == null) {
+                        callback?.onError(IOException("Response body is null"))
+                        return
+                    }
                     val totalBytes = responseBody.contentLength()
                     var downloadedBytes = 0L
-
                     try {
-                        val inputStream = responseBody.byteStream()
-                        val outputStream = FileOutputStream(destinationFile)
-
-                        val buffer = ByteArray(8192) // 增加缓冲区大小
-                        var bytesRead: Int
-
-                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            downloadedBytes += bytesRead
-
-                            // 回调进度（如果有提供回调）
-                            if (callback != null && totalBytes > 0) {
-                                callback.onProgress(downloadedBytes, totalBytes)
-                            }
-
-                            // 定期清理可能减少内存占用
-                            if (downloadedBytes % (1024 * 1024) == 0L) {
-                                System.gc()
+                        responseBody.byteStream().use { inputStream ->
+                            FileOutputStream(destinationFile).use { outputStream ->
+                                val buffer = ByteArray(64 * 1024)
+                                var bytesRead: Int
+                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                    outputStream.write(buffer, 0, bytesRead)
+                                    downloadedBytes += bytesRead
+                                    if (callback != null && totalBytes > 0) {
+                                        callback.onProgress(downloadedBytes, totalBytes)
+                                    }
+                                    // 这里原来每 1MB 调一次 System.gc()：整进程 STW，
+                                    // 下载越大卡得越明显，后台 agent 一起抖。
+                                }
+                                outputStream.flush()
                             }
                         }
-
-                        outputStream.flush()
-                        outputStream.close()
-                        inputStream.close()
-
-                        // 下载完成回调
                         callback?.onSuccess(destinationFile)
                     } catch (e: Exception) {
+                        // 别把半截文件留在磁盘上冒充「已下载」。
+                        runCatching { destinationFile.delete() }
                         callback?.onError(e)
                     }
-                } ?: run {
-                    callback?.onError(IOException("Response body is null"))
                 }
             }
         })
@@ -530,50 +545,49 @@ object OkHttpManager {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (continuation.isCancelled) return
+                response.use { resp ->
+                    if (continuation.isCancelled) return
 
-                if (!response.isSuccessful) {
-                    continuation.resumeWithException(IOException("Unexpected code $response"))
-                    return
-                }
+                    if (!resp.isSuccessful) {
+                        if (!continuation.isCancelled) {
+                            continuation.resumeWithException(IOException("Unexpected code $resp"))
+                        }
+                        return
+                    }
 
-                response.body?.let { responseBody ->
+                    val responseBody = resp.body
+                    if (responseBody == null) {
+                        if (!continuation.isCancelled) {
+                            continuation.resumeWithException(IOException("Response body is null"))
+                        }
+                        return
+                    }
                     val totalBytes = responseBody.contentLength()
                     var downloadedBytes = 0L
-
                     try {
-                        val inputStream = responseBody.byteStream()
-                        val outputStream = FileOutputStream(destinationFile)
-
-                        val buffer = ByteArray(8192) // 增加缓冲区大小
-                        var bytesRead: Int
-
-                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            downloadedBytes += bytesRead
-
-                            // 回调进度（如果有提供回调）
-                            if (onProgress != null && totalBytes > 0) {
-                                onProgress(downloadedBytes, totalBytes)
-                            }
-
-                            // 定期清理可能减少内存占用
-                            if (downloadedBytes % (1024 * 1024) == 0L) {
-                                System.gc()
+                        responseBody.byteStream().use { inputStream ->
+                            FileOutputStream(destinationFile).use { outputStream ->
+                                val buffer = ByteArray(64 * 1024)
+                                var bytesRead: Int
+                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                    outputStream.write(buffer, 0, bytesRead)
+                                    downloadedBytes += bytesRead
+                                    if (onProgress != null && totalBytes > 0) {
+                                        onProgress(downloadedBytes, totalBytes)
+                                    }
+                                }
+                                outputStream.flush()
                             }
                         }
-
-                        outputStream.flush()
-                        outputStream.close()
-                        inputStream.close()
-
-                        // 下载完成
-                        continuation.resume(Result.success(destinationFile))
+                        if (!continuation.isCancelled) {
+                            continuation.resume(Result.success(destinationFile))
+                        }
                     } catch (e: Exception) {
-                        continuation.resumeWithException(e)
+                        runCatching { destinationFile.delete() }
+                        if (!continuation.isCancelled) {
+                            continuation.resumeWithException(e)
+                        }
                     }
-                } ?: run {
-                    continuation.resumeWithException(IOException("Response body is null"))
                 }
             }
         })

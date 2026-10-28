@@ -129,7 +129,14 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
             Row(
               children: [
                 Expanded(
-                  child: _buildModeIcon(
+                  // 整个切换器是裸 GestureDetector + 纯图标：不补语义的话，
+                  // 读屏用户既不知道这是什么、也无法操作。
+                  child: Semantics(
+                    button: true,
+                    selected: _isVisibleModeSelected(ChatSurfaceMode.normal),
+                    label: context.trLegacy('对话'),
+                    onTap: () => widget.onChanged(ChatSurfaceMode.normal),
+                    child: _buildModeIcon(
                     isSelected: _isVisibleModeSelected(ChatSurfaceMode.normal),
                     child: widget.primaryAgentId?.trim().isNotEmpty == true
                         ? AgentBrandIcon(
@@ -148,9 +155,15 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
                             height: 16,
                           ),
                   ),
+                  ),
                 ),
                 Expanded(
-                  child: _buildModeIcon(
+                  child: Semantics(
+                    button: true,
+                    selected: _isVisibleModeSelected(ChatSurfaceMode.workspace),
+                    label: context.trLegacy('工作区'),
+                    onTap: () => widget.onChanged(ChatSurfaceMode.workspace),
+                    child: _buildModeIcon(
                     isSelected: _isVisibleModeSelected(ChatSurfaceMode.workspace),
                     child: SvgPicture.asset(
                       _workspaceIconAsset,
@@ -158,6 +171,7 @@ class _ChatModeSliderState extends State<ChatModeSlider> {
                       width: 16,
                       height: 16,
                     ),
+                  ),
                   ),
                 ),
               ],

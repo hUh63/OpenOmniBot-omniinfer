@@ -44,7 +44,10 @@ class CommonParamsInterceptor : Interceptor {
 
                 // 添加公共参数
                 for ((key, value) in commonParams) {
-                    urlBuilder.addQueryParameter(key, value)
+                    // setQueryParameter：同名参数去重。原来 add 会让业务侧已经带的
+                    // platform/version 再出现一次，严格校验签名或做参数白名单的
+                    // 第三方接口会直接 401。
+                    urlBuilder.setQueryParameter(key, value)
                 }
 
                 originalRequest.newBuilder()

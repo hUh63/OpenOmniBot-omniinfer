@@ -341,16 +341,27 @@ class AssistsMessageService {
           final Map<String, dynamic> data = Map<String, dynamic>.from(
             call.arguments,
           );
-          print(
-            'onChatMessage content: ${data['content']}, type: ${data['type']}',
-          );
-          _onChatTaskMessageCallBack?.call(
-            data['taskID'],
-            data['content'],
-            data['type'],
-          );
-          for (final callback in _onChatTaskMessageCallBacks) {
-            callback(data['taskID'], data['content'], data['type']);
+          // 不要再打印全量 content：流式输出时每条 delta 都会刷一行日志。
+          final singleCallback = _onChatTaskMessageCallBack;
+          if (singleCallback != null &&
+              !_onChatTaskMessageCallBacks.contains(singleCallback)) {
+            try {
+              singleCallback(data['taskID'], data['content'], data['type']);
+            } catch (error) {
+              print('onChatMessage single callback failed: $error');
+            }
+          }
+          // 快照遍历 + 逐个隔离：一个监听器抛异常不能把后面的监听器全带走
+          // （原来这里没有 try，流式消息会整体丢给第一个 reducer 的异常）。
+          for (final callback
+              in List<ChatTaskMessageCallBack>.from(
+            _onChatTaskMessageCallBacks,
+          )) {
+            try {
+              callback(data['taskID'], data['content'], data['type']);
+            } catch (error) {
+              print('onChatTaskMessage callback failed: $error');
+            }
           }
           break;
         case 'onChatMessageEnd':
@@ -360,12 +371,24 @@ class AssistsMessageService {
           final endTurnUsage = data['turnUsage'] != null
               ? Map<String, dynamic>.from(data['turnUsage'] as Map)
               : null;
-          _onChatTaskMessageEndCallBack?.call(
-            data['taskID'],
-            turnUsage: endTurnUsage,
-          );
-          for (final callback in _onChatTaskMessageEndCallBacks) {
-            callback(data['taskID'], turnUsage: endTurnUsage);
+          final singleEndCallback = _onChatTaskMessageEndCallBack;
+          if (singleEndCallback != null &&
+              !_onChatTaskMessageEndCallBacks.contains(singleEndCallback)) {
+            try {
+              singleEndCallback(data['taskID'], turnUsage: endTurnUsage);
+            } catch (error) {
+              print('onChatMessageEnd single callback failed: $error');
+            }
+          }
+          for (final callback
+              in List<ChatTaskMessageEndCallBack>.from(
+            _onChatTaskMessageEndCallBacks,
+          )) {
+            try {
+              callback(data['taskID'], turnUsage: endTurnUsage);
+            } catch (error) {
+              print('onChatTaskMessageEnd callback failed: $error');
+            }
           }
           break;
         case 'onDispatchStreamData':
@@ -425,8 +448,12 @@ class AssistsMessageService {
           break;
         case 'onAgentStreamEvent':
           final event = AgentStreamEvent.fromMap(call.arguments as Map?);
-          for (final callback in _onAgentStreamEventCallbacks) {
-            callback(event);
+          for (final callback in List.from(_onAgentStreamEventCallbacks)) {
+            try {
+              callback(event);
+            } catch (error) {
+              print('onAgentStreamEvent callback failed: $error');
+            }
           }
           break;
         case 'onScheduledTaskCancelled':
@@ -597,7 +624,7 @@ class AssistsMessageService {
         'id': btnId,
         'value': value,
         'isNeedPermission': isNeedPermission,
-      });
+      }).timeout(const Duration(seconds: 15));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('发送按钮点击事件失败: ${e.message}');
@@ -611,7 +638,7 @@ class AssistsMessageService {
       var result = await assistCore.invokeMethod(
         'cancelRunningTask',
         taskId == null ? null : {'taskId': taskId},
-      );
+      ).timeout(const Duration(seconds: 10));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('取消运行中任务失败: ${e.message}');
@@ -629,7 +656,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod(
         'stopAgentToolCall',
         <String, String>{'taskId': taskId, 'cardId': cardId},
-      );
+      ).timeout(const Duration(seconds: 10));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('停止工具调用失败: ${e.message}');
@@ -642,7 +669,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod(
         'retryAgentTask',
         <String, String>{'taskId': taskId},
-      );
+      ).timeout(const Duration(seconds: 15));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('retryAgentTask failed: ${e.message}');
@@ -655,7 +682,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod(
         'continueAgentTask',
         <String, String>{'taskId': taskId},
-      );
+      ).timeout(const Duration(seconds: 15));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('continueAgentTask failed: ${e.message}');
@@ -665,18 +692,25 @@ class AssistsMessageService {
 
   // cancel chat task
   static Future<bool> cancelChatTask({String? taskId}) async {
-    var result = await assistCore.invokeMethod(
-      'cancelChatTask',
-      taskId == null ? null : {'taskId': taskId},
-    );
-    return result == "SUCCESS";
+    try {
+      final result = await assistCore
+          .invokeMethod(
+            'cancelChatTask',
+            taskId == null ? null : {'taskId': taskId},
+          )
+          .timeout(const Duration(seconds: 10));
+      return result == "SUCCESS";
+    } catch (error) {
+      print('cancelChatTask failed: $error');
+      return false;
+    }
   }
 
   static Future<bool> copyToClipboard(String text) async {
     try {
       var result = await assistCore.invokeMethod('copyToClipboard', {
         'text': text,
-      });
+      }).timeout(const Duration(seconds: 10));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('复制到剪贴板失败: ${e.message}');
@@ -686,7 +720,7 @@ class AssistsMessageService {
 
   static Future<String?> getClipboardText() async {
     try {
-      final result = await assistCore.invokeMethod<String>('getClipboardText');
+      final result = await assistCore.invokeMethod<String>('getClipboardText').timeout(const Duration(seconds: 10));
       return result;
     } on PlatformException catch (e) {
       print('读取剪贴板失败: ${e.message}');
@@ -734,7 +768,7 @@ class AssistsMessageService {
       if (userAttachments.isNotEmpty) {
         args['userAttachments'] = userAttachments;
       }
-      final result = await assistCore.invokeMethod('createChatTask', args);
+      final result = await assistCore.invokeMethod('createChatTask', args).timeout(const Duration(seconds: 30));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('createChatTask failed: ${e.message}');
@@ -747,9 +781,12 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<List<dynamic>>(
         'getInstalledApplications',
-      );
+      ).timeout(const Duration(seconds: 20));
       if (result != null) {
-        return result.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+        return result
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
       }
       return [];
     } on PlatformException catch (e) {
@@ -764,9 +801,12 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<List<dynamic>>(
         'getInstalledApplicationsWithIconUpdate',
-      );
+      ).timeout(const Duration(seconds: 60));
       if (result != null) {
-        return result.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+        return result
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
       }
       return [];
     } on PlatformException catch (e) {
@@ -785,7 +825,7 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<List<dynamic>>(
         'listAgentExactAlarms',
-      );
+      ).timeout(const Duration(seconds: 15));
       if (result == null) return [];
       return result.map((item) {
         if (item is Map) {
@@ -805,7 +845,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'deleteAgentExactAlarm',
         {'alarmId': alarmId},
-      );
+      ).timeout(const Duration(seconds: 15));
       return result?['success'] == true;
     } on PlatformException catch (e) {
       print('删除应用内闹钟失败: ${e.message}');
@@ -850,7 +890,7 @@ class AssistsMessageService {
   /// 获取当前 nanoTime（毫秒级，System.nanoTime() / 1_000_000）
   static Future<int?> getNanoTime() async {
     try {
-      final result = await assistCore.invokeMethod<int>('getNanoTime');
+      final result = await assistCore.invokeMethod<int>('getNanoTime').timeout(const Duration(seconds: 10));
       return result;
     } on PlatformException catch (e) {
       print('获取nanoTime失败: ${e.message}');
@@ -868,7 +908,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<String>('postLLMChat', {
         'text': text,
         'model': model,
-      });
+      }).timeout(const Duration(seconds: 90));
       return result;
     } on PlatformException catch (e) {
       print('调用LLM chat失败: ${e.message}');
@@ -894,7 +934,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<String>(
         'generateMemoryGreeting',
         {'model': model, 'records': payloadRecords},
-      );
+      ).timeout(const Duration(seconds: 45));
       return result;
     } on PlatformException catch (e) {
       print('生成记忆中心问候语失败: ${e.message}');
@@ -959,7 +999,7 @@ class AssistsMessageService {
       }
       final result = await assistCore.invokeMethod('createAgentTask', {
         ...args,
-      });
+      }).timeout(const Duration(seconds: 30));
       return result == "SUCCESS";
     } on PlatformException catch (e) {
       print('创建 Agent 任务失败: ${e.message}');
@@ -981,7 +1021,7 @@ class AssistsMessageService {
             if (modelOverride != null) 'modelOverride': modelOverride,
             if (reasoningEffort != null && reasoningEffort.trim().isNotEmpty)
               'reasoningEffort': reasoningEffort.trim(),
-          });
+          }).timeout(const Duration(seconds: 120));
       return Map<String, dynamic>.from(result ?? const {});
     } on PlatformException catch (e) {
       print('手动压缩上下文失败: ${e.message}');
@@ -1000,7 +1040,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'upsertWorkspaceScheduledTask',
         {'task': task},
-      );
+      ).timeout(const Duration(seconds: 20));
       if (result == null) return null;
       return result.map((k, v) => MapEntry(k.toString(), v));
     } on PlatformException catch (e) {
@@ -1014,7 +1054,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'deleteWorkspaceScheduledTask',
         {'taskId': taskId},
-      );
+      ).timeout(const Duration(seconds: 20));
       if (result == null) return false;
       return result['deleted'] == true;
     } on PlatformException catch (e) {
@@ -1030,7 +1070,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'syncWorkspaceScheduledTasks',
         {'tasks': tasks},
-      );
+      ).timeout(const Duration(seconds: 20));
       if (result == null) return 0;
       final count = result['count'];
       if (count is int) return count;
@@ -1046,7 +1086,7 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<List<dynamic>>(
         'agentSkillList',
-      );
+      ).timeout(const Duration(seconds: 15));
       return (result ?? const [])
           .whereType<Map>()
           .map((item) => item.map((k, v) => MapEntry(k.toString(), v)))
@@ -1064,7 +1104,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'agentSkillInstall',
         {'sourcePath': sourcePath},
-      );
+      ).timeout(const Duration(seconds: 60));
       if (result == null) return null;
       return result.map((k, v) => MapEntry(k.toString(), v));
     } on PlatformException catch (e) {
@@ -1081,7 +1121,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'agentSkillSetEnabled',
         {'skillId': skillId, 'enabled': enabled},
-      );
+      ).timeout(const Duration(seconds: 20));
       if (result == null) return null;
       return result.map((k, v) => MapEntry(k.toString(), v));
     } on PlatformException catch (e) {
@@ -1095,7 +1135,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'agentSkillDelete',
         {'skillId': skillId},
-      );
+      ).timeout(const Duration(seconds: 30));
       if (result == null) return false;
       return result['deleted'] == true;
     } on PlatformException catch (e) {
@@ -1111,7 +1151,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'agentSkillInstallBuiltin',
         {'skillId': skillId},
-      );
+      ).timeout(const Duration(seconds: 60));
       if (result == null) return null;
       return result.map((k, v) => MapEntry(k.toString(), v));
     } on PlatformException catch (e) {
@@ -1124,7 +1164,7 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
         'agentSkillSyncOfficialRepository',
-      );
+      ).timeout(const Duration(seconds: 120));
       if (result == null) return null;
       return result.map((k, v) => MapEntry(k.toString(), v));
     } on PlatformException catch (e) {
@@ -1138,7 +1178,7 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<String>('openAPPMarket', {
         'packageName': packageName,
-      });
+      }).timeout(const Duration(seconds: 15));
       return result;
     } on PlatformException catch (e) {
       print('调用openAPPMarket失败: ${e.message}');
@@ -1151,7 +1191,7 @@ class AssistsMessageService {
     try {
       final result = await assistCore.invokeMethod<List<dynamic>>(
         'getDeskTopPackageName',
-      );
+      ).timeout(const Duration(seconds: 15));
       if (result != null) {
         return result.map((e) => e.toString()).toList();
       }
@@ -1169,7 +1209,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<String>(
         'setPreventScreenSleepDuringTasksEnabled',
         {'enabled': enabled},
-      );
+      ).timeout(const Duration(seconds: 10));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       print('Failed to sync prevent sleep setting: ${e.message}');
@@ -1182,7 +1222,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod<String>(
         'setTaskCompletionNotificationEnabled',
         {'enabled': enabled},
-      );
+      ).timeout(const Duration(seconds: 10));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       print(
@@ -1203,7 +1243,7 @@ class AssistsMessageService {
             'conversationId': conversationId ?? 0,
             'visible': visible,
             if (conversationMode != null) 'mode': conversationMode,
-          });
+          }).timeout(const Duration(seconds: 10));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       print('Failed to sync visible chat conversation: ${e.message}');
@@ -1224,7 +1264,7 @@ class AssistsMessageService {
             'message': message,
             if (conversationId != null) 'conversationId': conversationId,
             if (conversationMode != null) 'conversationMode': conversationMode,
-          });
+          }).timeout(const Duration(seconds: 10));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       print('Failed to show task completion notification: ${e.message}');
@@ -1238,7 +1278,7 @@ class AssistsMessageService {
       final result = await assistCore.invokeMethod(
         'navigateToMainEngineRoute',
         {'route': route},
-      );
+      ).timeout(const Duration(seconds: 10));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       print('跳转到主引擎路由失败: ${e.message}');
@@ -1286,7 +1326,7 @@ class AssistsMessageService {
   /// 授权完成后重新打开ChatBot
   static Future<bool> reopenChatBotAfterAuth() async {
     try {
-      final result = await assistCore.invokeMethod('reopenChatBotAfterAuth');
+      final result = await assistCore.invokeMethod('reopenChatBotAfterAuth').timeout(const Duration(seconds: 20));
       return result == 'SUCCESS';
     } on PlatformException catch (e) {
       print('重新打开ChatBot失败: ${e.message}');
@@ -1296,7 +1336,17 @@ class AssistsMessageService {
 
   /// 检查陪伴任务是否正在运行
   static Future<bool> isCompanionTaskRunning() async {
-    return await assistCore.invokeMethod('isCompanionTaskRunning', {});
+    try {
+      // 原来 return await invokeMethod(...) 直接动态转 bool：原生返回 null/非 bool
+      // 时抛 TypeError（不被 on PlatformException 接住），而且没有超时。
+      final result = await assistCore
+          .invokeMethod<bool>('isCompanionTaskRunning', {})
+          .timeout(const Duration(seconds: 10));
+      return result ?? false;
+    } catch (error) {
+      print('isCompanionTaskRunning failed: $error');
+      return false;
+    }
   }
 
   /// 设置任务完成回调
@@ -1306,13 +1356,27 @@ class AssistsMessageService {
 
   // 创建陪伴任务
   static Future<bool> createCompanionTask() async {
-    var result = await assistCore.invokeMethod('createCompanionTask');
-    return result == "SUCCESS";
+    try {
+      final result = await assistCore
+          .invokeMethod('createCompanionTask')
+          .timeout(const Duration(seconds: 20));
+      return result == "SUCCESS";
+    } catch (error) {
+      print('createCompanionTask failed: $error');
+      return false;
+    }
   }
 
   //取消陪伴任务
   static Future<bool> cancelTask() async {
-    var result = await assistCore.invokeMethod('cancelTask');
-    return result == "SUCCESS";
+    try {
+      final result = await assistCore
+          .invokeMethod('cancelTask')
+          .timeout(const Duration(seconds: 10));
+      return result == "SUCCESS";
+    } catch (error) {
+      print('cancelTask failed: $error');
+      return false;
+    }
   }
 }
