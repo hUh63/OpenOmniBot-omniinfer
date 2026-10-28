@@ -109,8 +109,8 @@ class ChatAppBar extends StatelessWidget {
   final bool showWorkspacePaneButton;
   final VoidCallback? onWorkspacePaneTap;
   final Key? tutorialMenuAnchorKey;
-  final Key? tutorialPetAnchorKey;
-  final Key? tutorialIslandAnchorKey;
+  /// 首用引导第 3 步的锚点（本分支挂在宠物按钮上；上游挂在「对话选项」更多按钮上）。
+  final Key? tutorialActionsAnchorKey;
   final Key? tutorialModeAnchorKey;
 
   const ChatAppBar({
@@ -154,8 +154,7 @@ class ChatAppBar extends StatelessWidget {
     this.showWorkspacePaneButton = false,
     this.onWorkspacePaneTap,
     this.tutorialMenuAnchorKey,
-    this.tutorialPetAnchorKey,
-    this.tutorialIslandAnchorKey,
+    this.tutorialActionsAnchorKey,
     this.tutorialModeAnchorKey,
   });
 
@@ -281,7 +280,7 @@ class ChatAppBar extends StatelessWidget {
                       bottom: 0,
                       width: leftActionRowWidth,
                       child: KeyedSubtree(
-                        key: tutorialPetAnchorKey,
+                        key: tutorialActionsAnchorKey,
                         child: _ChatAppBarPetButton(
                           isLoading: isPetOpening,
                           isShowing: isPetShowing,
@@ -293,7 +292,6 @@ class ChatAppBar extends StatelessWidget {
                     ),
                   Center(
                     child: KeyedSubtree(
-                      key: tutorialIslandAnchorKey,
                       child: SizedBox(
                         key: const ValueKey('chat-app-bar-island'),
                         width: islandWidth,

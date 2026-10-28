@@ -3,6 +3,7 @@ package cn.com.omnimind.baselib.http
 import android.annotation.SuppressLint
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import cn.com.omnimind.baselib.BaseApplication
 import cn.com.omnimind.baselib.http.interceptor.CommonParamsInterceptor
 import cn.com.omnimind.baselib.http.interceptor.HeaderInterceptor
 import cn.com.omnimind.baselib.service.DeviceInfoService
@@ -90,6 +91,13 @@ object OkHttpManager {
         )
     }
 
+    /** 真实 versionName；拿不到（早期初始化/单元测试）时退回 1.0.0。 */
+    private fun resolveAppVersionName(): String {
+        return runCatching {
+            DeviceInfoService.getAppVersion(BaseApplication.instance)["versionName"]?.toString()
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.0.0"
+    }
+
     private fun getInstance(): OkHttpClient {
         return mInstance ?: synchronized(this) {
             mInstance ?: buildClient().also { mInstance = it }
@@ -102,7 +110,10 @@ object OkHttpManager {
             .readTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
             .writeTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
             .addInterceptor(HeaderInterceptor())
-            .addInterceptor(CommonParamsInterceptor())
+            .addInterceptor(
+                // 版本号取真实值：硬编码 1.0.0 会让服务端按错误版本下发配置/灰度。
+                CommonParamsInterceptor(appVersion = resolveAppVersionName())
+            )
 //            .addInterceptor(LogInterceptor())
 
         return builder.build()

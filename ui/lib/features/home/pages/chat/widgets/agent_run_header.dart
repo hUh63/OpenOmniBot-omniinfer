@@ -57,7 +57,12 @@ class AgentRunHeader extends StatefulWidget {
 
 class _AgentRunHeaderState extends State<AgentRunHeader> {
   Timer? _elapsedTimer;
-  int _elapsedSeconds = 0;
+  /// 计时用 ValueNotifier：每秒只重绘「运行中 Xs」这一行文本。
+  ///
+  /// 原来是 Timer 里直接 setState —— 一个页面有 N 个 running run 就是 N 个定时器
+  /// 每秒各重建一次整棵 header（头像/按钮/动画），秒级抖动很明显。
+  final ValueNotifier<int> _elapsed = ValueNotifier<int>(0);
+  int get _elapsedSeconds => _elapsed.value;
 
   /// Local-model requests waiting behind the newest one. Subscribed here rather than threaded
   /// through every caller: only the header needs it, and the event channel is silent when the
@@ -68,7 +73,7 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
   @override
   void initState() {
     super.initState();
-    _elapsedSeconds = _resolveElapsedSeconds();
+    _elapsed.value = _resolveElapsedSeconds();
     _syncTimer();
     _inferenceQueueSubscription = MnnLocalModelsService.inferenceQueueStream.listen(
       (event) {
@@ -87,7 +92,7 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
     if (oldWidget.startedAt != widget.startedAt ||
         oldWidget.status != widget.status ||
         oldWidget.finishedAt != widget.finishedAt) {
-      _elapsedSeconds = _resolveElapsedSeconds();
+      _elapsed.value = _resolveElapsedSeconds();
       _syncTimer();
     }
   }
@@ -96,6 +101,7 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
   void dispose() {
     _inferenceQueueSubscription?.cancel();
     _elapsedTimer?.cancel();
+    _elapsed.dispose();
     super.dispose();
   }
 
@@ -107,12 +113,8 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
     }
     _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      setState(() {
-        _elapsedSeconds = math.max(
-          _elapsedSeconds + 1,
-          _resolveElapsedSeconds(),
-        );
-      });
+      final next = math.max(_elapsed.value + 1, _resolveElapsedSeconds());
+      if (next != _elapsed.value) _elapsed.value = next;
     });
   }
 
@@ -129,17 +131,6 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
         Localizations.maybeLocaleOf(context)?.languageCode == 'en';
     final running = widget.isRunning;
     final canToggleExpanded = !running && widget.onToggleExpanded != null;
-    final label = running
-        ? (widget.activeToolLabel?.trim().isNotEmpty == true
-              ? '${widget.activeToolLabel} · ${_elapsedSeconds}s'
-              : (_queuedAhead > 0
-                    ? (isEnglish
-                          ? 'Queued (${_queuedAhead} ahead) · ${_elapsedSeconds}s'
-                          : '排队中（前面 $_queuedAhead 个）· ${_elapsedSeconds}s')
-                    : (isEnglish
-                          ? 'Processing ${_elapsedSeconds}s'
-                          : '正在处理 ${_elapsedSeconds}s')))
-        : _finishedLabel(isEnglish);
     final labelColor = running
         ? palette.textTertiary
         : (widget.expanded ? palette.textSecondary : palette.textTertiary);
@@ -152,22 +143,28 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
       fontFamily: 'PingFang SC',
     );
 
-    final Widget labelWidget = running
-        ? ShimmeringStatusText(
-            baseColor: labelColor,
-            child: Text(
-              label,
-              key: const ValueKey('acp-processing-label'),
-              style: textStyle,
-            ),
-          )
-        : Text(
-            label,
-            key: const ValueKey('acp-processed-label'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textStyle,
-          );
+    final Widget labelWidget = ValueListenableBuilder<int>(
+      valueListenable: _elapsed,
+      builder: (context, elapsedSeconds, _) {
+        final label = _labelFor(elapsedSeconds, isEnglish, running);
+        return running
+            ? ShimmeringStatusText(
+                baseColor: labelColor,
+                child: Text(
+                  label,
+                  key: const ValueKey('acp-processing-label'),
+                  style: textStyle,
+                ),
+              )
+            : Text(
+                label,
+                key: const ValueKey('acp-processed-label'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: textStyle,
+              );
+      },
+    );
 
     final row = Row(
       mainAxisSize: MainAxisSize.min,
@@ -250,14 +247,31 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
     );
   }
 
-  String _finishedLabel(bool isEnglish) {
+  String _finishedLabel(int elapsedSeconds, bool isEnglish) {
     final base = widget.status == AgentRunStatus.failed
         ? (isEnglish ? 'Failed' : '执行失败')
         : widget.status == AgentRunStatus.cancelled
         ? (isEnglish ? 'Cancelled' : '已取消')
         : (isEnglish ? 'Processed' : '已处理');
-    final elapsed = _formatElapsed(_elapsedSeconds);
+    final elapsed = _formatElapsed(elapsedSeconds);
     return elapsed.isEmpty ? base : '$base  $elapsed';
+  }
+
+  /// 运行中/已结束的状态文案（由 ValueListenableBuilder 按当前秒数调用）。
+  String _labelFor(int elapsedSeconds, bool isEnglish, bool running) {
+    if (!running) return _finishedLabel(elapsedSeconds, isEnglish);
+    final toolLabel = widget.activeToolLabel?.trim();
+    if (toolLabel != null && toolLabel.isNotEmpty) {
+      return '$toolLabel · ${elapsedSeconds}s';
+    }
+    if (_queuedAhead > 0) {
+      return isEnglish
+          ? 'Queued ($_queuedAhead ahead) · ${elapsedSeconds}s'
+          : '排队中（前面 $_queuedAhead 个）· ${elapsedSeconds}s';
+    }
+    return isEnglish
+        ? 'Processing ${elapsedSeconds}s'
+        : '正在处理 ${elapsedSeconds}s';
   }
 }
 

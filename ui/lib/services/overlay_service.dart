@@ -8,17 +8,20 @@ class OverlayService {
     'cn.com.omnimind.bot/overlay',
   );
 
+  /// 悬浮层操作都是点击/生命周期回调：原生不回包时会永久挂起。
+  static const Duration _invokeTimeout = Duration(seconds: 10);
+
   /// 显示消息提示（在MessageView中显示）
   /// [message] 要显示的消息内容
   static Future<bool> showMessage(String message) async {
     try {
       final result = await _channel.invokeMethod('showMessage', {
         'message': message,
-      });
+      }).timeout(_invokeTimeout);
       return result == true;
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('显示消息失败: ${e.message}');
+        print('显示消息失败: $e');
       }
       return false;
     }
@@ -32,11 +35,11 @@ class OverlayService {
       final result = await _channel.invokeMethod<bool>(
         'setPetOverlayImagePath',
         {'path': path, 'selectedId': selectedId},
-      );
+      ).timeout(_invokeTimeout);
       return result == true;
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('Failed to set pet overlay image: ${e.message}');
+        print('Failed to set pet overlay image: $e');
       }
       return false;
     }
@@ -44,11 +47,11 @@ class OverlayService {
 
   static Future<bool> showPetOverlay() async {
     try {
-      final result = await _channel.invokeMethod<bool>('showPetOverlay');
+      final result = await _channel.invokeMethod<bool>('showPetOverlay').timeout(_invokeTimeout);
       return result == true;
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('Failed to show pet overlay: ${e.message}');
+        print('Failed to show pet overlay: $e');
       }
       return false;
     }
@@ -59,11 +62,11 @@ class OverlayService {
       final result = await _channel.invokeMethod<bool>('playPetAction', {
         'action': action,
         'loop': loop,
-      });
+      }).timeout(_invokeTimeout);
       return result == true;
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('Failed to play pet action: ${e.message}');
+        print('Failed to play pet action: $e');
       }
       return false;
     }
@@ -71,11 +74,11 @@ class OverlayService {
 
   static Future<bool> hidePetOverlay() async {
     try {
-      final result = await _channel.invokeMethod<bool>('hidePetOverlay');
+      final result = await _channel.invokeMethod<bool>('hidePetOverlay').timeout(_invokeTimeout);
       return result == true;
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('Failed to hide pet overlay: ${e.message}');
+        print('Failed to hide pet overlay: $e');
       }
       return false;
     }
@@ -83,11 +86,11 @@ class OverlayService {
 
   static Future<bool> isPetOverlayShowing() async {
     try {
-      final result = await _channel.invokeMethod<bool>('isPetOverlayShowing');
+      final result = await _channel.invokeMethod<bool>('isPetOverlayShowing').timeout(_invokeTimeout);
       return result == true;
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('Failed to query pet overlay state: ${e.message}');
+        print('Failed to query pet overlay state: $e');
       }
       return false;
     }
@@ -97,11 +100,11 @@ class OverlayService {
     try {
       final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
         'getPetOverlayState',
-      );
+      ).timeout(_invokeTimeout);
       return Map<String, dynamic>.from(result ?? const {});
-    } on PlatformException catch (e) {
+    } catch (e) {
       if (kDebugMode) {
-        print('Failed to get pet overlay state: ${e.message}');
+        print('Failed to get pet overlay state: $e');
       }
       return const {};
     }

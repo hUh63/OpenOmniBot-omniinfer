@@ -165,8 +165,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   final GlobalKey _slashCommandStripKey = GlobalKey();
   final GlobalKey _toolActivityStripKey = GlobalKey();
   final GlobalKey _firstUseTourMenuAnchorKey = GlobalKey();
-  final GlobalKey _firstUseTourPetAnchorKey = GlobalKey();
-  final GlobalKey _firstUseTourIslandAnchorKey = GlobalKey();
+  final GlobalKey _firstUseTourActionsAnchorKey = GlobalKey();
   final GlobalKey _firstUseTourModeAnchorKey = GlobalKey();
   final GlobalKey _firstUseTourModelAnchorKey = GlobalKey();
 
@@ -359,9 +358,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   GlobalKey get _firstUseTourAnchorKey => switch (_firstUseTourStep) {
     0 => _firstUseTourMenuAnchorKey,
     1 => _firstUseTourModeAnchorKey,
-    2 => _firstUseTourPetAnchorKey,
-    3 => _firstUseTourIslandAnchorKey,
-    4 => _firstUseTourModelAnchorKey,
+    2 => _firstUseTourActionsAnchorKey,
+    ChatSpotlightTour.modelStep => _firstUseTourModelAnchorKey,
     _ => _inputAreaKey,
   };
 
@@ -371,6 +369,9 @@ abstract class _ChatPageStateBase extends State<ChatPage>
         _firstUseTourStep >= ChatSpotlightTour.stepCount - 1) {
       return;
     }
+    if (_firstUseTourStep + 1 == ChatSpotlightTour.modelStep) {
+      _requestComposerFocus();
+    }
     setState(() {
       _firstUseTourStep += 1;
     });
@@ -379,6 +380,11 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   void _handleFirstUseTourBack() {
     if (!mounted || !_isFirstUseTourActive) return;
     if (_firstUseTourStep > 0) {
+      if (_firstUseTourStep - 1 == ChatSpotlightTour.modelStep) {
+        _requestComposerFocus();
+      } else if (_firstUseTourStep - 1 < ChatSpotlightTour.modelStep) {
+        _dismissChatInputFocus();
+      }
       setState(() {
         _firstUseTourStep -= 1;
       });

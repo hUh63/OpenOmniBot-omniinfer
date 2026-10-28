@@ -5,7 +5,10 @@ import okhttp3.Interceptor
 import okhttp3.Response
 import java.io.IOException
 
-class CommonParamsInterceptor : Interceptor {
+class CommonParamsInterceptor(
+    /** 真实 App 版本号（由宿主注入），不再硬编码 1.0.0。 */
+    private val appVersion: String = "1.0.0",
+) : Interceptor {
     @Throws(IOException::class)
     override fun intercept(chain: Interceptor.Chain): Response {
         val originalRequest = chain.request()
@@ -63,7 +66,7 @@ class CommonParamsInterceptor : Interceptor {
         val commonParams = HashMap<String, String>()
         // 添加公共参数，如设备ID、版本号等
         commonParams["platform"] = "android"
-        commonParams["version"] = "1.0.0"
+        commonParams["version"] = appVersion
         // TODO: 添加更多公共参数
         return commonParams
     }
