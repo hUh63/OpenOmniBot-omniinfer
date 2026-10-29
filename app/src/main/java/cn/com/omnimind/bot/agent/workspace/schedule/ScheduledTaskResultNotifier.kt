@@ -13,6 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.activity.MainActivity
+import cn.com.omnimind.bot.util.TaskCompletionNavigator
 
 /**
  * 后台定时任务跑完/失败时的通知。
@@ -65,8 +66,16 @@ object ScheduledTaskResultNotifier {
                 context,
                 taskId.hashCode(),
                 Intent(context, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    )
                     putExtra("scheduledTaskId", taskId)
+                    // MainActivity 只会按 "route" 里的路由跳转；只放 conversationId/taskId
+                    // 等于点了通知只是把 App 拉到前台，看不到刚跑完的结果。
+                    putExtra("route", "/home/chat")
+                    putExtra("needClear", false)
                 },
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
@@ -121,6 +130,11 @@ object ScheduledTaskResultNotifier {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 putExtra("conversationId", conversationId)
                 putExtra("scheduledTaskId", taskId)
+                putExtra(
+                    "route",
+                    TaskCompletionNavigator.buildChatRoute(conversationId, null)
+                )
+                putExtra("needClear", false)
             }
             val pendingIntent = PendingIntent.getActivity(
                 context,

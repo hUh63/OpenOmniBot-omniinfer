@@ -170,6 +170,9 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         TaskRuntimeSettings.detachActivity(this)
+        // 系统保存对话框开着时 Activity 被回收 → 永远不会走到 onActivityResult，
+        // 静态 pending 结果要在这里复位，否则之后每次保存都直接 BUSY。
+        FileSaveChannel.resetPending()
         super.onDestroy()
     }
 

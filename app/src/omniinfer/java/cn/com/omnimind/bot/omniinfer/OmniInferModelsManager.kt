@@ -492,6 +492,9 @@ object OmniInferModelsManager {
         // Cancel an in-flight download too: dropping the map entry alone would leave the
         // task writing to .part files that were just deleted (and holding their disk space).
         activeDownloads.remove(modelId)?.cancel()
+        // 取消的下载不会走 DownloadTask 的成功/异常分支，前台服务与「正在下载」通知
+        // 会一直常驻；stopIfIdle 内部按 activeDownloads 是否为空判断，安全幂等。
+        appContext?.let { ModelDownloadForegroundService.stopIfIdle(it) }
         emitConfigChanged()
         appContext?.let {
             OmniInferBuiltinProviderRefresher.refreshAsync(it, "llama_delete:$modelId")
@@ -1060,6 +1063,12 @@ object OmniInferModelsManager {
                             )
                         )
                     }
+                    OmniInferModelsManager.appContext?.let {
+                        ModelDownloadForegroundService.stopIfIdle(it)
+                    }
+                } finally {
+                    // 取消分支走 return@launch，不会经过成功/异常处理，必须在这里兜一次，
+                    // 否则前台服务与「正在下载 N 个模型」通知永久不消失。
                     OmniInferModelsManager.appContext?.let {
                         ModelDownloadForegroundService.stopIfIdle(it)
                     }

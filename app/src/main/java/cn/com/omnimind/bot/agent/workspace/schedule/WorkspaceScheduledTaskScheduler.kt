@@ -39,6 +39,25 @@ class WorkspaceScheduledTaskScheduler(
         private const val LIST_PREFIX = "VGhpcyBpcyB0aGUgcHJlZml4IGZvciBhIGxpc3Qu"
         private const val JSON_LIST_PREFIX = "$LIST_PREFIX!"
         private const val SUBAGENT_MODE = "subagent"
+        private const val AGENT_RUN_LISTENER_KEY = "workspace-scheduler"
+
+        /**
+         * 进程内只允许一个 bridge。Receiver 每次广播都会新建 scheduler 实例，若每个实例
+         * 各自用同一个固定 key 注册监听器，后注册的会把前一个从 AgentRuntimeManager 里覆盖掉：
+         * 先触发的 run 再也收不到事件 —— 结果通知不发、会话一直显示运行中。
+         * 共用单例既避免互相覆盖，也不会累积泄漏监听器。
+         */
+        @Volatile
+        private var sharedBridge: WebAgentRunBridge? = null
+
+        private fun sharedAgentRunBridge(context: Context): WebAgentRunBridge =
+            sharedBridge ?: synchronized(this) {
+                sharedBridge ?: WebAgentRunBridge(
+                    context = context.applicationContext,
+                    manager = AgentRuntimeManager.getInstance(context.applicationContext),
+                    listenerKey = AGENT_RUN_LISTENER_KEY,
+                ).also { sharedBridge = it }
+            }
     }
 
     private data class StoredTask(
@@ -62,15 +81,9 @@ class WorkspaceScheduledTaskScheduler(
     private val appContext = context.applicationContext
     private val gson = Gson()
     private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val agentRunBridge by lazy {
-        WebAgentRunBridge(
-            context = appContext,
-            manager = AgentRuntimeManager.getInstance(appContext),
-            // 与 webchat / IM / MCP 的 bridge 分开注册：同一个 key 会被后来者覆盖，
-            // 被覆盖的一方收不到 agent 事件，run 状态会永远停在未完成。
-            listenerKey = "workspace-scheduler",
-        )
-    }
+    /** 与 webchat / IM / MCP 的 bridge 分开注册，且全进程共用（见 sharedAgentRunBridge）。 */
+    private val agentRunBridge: WebAgentRunBridge
+        get() = sharedAgentRunBridge(appContext)
 
     /** Model-facing creation owns the new identity; sync/import retains upsert. */
     fun createTask(rawTask: Map<String, Any?>): Map<String, Any?> {
@@ -267,6 +280,16 @@ class WorkspaceScheduledTaskScheduler(
             upsertTaskInFlutterStorage(updated)
             if (nextExecution != null) {
                 scheduleAlarm(updated)
+            }
+            if (executeFailed && updated.notificationEnabled) {
+                // 每日任务失败也必须让用户知道：否则任务列表一直显示「启用中」，
+                // 结果会话永远空的，用户没有任何线索。
+                ScheduledTaskResultNotifier.notifyProblem(
+                    context = appContext,
+                    taskId = updated.taskId,
+                    title = updated.title,
+                    summary = "每日任务本次执行失败，已安排下次重试。打开应用查看详情。"
+                )
             }
         } else if (executeFailed) {
             // 一次性任务执行失败时不能走「成功即删除」那段：任务会凭空消失、

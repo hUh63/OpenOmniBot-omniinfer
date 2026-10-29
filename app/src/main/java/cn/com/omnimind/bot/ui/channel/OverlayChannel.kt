@@ -9,6 +9,11 @@ import cn.com.omnimind.uikit.loader.cat.DraggableBallInstance
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Overlay通道 - 处理Flutter与Android Overlay之间的通信
@@ -25,6 +30,7 @@ class OverlayChannel {
 
     private var methodChannel: MethodChannel? = null
     private var appContext: Context? = null
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun onCreate(context: Context) {
         appContext = context.applicationContext
@@ -77,7 +83,13 @@ class OverlayChannel {
                 result.success(DraggableBallInstance.isShowing())
             }
             "getPetOverlayState" -> {
-                result.success(getPetOverlayState())
+                // getPetOverlayState() 内部会 ensureRuntimeDirectories()，那是整树复制/迁移
+                // 工作区的重活（App.onCreate 里同一个调用被专门挪到了后台线程）。
+                // MethodChannel 回调跑在主线程，首次进入背景设置页会直接 ANR。
+                ioScope.launch {
+                    val state = getPetOverlayState()
+                    withContext(Dispatchers.Main) { result.success(state) }
+                }
             }
             else -> {
                 result.notImplemented()

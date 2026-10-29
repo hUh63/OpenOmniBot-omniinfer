@@ -16,12 +16,19 @@ class WorkspaceScheduleBootReceiver : BroadcastReceiver() {
         ) {
             return
         }
-        runCatching {
-            WorkspaceMemoryRollupScheduler(context).ensureScheduledIfEnabled()
-            WorkspaceScheduledTaskScheduler(context).rescheduleAllEnabled()
-            AgentAlarmToolService(context).reschedulePersistedExactRemindersIfPermitted()
-        }.onFailure {
-            OmniLog.e("WorkspaceScheduleBootReceiver", "reschedule failed: ${it.message}")
-        }
+        // 三件事互相独立，必须各自兜底：共用一次 runCatching 时，前面抛异常（如记忆
+        // 汇总重排失败）会让后面的提醒闹钟恢复被整段跳过 —— 重启后闹钟永久不再响。
+        runCatching { WorkspaceMemoryRollupScheduler(context).ensureScheduledIfEnabled() }
+            .onFailure {
+                OmniLog.e("WorkspaceScheduleBootReceiver", "memory rollup reschedule failed: ${it.message}")
+            }
+        runCatching { WorkspaceScheduledTaskScheduler(context).rescheduleAllEnabled() }
+            .onFailure {
+                OmniLog.e("WorkspaceScheduleBootReceiver", "scheduled task reschedule failed: ${it.message}")
+            }
+        runCatching { AgentAlarmToolService(context).reschedulePersistedExactRemindersIfPermitted() }
+            .onFailure {
+                OmniLog.e("WorkspaceScheduleBootReceiver", "exact alarm reschedule failed: ${it.message}")
+            }
     }
 }

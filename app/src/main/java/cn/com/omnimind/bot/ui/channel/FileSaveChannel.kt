@@ -45,6 +45,22 @@ class FileSaveChannel {
         @Volatile
         private var pendingSourcePath: String? = null
 
+        /**
+         * 系统保存对话框期间宿主 Activity 被回收时不会有 onActivityResult，
+         * 静态 pending 结果必须主动复位：否则本进程内之后每次「保存到本机」都会
+         * 直接返回 BUSY 失败，只能杀进程恢复。
+         */
+        fun resetPending() {
+            val pending = pendingResult
+            pendingResult = null
+            pendingSourcePath = null
+            if (pending != null) {
+                runCatching {
+                    pending.error("CANCELLED", "保存流程被系统中断，请重试", null)
+                }
+            }
+        }
+
         fun onActivityResult(
             activity: Activity,
             requestCode: Int,
