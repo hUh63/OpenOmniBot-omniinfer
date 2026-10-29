@@ -165,8 +165,11 @@ class AccountRepository(
     }
 
     suspend fun logout() {
-        val tokens = tokenStore.read()
         try {
+            // read() 本身可能抛（加密文件无法解密：Keystore 密钥失效/换机恢复）。
+            // 它必须在 try 内且单独兜住，否则 finally 里的本地清理会被整段跳过 ——
+            // token 与 AI 模式缓存永远清不掉，登出/重登全部失效，只能清应用数据。
+            val tokens = runCatching { tokenStore.read() }.getOrNull()
             if (tokens != null && cloudServiceAccessProvider().allowed) {
                 remote.logout(tokens.refreshToken)
             }

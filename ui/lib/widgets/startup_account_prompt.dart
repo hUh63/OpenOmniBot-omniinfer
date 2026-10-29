@@ -121,7 +121,9 @@ class _StartupAccountPromptState extends State<StartupAccountPrompt> {
           onAuthenticated: () => Navigator.of(dialogContext).pop(true),
         ),
       );
-      if (dialogResult != true) {
+      // 只有用户明确点「关闭并不再提醒」（返回 false）才写永久标志。
+      // 蒙层/返回键关闭返回 null，误触一次就永久失去启动登录引导。
+      if (dialogResult == false) {
         await StorageService.setBool(
           StorageKeys.startupAccountPromptDismissed,
           true,

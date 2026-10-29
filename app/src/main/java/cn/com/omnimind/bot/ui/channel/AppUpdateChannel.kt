@@ -8,6 +8,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -16,8 +17,32 @@ class AppUpdateChannel {
     private var context: Context? = null
     private var channel: MethodChannel? = null
 
+    // 下载可能在用户退出页面后继续跑几分钟，用独立 scope；不绑定 Activity 生命周期。
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     fun onCreate(context: Context) {
-        this.context = context
+        // 只存 Application：FlutterEngine 常驻（App.cachedMainEngine），存 Activity 会让
+        // 已销毁的 MainActivity 及其 View 树被闭包链一直引用。
+        this.context = context.applicationContext
+    }
+
+    /** 轻查询也走 IO：SharedPreferences 首次读盘与 PackageManager IPC 都是同步阻塞调用。 */
+    private fun runOnIo(result: MethodChannel.Result, block: () -> Any?) {
+        scope.launch {
+            val outcome = runCatching(block)
+            withContext(Dispatchers.Main) {
+                outcome
+                    .onSuccess { result.success(it) }
+                    .onFailure { error ->
+                        OmniLog.e("AppUpdateChannel", "App update query failed", error)
+                        result.error(
+                            "APP_UPDATE_FAILED",
+                            error.message ?: error.javaClass.simpleName,
+                            null
+                        )
+                    }
+            }
+        }
     }
 
     fun setChannel(flutterEngine: FlutterEngine) {
@@ -35,26 +60,28 @@ class AppUpdateChannel {
         }
 
         when (call.method) {
-            "getBetaOptIn" -> {
-                result.success(AppUpdateManager.isBetaOptIn(safeContext))
+            "getBetaOptIn" -> runOnIo(result) {
+                AppUpdateManager.isBetaOptIn(safeContext)
             }
 
-            "getApkDownloadSource" -> {
-                result.success(AppUpdateManager.getApkDownloadSource(safeContext).value)
+            "getApkDownloadSource" -> runOnIo(result) {
+                AppUpdateManager.getApkDownloadSource(safeContext).value
             }
 
             "setBetaOptIn" -> {
                 val enabled = call.argument<Boolean>("enabled") == true
-                result.success(AppUpdateManager.setBetaOptIn(safeContext, enabled))
+                runOnIo(result) { AppUpdateManager.setBetaOptIn(safeContext, enabled) }
             }
 
             "setApkDownloadSource" -> {
                 val source = call.argument<String>("source")
-                result.success(AppUpdateManager.setApkDownloadSource(safeContext, source).value)
+                runOnIo(result) {
+                    AppUpdateManager.setApkDownloadSource(safeContext, source).value
+                }
             }
 
-            "getCachedStatus" -> {
-                result.success(AppUpdateManager.getCachedStatus(safeContext).toMap())
+            "getCachedStatus" -> runOnIo(result) {
+                AppUpdateManager.getCachedStatus(safeContext).toMap()
             }
 
             "checkNow" -> {

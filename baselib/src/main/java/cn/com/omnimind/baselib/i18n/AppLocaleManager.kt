@@ -2,6 +2,7 @@ package cn.com.omnimind.baselib.i18n
 
 import android.content.Context
 import android.content.res.Configuration
+import android.content.res.Resources
 import android.os.Build
 import android.os.LocaleList
 import java.util.Locale
@@ -142,7 +143,11 @@ object AppLocaleManager {
     }
 
     private fun systemLocale(context: Context): Locale {
-        val configuration = context.applicationContext.resources.configuration
+        // 不能读 applicationContext.resources：applyAppLocale() 会用
+        // Resources.updateConfiguration 改写应用级 Resources 的 locale，之后这里读到的
+        // 是「上次选的语言」而不是设备语言 —— 用户切回「跟随系统」会一直是旧语言
+        // （Dart 侧读真实设备语言显示中文、native 侧仍是英文），直到进程重启。
+        val configuration = Resources.getSystem().configuration
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             configuration.locales.takeIf { !it.isEmpty }?.get(0) ?: Locale.getDefault()
         } else {

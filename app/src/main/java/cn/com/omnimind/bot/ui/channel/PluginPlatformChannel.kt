@@ -22,6 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -59,7 +60,11 @@ class PluginPlatformChannel {
         val host = OmniPluginHost.get(safeContext)
         scope.launch {
             runCatching {
-                when (call.method) {
+                // 插件枚举/安装/升级/沙箱 DB 都是同步磁盘遍历、解压与写盘：
+                // 留在 Main.immediate 会让首次进插件市场 ANR，Dart 侧 8s 超时还会把它
+                // 渲染成「加载失败」，用户反复重试。
+                withContext(Dispatchers.IO) {
+                    when (call.method) {
                     "list" -> host.list().map(::stateToMap)
                     "install" -> stateToMap(host.install(call.requirePluginId()))
                     "update" -> stateToMap(host.update(call.requirePluginId()))
@@ -112,6 +117,7 @@ class PluginPlatformChannel {
                         true
                     }
                     else -> throw NotImplementedError(call.method)
+                    }
                 }
             }.onSuccess(result::success).onFailure { error ->
                 if (error is NotImplementedError) {
