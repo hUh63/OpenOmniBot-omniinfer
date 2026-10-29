@@ -3543,7 +3543,13 @@ class BrowserUseEngine(
             openDownloadedFile(taskId)
             return
         }
-        val parentUri = buildShareableContentUri(parent)
+        // 目录可能落在 FileProvider 覆盖范围外 —— 这时退回「直接打开文件本身」，
+        // 而不是让 getUriForFile 的异常冒出去把整个动作变成失败。
+        val parentUri = runCatching { buildShareableContentUri(parent) }.getOrNull()
+        if (parentUri == null) {
+            openDownloadedFile(taskId)
+            return
+        }
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(parentUri, DocumentsContract.Document.MIME_TYPE_DIR)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -3564,15 +3570,39 @@ class BrowserUseEngine(
         return try {
             FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", sourceFile)
         } catch (_: IllegalArgumentException) {
-            val exportDir = File(appContext.cacheDir, "browser_shared_exports").apply { mkdirs() }
-            val staged = File(exportDir, "${System.currentTimeMillis()}_${sourceFile.name}")
+            // 目录没法交给 FileProvider（路径不在 file_paths.xml 覆盖范围内）。原来在这个
+            // catch 里又调了一次同一个必然失败的 getUriForFile，异常直接逃出 catch，
+            // 调用方的 fallback 全被跳过。这里抛出明确异常，由调用方决定兜底。
             if (sourceFile.isDirectory) {
-                return FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", sourceFile)
+                throw IllegalArgumentException(
+                    "directory not shareable via FileProvider: ${sourceFile.absolutePath}"
+                )
             }
+            val exportDir = File(appContext.cacheDir, "browser_shared_exports").apply { mkdirs() }
+            pruneSharedExports(exportDir)
+            val staged = File(exportDir, "${System.currentTimeMillis()}_${sourceFile.name}")
             sourceFile.inputStream().use { input ->
                 staged.outputStream().use { output -> input.copyTo(output) }
             }
             FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", staged)
+        }
+    }
+
+    /**
+     * browser_shared_exports 只是分享用的临时落点：原实现只写不删，cache 随使用无限增长
+     * （FileSaveChannel 里同款 staging 已有 24 个 / 2 天的上限，这里没同步）。
+     */
+    private fun pruneSharedExports(exportDir: File) {
+        runCatching {
+            val files = exportDir.listFiles()?.sortedByDescending { it.lastModified() }
+                ?: return@runCatching
+            val now = System.currentTimeMillis()
+            files.forEachIndexed { index, file ->
+                val expired = now - file.lastModified() > 2L * 24 * 60 * 60 * 1000
+                if (index >= 24 || expired) {
+                    file.delete()
+                }
+            }
         }
     }
 

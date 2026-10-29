@@ -33,6 +33,9 @@ class _WorkspaceMemorySettingPageState
   WorkspaceMemoryEmbeddingConfig? _embeddingConfig;
   WorkspaceMemoryRollupStatus? _rollupStatus;
 
+  /// 打开页面时读到的 MEMORY.md 全文，用于保存时判断期间是否被 agent 追加过。
+  String _memorySnapshot = '';
+
   @override
   void initState() {
     super.initState();
@@ -67,6 +70,7 @@ class _WorkspaceMemorySettingPageState
         _soulController.text = soul;
         _chatController.text = chatPrompt;
         _memoryController.text = memory;
+        _memorySnapshot = memory;
         _embeddingConfig = embedding;
         _rollupStatus = rollup;
         _embeddingEnabled = embedding.enabled;
@@ -125,10 +129,30 @@ class _WorkspaceMemorySettingPageState
   Future<void> _saveMemory() async {
     setState(() => _savingMemory = true);
     try {
-      final saved = await WorkspaceMemoryService.saveLongMemory(
-        _memoryController.text,
-      );
+      // MEMORY.md 会被 agent 的 memory_upsert_longterm 和夜间 rollup 追加写入，
+      // 而这里写回的是「打开页面时读到的全文」——直接整篇覆盖会把期间新增的条目抹掉。
+      final latest = await WorkspaceMemoryService.getLongMemory();
       if (!mounted) return;
+      final edited = _memoryController.text;
+      if (latest != _memorySnapshot) {
+        if (edited == _memorySnapshot) {
+          // 用户没改动，只是点了保存：直接用最新内容刷新，不做写回。
+          _memorySnapshot = latest;
+          setState(() => _memoryController.text = latest);
+          showToast(context.l10n.workspaceMemorySaved, type: ToastType.success);
+          return;
+        }
+        final overwrite = await _confirmMemoryOverwrite();
+        if (!mounted) return;
+        if (!overwrite) {
+          _memorySnapshot = latest;
+          setState(() => _memoryController.text = latest);
+          return;
+        }
+      }
+      final saved = await WorkspaceMemoryService.saveLongMemory(edited);
+      if (!mounted) return;
+      _memorySnapshot = saved;
       _memoryController.text = saved;
       showToast(context.l10n.workspaceMemorySaved, type: ToastType.success);
     } catch (e) {
@@ -139,6 +163,33 @@ class _WorkspaceMemorySettingPageState
         setState(() => _savingMemory = false);
       }
     }
+  }
+
+  /// 期间长期记忆被 agent 追加过：让用户选「重新加载」还是「覆盖保存」。
+  Future<bool> _confirmMemoryOverwrite() async {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(isEnglish ? 'Memory was updated' : '记忆已更新'),
+        content: Text(
+          isEnglish
+              ? 'Long-term memory changed while this page was open (the agent or the nightly rollup appended entries). Saving now overwrites those additions.'
+              : '本页面打开期间长期记忆被追加了新内容（agent 或夜间整理）。现在保存会覆盖这些新增条目。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(isEnglish ? 'Reload' : '重新加载'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(isEnglish ? 'Overwrite' : '覆盖保存'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
   }
 
   Future<void> _toggleEmbedding(bool enabled) async {
