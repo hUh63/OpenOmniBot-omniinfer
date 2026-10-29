@@ -18,6 +18,11 @@ import cn.com.omnimind.bot.util.AssistsUtil
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
@@ -44,6 +49,9 @@ class FileSaveChannel {
 
         @Volatile
         private var pendingSourcePath: String? = null
+
+        /** 文件复制/MediaStore 写入用的后台作用域（主线程写几十 MB 必 ANR）。 */
+        private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         /**
          * 系统保存对话框期间宿主 Activity 被回收时不会有 onActivityResult，
@@ -101,8 +109,19 @@ class FileSaveChannel {
                     result.error("SAVE_FAILED", "Source file is empty", sourcePath)
                     return true
                 }
-                copyFileToUri(activity, source, targetUri)
-                result.success(targetUri.toString())
+                // onActivityResult 在主线程回调：原来在这里直接 copyTo 整文件，保存一个
+                // 几十 MB 的录屏/日志就必然 ANR（stageFileInCache 有 64MB 上限，这条路径没有）。
+                ioScope.launch {
+                    val outcome = runCatching { copyFileToUri(activity, source, targetUri) }
+                    withContext(Dispatchers.Main) {
+                        outcome
+                            .onSuccess { result.success(targetUri.toString()) }
+                            .onFailure { error ->
+                                OmniLog.e(TAG, "Failed to save file", error)
+                                result.error("SAVE_FAILED", error.message, error.toString())
+                            }
+                    }
+                }
             } catch (e: Exception) {
                 OmniLog.e(TAG, "Failed to save file", e)
                 result.error("SAVE_FAILED", e.message, e.toString())
@@ -370,17 +389,36 @@ class FileSaveChannel {
         // When chat half-screen is showing, avoid opening a system activity to prevent
         // half-screen being dismissed after returning from the picker.
         if (AssistsUtil.UI.isChatBotDialogShowing()) {
-            try {
-                val savedUri = saveFileDirectlyToDownloads(activity, sourceFile, fileName, mimeType)
-                if (savedUri != null) {
-                    result.success(savedUri.toString())
-                    return
+            // MediaStore 插入 → 整文件写入 → IS_PENDING=0 全放到 IO：MethodChannel handler
+            // 跑在主线程，几十 MB 的文件在这条路径上同样是必 ANR（这里没有大小上限）。
+            ioScope.launch {
+                val savedUri = runCatching {
+                    saveFileDirectlyToDownloads(activity, sourceFile, fileName, mimeType)
+                }.getOrElse { error ->
+                    OmniLog.e(TAG, "Direct save failed, fallback to system dialog", error)
+                    null
                 }
-            } catch (e: Exception) {
-                OmniLog.e(TAG, "Direct save failed, fallback to system dialog", e)
+                withContext(Dispatchers.Main) {
+                    if (savedUri != null) {
+                        result.success(savedUri.toString())
+                    } else {
+                        launchSystemSaveDialog(activity, result, sourcePath, fileName, mimeType)
+                    }
+                }
             }
+            return
         }
 
+        launchSystemSaveDialog(activity, result, sourcePath, fileName, mimeType)
+    }
+
+    private fun launchSystemSaveDialog(
+        activity: Activity,
+        result: MethodChannel.Result,
+        sourcePath: String,
+        fileName: String,
+        mimeType: String
+    ) {
         pendingResult = result
         pendingSourcePath = sourcePath
 

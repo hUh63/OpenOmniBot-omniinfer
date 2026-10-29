@@ -64,6 +64,10 @@ class ChatTask(override val taskChangeListener: TaskChangeListener,
     private val openClawBuffers = mutableMapOf<String, String>()
     private val openClawAttachmentSent = mutableSetOf<String>()
     private var openClawHeartbeatJob: Job? = null
+    /** 上游静默断流看门狗（SSE 用 readTimeout(0)，不会有任何回调自己收尾）。 */
+    private var streamWatchdogJob: Job? = null
+    @Volatile private var lastStreamEventAt = 0L
+    private val streamIdleTimeoutMs = 180_000L
     private val openClawHandshakeTimeoutMs = 10_000L
     private val openClawMinHeartbeatIntervalMs = 1_000L
     private val tag = "ChatTask"
@@ -72,6 +76,27 @@ class ChatTask(override val taskChangeListener: TaskChangeListener,
         controllerScope.launch {
             streamDispatchMutex.withLock {
                 block()
+            }
+        }
+    }
+
+    /**
+     * SSE 用的是 readTimeout(0)：上游或中间代理静默断流（不发数据也不发 FIN）时
+     * onClosed / onFailure 一个都不会回调，Dart 侧永远收不到 onChatMessageEnd
+     * —— 任务永不结束，taskId 永久占位。这里按「最后一次事件时间」补一个看门狗，
+     * 超时就 cancel 掉 EventSource，让 okhttp 走既有的 onFailure 收尾分支。
+     */
+    private fun startStreamWatchdog() {
+        streamWatchdogJob?.cancel()
+        lastStreamEventAt = System.currentTimeMillis()
+        streamWatchdogJob = controllerScope.launch {
+            while (isActive) {
+                delay(5_000L)
+                val idle = System.currentTimeMillis() - lastStreamEventAt
+                if (idle < streamIdleTimeoutMs) continue
+                OmniLog.e(tag, "chat stream idle ${idle}ms, cancelling task=$taskID")
+                runCatching { eventSource.cancel() }
+                return@launch
             }
         }
     }
@@ -125,12 +150,14 @@ class ChatTask(override val taskChangeListener: TaskChangeListener,
                             override fun onEvent(
                                 eventSource: EventSource, id: String?, type: String?, data: String
                             ) {
+                                lastStreamEventAt = System.currentTimeMillis()
                                 launchOrderedStreamDispatch {
                                     onMessagePushListener.onChatMessage(taskID, data, type)
                                 }
                             }
 
                             override fun onClosed(eventSource: EventSource) {
+                                streamWatchdogJob?.cancel()
                                 launchOrderedStreamDispatch {
                                     onMessagePushListener.onChatMessageEnd(taskID)
                                     onTaskStop(TaskFinishType.FINISH, "")
@@ -145,6 +172,7 @@ class ChatTask(override val taskChangeListener: TaskChangeListener,
                                 t: Throwable?,
                                 response: okhttp3.Response?
                             ) {
+                                streamWatchdogJob?.cancel()
                                 launchOrderedStreamDispatch {
                                     // 如果是主动取消，不发送错误消息，只结束对话
                                     if (isManualCancel) {
@@ -178,6 +206,7 @@ class ChatTask(override val taskChangeListener: TaskChangeListener,
                         reasoningEffort = this@ChatTask.reasoningEffort,
                         promptCacheKey = promptCacheKey
                     )
+                    startStreamWatchdog()
                 }
             } catch (e: Http429Exception){
                 launchOrderedStreamDispatch {

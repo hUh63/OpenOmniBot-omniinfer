@@ -9,6 +9,7 @@ import cn.com.omnimind.baselib.util.OmniLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -20,6 +21,7 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 interface AgentContextCompactionController {
     suspend fun resolvePromptTokenThreshold(conversationId: Long?): Int
@@ -68,6 +70,8 @@ open class AgentConversationContextCompactor(
         private const val AUTO_COMPACTION_RESERVE_DIVISOR = 8
         const val DEFAULT_AGENT_MODEL_SCENE = "scene.dispatch.model"
         private const val TAG = "AgentConversationContextCompactor"
+        /** 摘要流的空闲上限：超过这个时间没有任何 SSE 事件就判定上游静默断流。 */
+        private const val STREAM_IDLE_TIMEOUT_MS = 180_000L
         /** 单条 user 消息超过这个长度才值得转存（太短就只是普通的超预算输入）。 */
         private const val OVERSIZED_USER_OFFLOAD_MIN_CHARS = 2_000
         /** 转存后留在 prompt 里的开头长度。 */
@@ -572,6 +576,7 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
         val result = CompletableDeferred<String>()
         val accumulator = AgentLlmStreamAccumulator(json)
         var eventSource: EventSource? = null
+        val lastActivityAt = AtomicLong(System.currentTimeMillis())
 
         fun completeStream(source: EventSource? = null) {
             if (!completed.compareAndSet(false, true)) return
@@ -593,6 +598,7 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
                 data: String
             ) {
                 if (completed.get()) return
+                lastActivityAt.set(System.currentTimeMillis())
                 runCatching {
                     val done = accumulator.consume(data)
                     if (done) {
@@ -641,9 +647,30 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
                 promptCacheKey = promptCacheKey,
                 maxCompletionTokens = maxOutputTokens,
             )
-            result.await()
+            awaitWithIdleWatchdog(result, lastActivityAt)
         } finally {
             eventSource?.cancel()
+        }
+    }
+
+    /**
+     * 摘要流跑在 readTimeout(0) 的 SSE 上：上游静默断流时 onEvent / onClosed / onFailure
+     * 一个都不会来，裸 await() 会永远挂着，整条回合永久停在 thinking（只能杀会话）。
+     * 这里按「最后一次事件时间」做空闲看门狗，超时抛错让上层按失败处理。
+     */
+    private suspend fun awaitWithIdleWatchdog(
+        result: CompletableDeferred<String>,
+        lastActivityAt: AtomicLong
+    ): String {
+        while (true) {
+            val idle = System.currentTimeMillis() - lastActivityAt.get()
+            val remaining = STREAM_IDLE_TIMEOUT_MS - idle
+            if (remaining <= 0L) {
+                throw IllegalStateException("compaction stream idle for ${idle}ms")
+            }
+            // await 可被重复调用：每次最多等 1s，期间有事件就续命。
+            val value = withTimeoutOrNull(minOf(remaining, 1_000L)) { result.await() }
+            if (value != null) return value
         }
     }
 
