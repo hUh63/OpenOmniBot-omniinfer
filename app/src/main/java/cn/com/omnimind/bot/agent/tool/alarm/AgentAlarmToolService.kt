@@ -171,8 +171,25 @@ class AgentAlarmToolService(
 
     fun reschedulePersistedExactRemindersIfPermitted(): Int {
         val now = System.currentTimeMillis()
-        val activeRecords = loadRecords().filter { record ->
+        val records = loadRecords()
+        val activeRecords = records.filter { record ->
             record.triggerAtMillis > now && record.state != STATE_RINGING
+        }
+        // 过期（关机/进程被杀时到点）和卡在 ringing 态的记录既不会被重排，也没有任何
+        // 清理路径：闹钟列表会一直显示一条再也不会响的条目，通知也可能残留。
+        // 一次性提醒关闭即删除（同 closeExactReminder），这里按同样语义清掉。
+        val staleRecords = records.filter { record ->
+            record.triggerAtMillis <= now || record.state == STATE_RINGING
+        }
+        if (staleRecords.isNotEmpty()) {
+            staleRecords.forEach { record ->
+                cancelExactAlarms(record)
+                cancelNotification(record.alarmId)
+            }
+            persistRecords(records - staleRecords.toSet())
+            if (staleRecords.any { it.state == STATE_RINGING }) {
+                AgentAlarmRingingService.stop(context)
+            }
         }
         activeRecords.forEach { record ->
             cancelExactAlarms(record)

@@ -727,6 +727,12 @@ object OmniInferLiteRtModelsManager {
         val call = httpClient.newCall(requestBuilder.build())
         state.call = call
         call.execute().use { response ->
+            if (response.code == 416) {
+                // .part 长度已 >= 远端长度（上次 rename 前中断 / 仓库文件变小）：
+                // 不清掉的话「继续下载」每次都 416，市场卡片也一直显示 paused。
+                partFile.delete()
+                throw RuntimeException("Download failed: HTTP 416 (discarded stale .part)")
+            }
             if (!response.isSuccessful && response.code != 206) {
                 throw RuntimeException("Download failed: HTTP ${response.code}")
             }

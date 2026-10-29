@@ -102,6 +102,10 @@ object OmniInferLanProxyManager {
                 mmkv.encode(KEY_PORT, proxyPort)
                 clearError()
                 OmniLog.i(TAG, "LAN proxy started at ${currentState(target).baseUrl}, target=127.0.0.1:$target")
+                // start(wait=false) 只是「已提交启动」：CIO 的 BindException 是异步抛出的，
+                // 端口被占用时这里不核对就会对外报一个连不上的地址，而且之后每次 start()
+                // 都被上面「已运行且端口相同」的早退拦住，再也绑不上（只能杀进程恢复）。
+                verifyBoundAsync(engine, proxyPort)
                 currentState(target)
             }.getOrElse { error ->
                 server = null
@@ -170,6 +174,35 @@ object OmniInferLanProxyManager {
             targetBaseUrl = "http://127.0.0.1:$targetPort",
             error = mmkv.decodeString(KEY_LAST_ERROR, "").orEmpty(),
         )
+    }
+
+    /**
+     * 600ms 后核对代理端口是否真的在监听；失败则停掉并清空状态，让下一次 start() 能重试。
+     */
+    private fun verifyBoundAsync(
+        engine: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>,
+        proxyPort: Int,
+    ) {
+        Thread {
+            runCatching {
+                Thread.sleep(600L)
+                val bound = runCatching {
+                    java.net.Socket("127.0.0.1", proxyPort).use { true }
+                }.getOrDefault(false)
+                if (bound) return@runCatching
+                OmniLog.e(TAG, "LAN proxy self-check failed on port $proxyPort; resetting for retry")
+                synchronized(lock) {
+                    if (server === engine) {
+                        runCatching { engine.stop(100, 300) }
+                        server = null
+                        running = false
+                        activePort = 0
+                        activeTargetPort = 0
+                        mmkv.encode(KEY_LAST_ERROR, "LAN proxy port $proxyPort is not reachable")
+                    }
+                }
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     private fun buildServer(

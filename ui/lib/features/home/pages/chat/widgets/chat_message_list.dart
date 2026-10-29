@@ -507,8 +507,9 @@ class _ChatMessageListState extends State<ChatMessageList> {
         _isAutoLoadingHistory = false;
       });
     } catch (_) {
+      // 这个 Future 是被 unawaited 丢掉的：这里 rethrow 会变成无人接收的
+      // 异步错误（release 下被当崩溃上报）。标志已复位，安静收场即可。
       _isAutoLoadingHistory = false;
-      rethrow;
     }
   }
 

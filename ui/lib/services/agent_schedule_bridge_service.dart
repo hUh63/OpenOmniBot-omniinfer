@@ -56,11 +56,10 @@ class AgentScheduleBridgeService {
             : '定时任务保存失败',
       );
     }
-    if (normalizedTask.isEnabled) {
-      ScheduledTaskSchedulerService.scheduleTask(normalizedTask);
-    } else {
-      ScheduledTaskSchedulerService.cancelTask(normalizedTask.id);
-    }
+    // 停用 ≠ 删除：cancelTask 在原生闹钟模式下会调 deleteWorkspaceScheduledTask，
+    // 把刚写入的 Flutter 记录一起抹掉，任务重启后彻底消失且无法再启用。
+    // scheduleTask 对 enabled=false 走 upsert（取消闹钟 + 保留记录），故统一用它。
+    ScheduledTaskSchedulerService.scheduleTask(normalizedTask);
     return {
       'success': true,
       'taskId': normalizedTask.id,
@@ -155,11 +154,8 @@ class AgentScheduleBridgeService {
             : '定时任务更新失败',
       );
     }
-    if (updated.isEnabled) {
-      ScheduledTaskSchedulerService.scheduleTask(updated);
-    } else {
-      ScheduledTaskSchedulerService.cancelTask(updated.id);
-    }
+    // 同上：停用只取消闹钟，不能删除记录。
+    ScheduledTaskSchedulerService.scheduleTask(updated);
     return {
       'success': true,
       'taskId': updated.id,

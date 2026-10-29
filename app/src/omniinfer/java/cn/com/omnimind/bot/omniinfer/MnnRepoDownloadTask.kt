@@ -282,6 +282,14 @@ class MnnRepoDownloadTask(
         activeCall = call
         val response = call.execute()
 
+        if (response.code == 416) {
+            // .part 长度已 >= 远端长度（上次写完但 rename 前进程被杀，或仓库文件被换成
+            // 更小版本）。原来按普通失败处理且不清理 .part，之后每次重试都 416、永远失败。
+            response.close()
+            partFile.delete()
+            throw IOException("HTTP 416 for ${entry.relativePath}; discarded stale .part")
+        }
+
         if (!response.isSuccessful && response.code != 206) {
             response.close()
             throw IOException("HTTP ${response.code} downloading ${entry.relativePath}")
@@ -347,7 +355,11 @@ class MnnRepoDownloadTask(
         }
 
         if (!cancelled.get()) {
-            partFile.renameTo(destFile)
+            // renameTo 失败时磁盘上只剩 .part，而累计字节已达标 → 上层会报 DOWNLOAD_SUCCESS，
+            // 模型列表却看不到（downloadedRecords 会把带 .part 的目录过滤掉）。必须抛出去。
+            if (!partFile.renameTo(destFile)) {
+                throw IOException("Failed to move ${partFile.name} into place for ${entry.relativePath}")
+            }
         }
         return cumulativeSaved
     }

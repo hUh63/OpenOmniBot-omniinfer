@@ -124,12 +124,25 @@ class ChatMessageModel {
     if (raw is! List) {
       return const <ChatLinkPreview>[];
     }
-    return raw
+    // 这个 getter 在 MessageBubble.build 里逐帧调用，而流式输出时该行会随
+    // 每个 chunk 重建。原文每次访问都把整份预览列表 JSON→对象重造一遍。
+    // 缓存以「linkPreviews 列表实例」为键：content map 可能被流式原地修改，
+    // 但预览列表本身不参与流式更新，实例不变即可安全复用。
+    if (identical(raw, _linkPreviewsSource) && _linkPreviewsCache != null) {
+      return _linkPreviewsCache!;
+    }
+    final parsed = raw
         .whereType<Map>()
         .map((item) => Map<String, dynamic>.from(item.cast<String, dynamic>()))
         .map(ChatLinkPreview.fromJson)
-        .toList();
+        .toList(growable: false);
+    _linkPreviewsSource = raw;
+    _linkPreviewsCache = parsed;
+    return parsed;
   }
+
+  Object? _linkPreviewsSource;
+  List<ChatLinkPreview>? _linkPreviewsCache;
 
   /// 从JSON创建
   factory ChatMessageModel.fromJson(Map<String, dynamic> json) {

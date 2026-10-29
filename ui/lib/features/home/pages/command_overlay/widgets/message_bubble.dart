@@ -322,6 +322,9 @@ class MessageBubble extends StatelessWidget {
   ) {
     // Collect all image sources for multi-image preview
     final imageAttachments = attachments.where(_isImageAttachment).toList();
+    final imageIndexByItem = <Map<String, dynamic>, int>{
+      for (var i = 0; i < imageAttachments.length; i++) imageAttachments[i]: i,
+    };
     final imageSources = imageAttachments
         .map(_resolveImageSource)
         .whereType<ImagePreviewSource>()
@@ -336,7 +339,10 @@ class MessageBubble extends StatelessWidget {
       runSpacing: 8,
       children: attachments.map((item) {
         if (_isImageAttachment(item)) {
-          final imageIndex = imageAttachments.indexOf(item);
+          // 逐项 indexOf 是线性查找 → 整个 Wrap 变成 O(n²)。Map 的 == 是
+          // 同一性比较，这里元素就是 imageAttachments 里的同一实例，可直接查表。
+          final imageIndex = imageIndexByItem[item];
+          if (imageIndex == null) return _buildFileAttachmentChip(context, item);
           return _buildImageAttachmentTile(
             context,
             item,

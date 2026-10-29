@@ -327,7 +327,15 @@ class AgentCalendarToolService(
             ?: currentStart
         val nextEnd = request.endAt?.takeIf { it.isNotBlank() }?.let { parseDateTime(it, zone) }
             ?: currentEnd
-        val (normalizedStart, normalizedEnd) = normalizeEventRange(nextStart, nextEnd, allDay)
+        // 只有「调用方没给 endAt + 原事件本来就是全天」这一种情况下，nextEnd 才是
+        // 已经排他的 DTEND；其余情况（含全天→全天的显式 endAt）都按含当天处理。
+        val endFromRequest = request.endAt?.takeIf { it.isNotBlank() } != null
+        val (normalizedStart, normalizedEnd) = normalizeEventRange(
+            nextStart,
+            nextEnd,
+            allDay,
+            endAlreadyExclusive = !endFromRequest && current.allDay && allDay,
+        )
 
         val values = ContentValues().apply {
             put(CalendarContract.Events.TITLE, request.title?.trim()?.ifBlank { current.title } ?: current.title)
@@ -526,14 +534,23 @@ class AgentCalendarToolService(
     private fun normalizeEventRange(
         start: ZonedDateTime,
         end: ZonedDateTime,
-        allDay: Boolean
+        allDay: Boolean,
+        endAlreadyExclusive: Boolean = false,
     ): Pair<ZonedDateTime, ZonedDateTime> {
         val normalizedStart: ZonedDateTime
         val normalizedEnd: ZonedDateTime
 
         if (allDay) {
             normalizedStart = start.toLocalDate().atStartOfDay(start.zone)
-            normalizedEnd = end.toLocalDate().plusDays(1).atStartOfDay(start.zone)
+            normalizedEnd = if (endAlreadyExclusive) {
+                // 这条 end 来自 CalendarProvider 的 DTEND，本来就是排他端点（次日 00:00）。
+                // 再 plusDays(1) 会让「只改标题」的每次编辑都把全天日程的结束日推进一天。
+                val exclusive = end.toLocalDate().atStartOfDay(start.zone)
+                if (exclusive.isAfter(normalizedStart)) exclusive
+                else exclusive.plusDays(1)
+            } else {
+                end.toLocalDate().plusDays(1).atStartOfDay(start.zone)
+            }
         } else {
             normalizedStart = start
             normalizedEnd = end

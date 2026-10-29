@@ -447,7 +447,11 @@ class MnnLocalModelsChannel {
         when (explicitBackend ?: getSelectedBackend()) {
             OmniInferLocalRuntime.BACKEND_OMNIINFER_MNN -> handleMnnCall(call, result)
             OmniInferLocalRuntime.BACKEND_EXECUTORCH_QNN -> handleQnnCall(call, result)
-            OmniInferLocalRuntime.BACKEND_LITERT -> handleLiteRtCall(call, result)
+            // litert-npu 与 litert 共用 LiteRT 管理器（runtime 层也是合并处理的）。
+            // 原来漏了这个常量，它会落到 else → 被当成 llama.cpp：列 GGUF、下 GGUF，
+            // 再把 .gguf 交给 NPU 后端加载。
+            OmniInferLocalRuntime.BACKEND_LITERT,
+            OmniInferLocalRuntime.BACKEND_LITERT_NPU -> handleLiteRtCall(call, result)
             else -> handleLlamaCppCall(call, result)
         }
     }
@@ -466,7 +470,8 @@ class MnnLocalModelsChannel {
         return when (getSelectedBackend()) {
             OmniInferLocalRuntime.BACKEND_OMNIINFER_MNN -> OmniInferMnnModelsManager.getConfig()
             OmniInferLocalRuntime.BACKEND_EXECUTORCH_QNN -> OmniInferQnnModelsManager.getConfig()
-            OmniInferLocalRuntime.BACKEND_LITERT -> OmniInferLiteRtModelsManager.getConfig()
+            OmniInferLocalRuntime.BACKEND_LITERT,
+            OmniInferLocalRuntime.BACKEND_LITERT_NPU -> OmniInferLiteRtModelsManager.getConfig()
             else -> OmniInferModelsManager.getConfig()
         }
     }
@@ -511,7 +516,9 @@ class MnnLocalModelsChannel {
 
             "saveConfig" -> {
                 val args = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any?>()
-                result.success(OmniInferModelsManager.saveConfig(args))
+                // saveConfig 里改端口会连带 stop() 卸载引擎（native free 掉几 GB 模型），
+                // stopApiService 已经为此挪到 IO，这条等价路径不能留在主线程。
+                runSuspend(result) { OmniInferModelsManager.saveConfig(args) }
             }
 
             "setActiveModel" -> {
@@ -537,8 +544,13 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferModelsManager.startDownload(modelId)
-                    result.success(true)
+                    // startDownload 会遍历目标目录统计已下载字节 + StatFs + 首次解析
+                    // 市场 JSON（读 assets/cache 并反序列化）；pauseDownload 同样要扫盘。
+                    // MethodChannel 回调在主线程，与 MNN 分支对齐改到 IO 执行。
+                    runSuspend(result) {
+                        OmniInferModelsManager.startDownload(modelId)
+                        true
+                    }
                 }
             }
 
@@ -547,8 +559,10 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferModelsManager.pauseDownload(modelId)
-                    result.success(true)
+                    runSuspend(result) {
+                        OmniInferModelsManager.pauseDownload(modelId)
+                        true
+                    }
                 }
             }
 
@@ -602,7 +616,8 @@ class MnnLocalModelsChannel {
 
             "saveConfig" -> {
                 val args = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any?>()
-                result.success(OmniInferMnnModelsManager.saveConfig(args))
+                // 同上：端口变更会同步卸载引擎，不能跑在主线程。
+                runSuspend(result) { OmniInferMnnModelsManager.saveConfig(args) }
             }
 
             "setActiveModel" -> {
@@ -699,7 +714,8 @@ class MnnLocalModelsChannel {
 
             "saveConfig" -> {
                 val args = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any?>()
-                result.success(OmniInferQnnModelsManager.saveConfig(args))
+                // 同上：端口变更会同步卸载引擎，不能跑在主线程。
+                runSuspend(result) { OmniInferQnnModelsManager.saveConfig(args) }
             }
 
             "setActiveModel" -> {
@@ -725,8 +741,11 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferQnnModelsManager.startDownload(modelId)
-                    result.success(true)
+                    // 同 llama.cpp 分支：起/停下载都要扫盘 + 解析市场 JSON，不能占主线程。
+                    runSuspend(result) {
+                        OmniInferQnnModelsManager.startDownload(modelId)
+                        true
+                    }
                 }
             }
 
@@ -735,8 +754,10 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferQnnModelsManager.pauseDownload(modelId)
-                    result.success(true)
+                    runSuspend(result) {
+                        OmniInferQnnModelsManager.pauseDownload(modelId)
+                        true
+                    }
                 }
             }
 
@@ -789,7 +810,8 @@ class MnnLocalModelsChannel {
 
             "saveConfig" -> {
                 val args = (call.arguments as? Map<*, *>) ?: emptyMap<String, Any?>()
-                result.success(OmniInferLiteRtModelsManager.saveConfig(args))
+                // 同上：端口变更会同步卸载引擎，不能跑在主线程。
+                runSuspend(result) { OmniInferLiteRtModelsManager.saveConfig(args) }
             }
 
             "setActiveModel" -> {
@@ -815,8 +837,11 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferLiteRtModelsManager.startDownload(modelId)
-                    result.success(true)
+                    // 同 llama.cpp 分支：起/停下载都要扫盘 + 解析市场 JSON，不能占主线程。
+                    runSuspend(result) {
+                        OmniInferLiteRtModelsManager.startDownload(modelId)
+                        true
+                    }
                 }
             }
 
@@ -825,8 +850,10 @@ class MnnLocalModelsChannel {
                 if (modelId.isNullOrBlank()) {
                     result.error(ERROR_CODE, "modelId is required", null)
                 } else {
-                    OmniInferLiteRtModelsManager.pauseDownload(modelId)
-                    result.success(true)
+                    runSuspend(result) {
+                        OmniInferLiteRtModelsManager.pauseDownload(modelId)
+                        true
+                    }
                 }
             }
 

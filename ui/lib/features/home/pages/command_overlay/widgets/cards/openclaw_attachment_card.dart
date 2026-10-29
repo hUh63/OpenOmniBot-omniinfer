@@ -231,6 +231,9 @@ class _OpenClawAttachmentCardState extends State<OpenClawAttachmentCard> {
       );
       final bytes = downloadRes.data;
       if (bytes == null || bytes.isEmpty) {
+        // await 之后卡片可能已被销毁（滚出可视区 / 切换会话后消息行重建），
+        // 此时 setState 会抛 setState() called after dispose 直接崩掉。
+        if (!mounted) return;
         setState(() {
           _downloadError = '下载失败：文件为空';
         });
@@ -251,6 +254,7 @@ class _OpenClawAttachmentCardState extends State<OpenClawAttachmentCard> {
         },
       );
       if (resultPath == null || resultPath.isEmpty) {
+        if (!mounted) return;
         setState(() {
           _downloadError = '已取消保存';
         });
