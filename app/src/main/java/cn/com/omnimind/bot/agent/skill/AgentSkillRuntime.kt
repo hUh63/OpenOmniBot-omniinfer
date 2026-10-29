@@ -2,6 +2,7 @@ package cn.com.omnimind.bot.agent
 
 import android.content.Context
 import android.content.res.AssetManager
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalRuntime
 import cn.com.omnimind.bot.termux.TermuxCommandBuilder
 import cn.com.omnimind.bot.update.ApkDownloadSource
@@ -221,8 +222,8 @@ private class BuiltinSkillAssetStore(
             )
             changed = true
         }
-        if (changed) {
-            registryStore.write(registry)
+        if (changed && !registryStore.write(registry)) {
+            OmniLog.w("AgentSkillRuntime", "skill registry write failed (seedMissingBuiltins): 内置技能开关可能在下次启动前不生效")
         }
     }
 
@@ -242,8 +243,8 @@ private class BuiltinSkillAssetStore(
                 changed = true
             }
         }
-        if (changed) {
-            registryStore.write(registry)
+        if (changed && !registryStore.write(registry)) {
+            OmniLog.w("AgentSkillRuntime", "skill registry write failed (pruneRetiredBuiltins): 已删除的内置技能可能重新出现")
         }
     }
 
@@ -427,7 +428,10 @@ class SkillIndexService(
                 "skill target directory 非法：$targetDirectoryName"
             }
             val targetDir = File(workspaceManager.skillsRoot(), targetDirectoryName)
-            copyRecursively(sourceDir, targetDir)
+            // 先拷到 .staging-*，全部写完再原子换入：直接拷进最终目录时，进程被杀/磁盘满
+            // 会留下只拷了一半、但已有 SKILL.md 的目录，被判为「已安装」并默认启用，
+            // Agent 之后加载到缺脚本的技能；旧版本被删掉的文件也因只覆盖不清理而残留。
+            commitSkillDirectory(sourceDir, targetDir)
             val entry = buildInstalledEntry(
                 skillDir = targetDir,
                 registry = registryStore().read(),
@@ -595,7 +599,12 @@ class SkillIndexService(
     ): List<SkillIndexEntry> {
         if (!root.exists()) return emptyList()
         return root.walkTopDown()
-            .onEnter { directory -> directory.name != ".git" }
+            .onEnter { directory ->
+                // .staging-*/.trash-* 是安装中间态，含 SKILL.md 但不可用，不能当已安装。
+                directory.name != ".git" &&
+                    !directory.name.startsWith(".staging-") &&
+                    !directory.name.startsWith(".trash-")
+            }
             .filter { file -> file.isFile && file.name == "SKILL.md" }
             .mapNotNull { skillFile ->
                 buildInstalledEntry(
@@ -640,7 +649,9 @@ class SkillIndexService(
                 installState = INSTALL_STATE_INSTALLED
             )
         }
-        registryStore.write(updatedRegistry)
+        if (!registryStore.write(updatedRegistry)) {
+            throw IllegalStateException("skill registry write failed: 官方技能同步未能持久化")
+        }
         return scanInstalledEntries(
             root = repositoryDir,
             registry = updatedRegistry,
@@ -752,6 +763,32 @@ class SkillIndexService(
         }
         target.parentFile?.mkdirs()
         source.copyTo(target, overwrite = true)
+    }
+
+    /** 原子提交一个技能目录：staging 全量拷完 → 旧目录挪走 → staging 就位 → 清旧目录。 */
+    private fun commitSkillDirectory(sourceDir: File, targetDir: File) {
+        val root = targetDir.parentFile ?: workspaceManager.skillsRoot()
+        val suffix = "${targetDir.name}-${System.currentTimeMillis()}"
+        val stagingDir = File(root, ".staging-$suffix")
+        val backupDir = File(root, ".trash-$suffix")
+        try {
+            copyRecursively(sourceDir, stagingDir)
+            require(File(stagingDir, "SKILL.md").exists()) {
+                "skill staging 缺少 SKILL.md"
+            }
+            val hadTarget = targetDir.exists()
+            if (hadTarget && !targetDir.renameTo(backupDir)) {
+                targetDir.deleteRecursively()
+            }
+            if (!stagingDir.renameTo(targetDir)) {
+                if (backupDir.exists()) backupDir.renameTo(targetDir)
+                throw IllegalStateException("skill 安装提交失败：" + targetDir.name)
+            }
+            backupDir.deleteRecursively()
+        } finally {
+            stagingDir.takeIf { it.exists() }?.deleteRecursively()
+            backupDir.takeIf { it.exists() }?.deleteRecursively()
+        }
     }
 
     private fun sanitizeSkillId(directoryName: String, frontmatterName: String?): String {

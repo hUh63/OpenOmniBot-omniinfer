@@ -348,7 +348,8 @@ private class ReportingSubagentCallback(
     private val progressReporter: (suspend (SubagentDispatcher.SubagentProgressEvent) -> Unit)?,
     private val progressSequence: AtomicLong
 ) : AgentCallback {
-    private val tools = mutableListOf<String>()
+    // 同一轮的 parallelSafe 工具由 coroutineScope{async} 并发执行，onToolCallStart 会并发写。
+    private val tools: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf<String>())
     private var lastThinkingSummary: String = ""
 
     fun toolSummaries(): List<String> = tools.toList()

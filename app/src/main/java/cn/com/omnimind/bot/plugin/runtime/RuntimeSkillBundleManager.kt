@@ -185,13 +185,27 @@ class RuntimeSkillBundleManager(
         }
 
         val packagedMarker = packagedMarker()
-        if (removeOutdatedPackagedCandidates(skills, candidates, refresh, packagedMarker)) {
-            candidates = installedCandidates(skills)
+        // 过期候选先排除，但不立刻删：删除必须等新副本落地成功，否则安装失败会让该插件的
+        // skill 与其工具彻底消失（旧目录已删、新目录未建成，且没有任何回滚）。
+        val freshCandidates = candidates.filterNot { candidate ->
+            isPackaged(candidate.rootPath) && packagedRuntimeSkillNeedsReplacement(
+                refresh = refresh,
+                installedMarker = installedMarker(candidate.rootPath),
+                packagedMarker = packagedMarker,
+            )
         }
-        val selected = packagedCandidate(candidates)
-            ?: candidates
+        val selected = packagedCandidate(freshCandidates)
+            ?: freshCandidates
                 .let(::preferredCandidate)
             ?: installPackaged(skills, packagedMarker)
+        removeOutdatedPackagedCandidates(
+            skills = skills,
+            // 必须排除刚落地的 selected：refresh=true 时它同样被判「需要替换」，
+            // 会把当前版本自己删掉。
+            candidates = installedCandidates(skills).filterNot { it.id == selected.id },
+            refresh = refresh,
+            packagedMarker = packagedMarker,
+        )
         if (!selected.enabled) {
             skills.setSkillEnabled(selected.id, true)
         }
@@ -205,14 +219,17 @@ class RuntimeSkillBundleManager(
         val workspace = AgentWorkspaceManager(appContext)
         val skills = SkillIndexService(appContext, workspace)
         val packagedMarker = packagedMarker()
-        removeOutdatedPackagedCandidates(
-            skills = skills,
-            candidates = installedCandidates(skills),
-            refresh = refresh,
-            packagedMarker = packagedMarker,
-        )
         val selected = packagedCandidate(installedCandidates(skills)) ?: installPackaged(
             skills = skills,
+            packagedMarker = packagedMarker,
+        )
+        // 同 resolve()：先装后清，避免安装失败把旧副本删掉后无任何可用 skill。
+        removeOutdatedPackagedCandidates(
+            skills = skills,
+            // 必须排除刚落地的 selected：refresh=true 时它同样被判「需要替换」，
+            // 会把当前版本自己删掉。
+            candidates = installedCandidates(skills).filterNot { it.id == selected.id },
+            refresh = refresh,
             packagedMarker = packagedMarker,
         )
         if (!selected.enabled) {
