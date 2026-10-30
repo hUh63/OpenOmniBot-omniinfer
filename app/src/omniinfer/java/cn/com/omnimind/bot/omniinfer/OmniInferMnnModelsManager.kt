@@ -2,6 +2,7 @@ package cn.com.omnimind.bot.omniinfer
 
 import android.content.Context
 import android.net.Uri
+import android.os.StatFs
 import androidx.documentfile.provider.DocumentFile
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import com.tencent.mmkv.MMKV
@@ -18,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 object OmniInferMnnModelsManager {
     private const val TAG = "OmniInferMnnModelsManager"
+    private const val MIN_FREE_SPACE_RESERVE_BYTES = 256L * 1024L * 1024L
     private const val BACKEND_NAME = OmniInferLocalRuntime.BACKEND_OMNIINFER_MNN
     private const val MMKV_ID = "omniinfer_config"
     private const val KEY_ACTIVE_MODEL_ID = "omniinfer_mnn_active_model_id"
@@ -263,6 +265,25 @@ object OmniInferMnnModelsManager {
         return getConfig()
     }
 
+    /**
+     * 下载前检查可用空间（llama.cpp 分支早就有这个预检，这里补齐）。
+     * 拿不到 StatFs 时放行，避免误伤。
+     */
+    private fun ensureEnoughSpace(directory: File, expectedSize: Long): Boolean {
+        if (expectedSize <= 0L) return true
+        runCatching { directory.mkdirs() }
+        val available = runCatching { StatFs(directory.absolutePath).availableBytes }.getOrNull()
+            ?: return true
+        val required = expectedSize + MIN_FREE_SPACE_RESERVE_BYTES
+        if (available >= required) return true
+        OmniLog.e(
+            TAG,
+            "not enough space for download: need=${required / 1024 / 1024}MB " +
+                "free=${available / 1024 / 1024}MB",
+        )
+        return false
+    }
+
     fun startDownload(modelId: String) {
         val context = ensureContext()
         val resolved = resolveMarketModel(modelId) ?: run {
@@ -273,6 +294,18 @@ object OmniInferMnnModelsManager {
 
         val repoDirName = resolved.repoPath.substringAfterLast('/')
         val destDir = File(AgentWorkspaceManager.modelsMnnDirectory(context), repoDirName)
+        // 多文件仓库动辄几 GB：下到一半 ENOSPC 会留下大量已完成的权重文件 + 巨大 .part，
+        // 而这个后端不会自动清理（llama.cpp 分支早就有预检）。
+        if (!ensureEnoughSpace(destDir.parentFile ?: destDir, resolved.item.fileSize)) {
+            emitEvent(
+                "download_error",
+                mapOf(
+                    "modelId" to resolved.modelId,
+                    "error" to "存储空间不足，无法下载 ${resolved.item.modelName}",
+                ),
+            )
+            return
+        }
         destDir.mkdirs()
 
         val task = MnnRepoDownloadTask(
