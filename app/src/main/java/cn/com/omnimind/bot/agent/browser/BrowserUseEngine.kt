@@ -620,8 +620,43 @@ class BrowserUseEngine(
     // a workspace ordered, while allowing different workspace engines to run
     // independently.
     private val actionMutex = Mutex()
+    /**
+     * tab 集合的写方全在主线程（createTabOnMain / hostCloseTab / onCreateWindow /
+     * onCloseWindow），读方却可能在 AI 的调用线程（list_tabs / get_page_info），
+     * 而 window.open / window.close 是主线程回调、绕开了 actionMutex —— 一边插删一边
+     * values.map 会抛 ConcurrentModificationException 或读到半更新快照。
+     * 统一改成「所有访问都在 tabsLock 内」+ 遍历一律先取快照副本。
+     */
+    private val tabsLock = Any()
     private val tabs = linkedMapOf<Int, BrowserTab>()
+
+    private fun tabsSnapshot(): List<BrowserTab> = synchronized(tabsLock) { tabs.values.toList() }
+
+    private fun tabFor(tabId: Int?): BrowserTab? =
+        synchronized(tabsLock) { tabId?.let { tabs[it] } }
+
+    private fun activeOrLastTab(): BrowserTab? =
+        synchronized(tabsLock) { activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull() }
+
+    private fun lastTabIdOrNull(): Int? = synchronized(tabsLock) { tabs.keys.lastOrNull() }
+
+    private fun tabsSize(): Int = synchronized(tabsLock) { tabs.size }
+
+    private fun putTab(tab: BrowserTab) {
+        synchronized(tabsLock) { tabs[tab.tabId] = tab }
+    }
+
+    private fun removeTab(tabId: Int): BrowserTab? {
+        return synchronized(tabsLock) { tabs.remove(tabId) }
+    }
+
+    private fun clearTabs() {
+        synchronized(tabsLock) { tabs.clear() }
+    }
+
     private var nextTabId = 0
+    /** 主线程写、AI 线程读（保活快照 / requireExistingTab 的兜底），必须可见。 */
+    @Volatile
     private var activeTabId: Int? = null
     private val appContext = context.applicationContext
     private val viewportWidth = appContext.resources.displayMetrics.widthPixels.coerceAtLeast(1080)
@@ -968,7 +1003,7 @@ class BrowserUseEngine(
         if (!aiControlEnabled && request.action.mutatesPageState()) {
             // 用户接管期间不执行会改页面的动作，但必须让模型知道「为什么没做、接下来
             // 该怎么办」，否则它只会反复重试同一个动作直到回合耗尽。
-            val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull()
+            val tab = activeOrLastTab()
             val message = "用户正在手动操作浏览器，AI 控制已暂停，本次 ${request.action.wireName} " +
                 "未执行。不要重复调用：请告诉用户你在等什么，并请他在浏览器面板点击「恢复 AI 控制」后继续。"
             return BrowserUseOutcome(
@@ -1057,7 +1092,7 @@ class BrowserUseEngine(
     }
 
     private fun liveSessionSnapshotOnMain(): Map<String, Any?> {
-        val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull()
+        val tab = activeOrLastTab()
         if (tab == null) {
             return unavailableSnapshot(workspaceId = workspaceId)
         }
@@ -1097,7 +1132,7 @@ class BrowserUseEngine(
             "lastAiActionAt" to lastAiActionAt,
             "lastAiActionMutatesPage" to lastAiActionMutatesPage,
             "aiControlChangedAt" to aiControlChangedAt,
-            "tabs" to tabs.values.map { item ->
+            "tabs" to tabsSnapshot().map { item ->
                 linkedMapOf(
                     "tabId" to item.tabId,
                     "url" to item.currentUrl,
@@ -1330,7 +1365,7 @@ class BrowserUseEngine(
         url: String?,
         tabId: Int?
     ) {
-        val tab = tabId?.let { requireExistingTab(it) } ?: tabs[activeTabId] ?: createTab()
+        val tab = tabId?.let { requireExistingTab(it) } ?: tabFor(activeTabId) ?: createTab()
         navigateTab(tab, url)
         publishSnapshotUpdate()
     }
@@ -1378,9 +1413,9 @@ class BrowserUseEngine(
         val tab = requireExistingTab(resolvedTabId)
         withContext(Dispatchers.Main.immediate) {
             releasePendingPromptsForTab(tab.tabId)
-            tabs.remove(tab.tabId)
+            removeTab(tab.tabId)
             if (activeTabId == tab.tabId) {
-                activeTabId = tabs.keys.lastOrNull()
+                activeTabId = lastTabIdOrNull()
             }
             runCatching {
                 (tab.webView.parent as? ViewGroup)?.removeView(tab.webView)
@@ -1415,7 +1450,7 @@ class BrowserUseEngine(
     }
 
     private suspend fun hostToggleDesktopMode(tabId: Int?) {
-        val tab = tabId?.let { requireExistingTab(it) } ?: tabs[activeTabId] ?: createTab()
+        val tab = tabId?.let { requireExistingTab(it) } ?: tabFor(activeTabId) ?: createTab()
         defaultUserAgentProfile = if (tab.userAgentProfile == BrowserUserAgentProfile.DESKTOP_SAFARI) {
             BrowserUserAgentProfile.MOBILE_SAFARI
         } else {
@@ -1433,7 +1468,7 @@ class BrowserUseEngine(
     }
 
     private fun hostToggleBookmark() {
-        val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull() ?: return
+        val tab = activeOrLastTab() ?: return
         hostStore.toggleBookmark(tab.currentUrl, tab.title)
         publishSnapshotUpdate()
     }
@@ -1476,7 +1511,7 @@ class BrowserUseEngine(
 
     private suspend fun reattachActiveTabIfNeeded() {
         val container = attachedContainer ?: return
-        val tab = activeTabId?.let { tabs[it] } ?: return
+        val tab = tabFor(activeTabId) ?: return
         withContext(Dispatchers.Main.immediate) {
             tab.contextWrapper.baseContext = container.context
             val currentParent = tab.webView.parent as? ViewGroup
@@ -1514,7 +1549,7 @@ class BrowserUseEngine(
                     }
                 }
             }
-            tabs.values.forEach { tab ->
+            tabsSnapshot().forEach { tab ->
                 runCatching { tab.webView.stopLoading() }
                 tab.isLoading = false
                 tab.loadWaiter?.cancel(ManualToolStopCancellationException())
@@ -1524,7 +1559,7 @@ class BrowserUseEngine(
     }
 
     suspend fun captureActiveFramePng(): ByteArray? {
-        val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull() ?: return null
+        val tab = activeOrLastTab() ?: return null
         activeTabId = tab.tabId
         val (vpWidth, vpHeight) = viewportDimensionsForProfile(tab.userAgentProfile)
         return withContext(Dispatchers.Main.immediate) {
@@ -1553,7 +1588,7 @@ class BrowserUseEngine(
         maxWidth: Int,
         quality: Int
     ): Map<String, Any?> {
-        val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull()
+        val tab = activeOrLastTab()
             ?: return unavailableSnapshot(workspaceId = workspaceId)
         activeTabId = tab.tabId
         val (vpWidth, vpHeight) = viewportDimensionsForProfile(tab.userAgentProfile)
@@ -1591,7 +1626,7 @@ class BrowserUseEngine(
         hostContext: Context
     ): Boolean {
         attachedContainer = container
-        val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull() ?: return false
+        val tab = activeOrLastTab() ?: return false
         activeTabId = tab.tabId
         tab.contextWrapper.baseContext = hostContext
         val currentParent = tab.webView.parent as? ViewGroup
@@ -1623,7 +1658,7 @@ class BrowserUseEngine(
         if (container != null && attachedContainer === container) {
             attachedContainer = null
         }
-        val tab = activeTabId?.let { tabs[it] } ?: tabs.values.lastOrNull() ?: return
+        val tab = activeOrLastTab() ?: return
         val parent = tab.webView.parent as? ViewGroup ?: return
         if (container == null || parent === container) {
             parent.removeView(tab.webView)
@@ -1695,14 +1730,14 @@ class BrowserUseEngine(
         pendingDialog = null
         pendingPermissionPrompt = null
         pendingExternalOpen = null
-        tabs.values.forEach { tab ->
+        tabsSnapshot().forEach { tab ->
             runCatching {
                 (tab.webView.parent as? ViewGroup)?.removeView(tab.webView)
                 tab.webView.stopLoading()
                 tab.webView.destroy()
             }
         }
-        tabs.clear()
+        clearTabs()
         activeTabId = null
         attachedContainer = null
         hostActionTimestampsMs.clear()
@@ -1738,9 +1773,9 @@ class BrowserUseEngine(
         val tab = requireTabForMutation(request)
         withContext(Dispatchers.Main.immediate) {
             releasePendingPromptsForTab(tab.tabId)
-            tabs.remove(tab.tabId)
+            removeTab(tab.tabId)
             if (activeTabId == tab.tabId) {
-                activeTabId = tabs.keys.lastOrNull()
+                activeTabId = lastTabIdOrNull()
             }
             runCatching {
                 (tab.webView.parent as? ViewGroup)?.removeView(tab.webView)
@@ -1759,7 +1794,7 @@ class BrowserUseEngine(
     }
 
     private suspend fun executeNavigate(request: BrowserUseRequest): BrowserUseOutcome {
-        val tab = request.tabId?.let { requireExistingTab(it) } ?: tabs[activeTabId]
+        val tab = request.tabId?.let { requireExistingTab(it) } ?: tabFor(activeTabId)
             ?: createTab()
         val snapshot = navigateTab(tab, request.url)
         return simpleOutcome(
@@ -2136,7 +2171,7 @@ class BrowserUseEngine(
     }
 
     private suspend fun executeSetUserAgent(request: BrowserUseRequest): BrowserUseOutcome {
-        val tab = request.tabId?.let { requireExistingTab(it) } ?: tabs[activeTabId]
+        val tab = request.tabId?.let { requireExistingTab(it) } ?: tabFor(activeTabId)
             ?: createTab()
         var snapshot: LoadSnapshot? = null
         withContext(Dispatchers.Main.immediate) {
@@ -2529,7 +2564,7 @@ class BrowserUseEngine(
     private fun listTabsPayload(): Map<String, Any?> {
         return mapOf(
             "activeTabId" to activeTabId,
-            "tabs" to tabs.values.map { tab ->
+            "tabs" to tabsSnapshot().map { tab ->
                 mapOf(
                     "tabId" to tab.tabId,
                     "url" to tab.currentUrl,
@@ -2561,7 +2596,7 @@ class BrowserUseEngine(
     ): BrowserTab {
         require(Looper.myLooper() == Looper.getMainLooper()) { "createTabOnMain must run on main thread" }
         require(!destroyed) { "浏览器会话已关闭，请重新打开页面后再操作" }
-        require(tabs.size < MAX_TAB_COUNT) {
+        require(tabsSize() < MAX_TAB_COUNT) {
             "标签页数量已达上限（$MAX_TAB_COUNT），请先关闭不需要的标签页"
         }
         val tabId = ++nextTabId
@@ -2607,13 +2642,13 @@ class BrowserUseEngine(
         webView.setDownloadListener(createDownloadListener(tab))
         val (vpWidth, vpHeight) = viewportDimensionsForProfile(profile)
         layoutWebView(webView, vpWidth, vpHeight)
-        tabs[tabId] = tab
+        putTab(tab)
         activeTabId = tabId
         return tab
     }
 
     private suspend fun requireExistingTab(tabId: Int): BrowserTab {
-        return tabs[tabId] ?: throw IllegalArgumentException("未找到 tab_id=$tabId")
+        return tabFor(tabId) ?: throw IllegalArgumentException("未找到 tab_id=$tabId")
     }
 
     private suspend fun requireTabForMutation(request: BrowserUseRequest): BrowserTab {
@@ -3385,7 +3420,7 @@ class BrowserUseEngine(
     private suspend fun invokeUserscriptMenu(commandId: String?) {
         val resolvedCommandId = commandId?.trim().orEmpty()
         require(resolvedCommandId.isNotEmpty()) { "缺少 commandId" }
-        val targetTab = tabs.values.firstOrNull { it.pageMenuCommands.containsKey(resolvedCommandId) }
+        val targetTab = tabsSnapshot().firstOrNull { it.pageMenuCommands.containsKey(resolvedCommandId) }
             ?: throw IllegalArgumentException("未找到 userscript 菜单项")
         val result = evaluateValue(
             targetTab,
@@ -3401,11 +3436,11 @@ class BrowserUseEngine(
 
     private suspend fun refreshUserscriptState() {
         withContext(Dispatchers.Main.immediate) {
-            tabs.values.forEach { tab ->
+            tabsSnapshot().forEach { tab ->
                 tab.pageMenuCommands.clear()
             }
         }
-        tabs.values.forEach { tab ->
+        tabsSnapshot().forEach { tab ->
             tab.currentUrl?.takeIf { it.startsWith("http://") || it.startsWith("https://") }?.let {
                 runCatching { injectUserscriptsIfNeeded(tab) }
             }
@@ -4115,7 +4150,7 @@ class BrowserUseEngine(
             // 先校验 transport 再建 tab：反过来的话 cast 失败会留下一个「已进 tabs、
             // activeTabId 已切过去、但从未 attach 也永不 destroy」的幽灵 tab。
             val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-            if (tabs.size >= MAX_TAB_COUNT) {
+            if (tabsSize() >= MAX_TAB_COUNT) {
                 // 广告/反爬站点会 for(...) window.open(...)：不设上限就是几十个 WebView
                 // 同时存活，必然 OOM。
                 OmniLog.w("BrowserUseEngine", "onCreateWindow rejected: tab limit $MAX_TAB_COUNT reached")
@@ -4135,11 +4170,11 @@ class BrowserUseEngine(
         }
 
         override fun onCloseWindow(window: WebView?) {
-            val closeTab = tabs.values.firstOrNull { it.webView == window } ?: return
+            val closeTab = tabsSnapshot().firstOrNull { it.webView == window } ?: return
             releasePendingPromptsForTab(closeTab.tabId)
-            tabs.remove(closeTab.tabId)
+            removeTab(closeTab.tabId)
             if (activeTabId == closeTab.tabId) {
-                activeTabId = tabs.keys.lastOrNull()
+                activeTabId = lastTabIdOrNull()
             }
             closeTab.pendingFileChooserCallback?.onReceiveValue(null)
             runCatching {

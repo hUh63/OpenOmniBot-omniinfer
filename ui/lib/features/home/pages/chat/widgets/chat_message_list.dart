@@ -153,6 +153,12 @@ class _ChatMessageListState extends State<ChatMessageList> {
   int _timelineCacheStructureRevision = -1;
   Set<String>? _timelineCacheActiveTaskIds;
   String? _timelineCacheAgentId;
+  /// messageId → 下标。分组行原来对组内每条消息各做一次 List.indexWhere（线性），
+  /// 即每帧 O(消息总数 × 组内条数)。流式内容更新不改结构，所以按 structureRevision
+  /// 失效即可。
+  Map<String, int>? _messageIndexCache;
+  ObservableChatMessageList? _messageIndexCacheSource;
+  int _messageIndexCacheRevision = -1;
   final Map<String, GlobalKey> _entryRowKeys = <String, GlobalKey>{};
   int _navigatorJumpSerial = 0;
   bool _navigatorJumpUserInterrupted = false;
@@ -681,12 +687,30 @@ class _ChatMessageListState extends State<ChatMessageList> {
     return false;
   }
 
+  Map<String, int> _messageIndexMap(ObservableChatMessageList messages) {
+    final cached = _messageIndexCache;
+    if (cached != null &&
+        identical(_messageIndexCacheSource, messages) &&
+        _messageIndexCacheRevision == messages.structureRevision) {
+      return cached;
+    }
+    final map = <String, int>{};
+    for (var index = 0; index < messages.length; index++) {
+      // putIfAbsent 与 indexWhere 的「取第一个匹配」语义一致。
+      map.putIfAbsent(messages[index].id, () => index);
+    }
+    _messageIndexCache = map;
+    _messageIndexCacheSource = messages;
+    _messageIndexCacheRevision = messages.structureRevision;
+    return map;
+  }
+
   ValueListenable<ChatMessageModel>? _messageListenableFor(
     ObservableChatMessageList messages,
     String messageId,
   ) {
-    final index = messages.indexWhere((message) => message.id == messageId);
-    if (index == -1) {
+    final index = _messageIndexMap(messages)[messageId];
+    if (index == null) {
       return null;
     }
     return messages.listenableAt(index);

@@ -3,6 +3,7 @@ package cn.com.omnimind.bot.omniinfer
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.StatFs
 import androidx.documentfile.provider.DocumentFile
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.baselib.util.OmniLog
@@ -29,6 +30,7 @@ import java.util.concurrent.TimeUnit
 
 object OmniInferLiteRtModelsManager {
     private const val TAG = "OmniInferLiteRtModelsManager"
+    private const val MIN_FREE_SPACE_RESERVE_BYTES = 256L * 1024L * 1024L
     private const val BACKEND_NAME = OmniInferLocalRuntime.BACKEND_LITERT
     private const val MMKV_ID = "omniinfer_config"
     private const val KEY_ACTIVE_MODEL_ID = "omniinfer_litert_active_model_id"
@@ -299,6 +301,44 @@ object OmniInferLiteRtModelsManager {
         return getConfig()
     }
 
+    /**
+     * 探测远端文件大小。先发 HEAD；不支持 HEAD 的 CDN 退回 `Range: bytes=0-0` 读
+     * Content-Range 的总长度。探不到就返回 0（按未知放行，不阻断正常下载）。
+     */
+    private fun probeRemoteSize(url: String): Long {
+        runCatching {
+            val head = Request.Builder().url(url).head().build()
+            httpClient.newCall(head).execute().use { response ->
+                if (response.isSuccessful) {
+                    val length = response.header("Content-Length")?.toLongOrNull() ?: 0L
+                    if (length > 0L) return length
+                }
+            }
+        }.onFailure { OmniLog.w(TAG, "probe HEAD failed: ${it.message}") }
+        return runCatching {
+            val range = Request.Builder().url(url).header("Range", "bytes=0-0").build()
+            httpClient.newCall(range).execute().use { response ->
+                response.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull() ?: 0L
+            }
+        }.getOrDefault(0L)
+    }
+
+    /** 下载前看可用空间；拿不到 StatFs 时放行，避免误伤。 */
+    private fun ensureEnoughSpace(directory: File, expectedSize: Long): Boolean {
+        if (expectedSize <= 0L) return true
+        runCatching { directory.mkdirs() }
+        val available = runCatching { StatFs(directory.absolutePath).availableBytes }.getOrNull()
+            ?: return true
+        val required = expectedSize + MIN_FREE_SPACE_RESERVE_BYTES
+        if (available >= required) return true
+        OmniLog.e(
+            TAG,
+            "not enough space for download: need=${required / 1024 / 1024}MB " +
+                "free=${available / 1024 / 1024}MB",
+        )
+        return false
+    }
+
     fun startDownload(modelId: String) {
         val context = ensureContext()
         val marketModel = findMarketModel(modelId) ?: run {
@@ -325,8 +365,23 @@ object OmniInferLiteRtModelsManager {
         }
 
         val partFile = File(liteRtDir, "${marketModel.fileName}.part")
+        val alreadySaved = partFile.takeIf { it.exists() }?.length() ?: 0L
+        // 市场条目里没有文件大小字段，只能下起来才知道 —— 但 LiteRT 模型都是 GB 级，
+        // 空间不够时下到一半 ENOSPC 只会留下巨大 .part（这个后端不会自动清理）。
+        // 所以先探一次远端大小再决定要不要开始。
+        val remoteSize = probeRemoteSize(marketModel.downloadUrl)
+        if (remoteSize > 0L && !ensureEnoughSpace(liteRtDir, remoteSize - alreadySaved)) {
+            emitEvent(
+                "download_error",
+                mapOf(
+                    "modelId" to marketModel.id,
+                    "error" to "存储空间不足，无法下载 ${marketModel.name}",
+                ),
+            )
+            return
+        }
         val state = LiteRtDownloadState(
-            savedSize = partFile.takeIf { it.exists() }?.length() ?: 0L,
+            savedSize = alreadySaved,
             currentFile = marketModel.fileName,
         )
         activeDownloads[marketModel.id] = state
