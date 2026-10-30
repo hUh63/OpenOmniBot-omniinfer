@@ -113,73 +113,102 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.8
+          tag_name: v0.6.3-omniinfer-v6.5.9
           # Without this the tag lands on the default branch's HEAD instead of the
           # commit this build actually checked out.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 闪退修复 / 停止语义统一 / 通道与网络加固 (v0.6.3-omniinfer-v6.5.8)"
+          name: "OmniInfer 版 · 静默断流不再卡死 / Android 15 前台服务 / 提醒与下载一组 (v0.6.3-omniinfer-v6.5.9)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6.5.8)：8 个提交，主题是「修掉会闪退的那一条 + 把『永久卡死』从通道层
-            到 UI 层扫干净」，并把上游两个 UI 提交逐个 hunk 核过一遍。
+            本轮 (v6.5.9)：6 个提交，主线是「不再永久停在思考中」和「targetSdk 36 下的
+            前台服务 / 提醒 / 下载不再静默坏掉」。全部改动只过编译门，未做真机回归。
 
-            一、点「模型市场 / 高级设置」闪退
-            - 根因：本地模型通道的 listAllInstalledModels 分支漏了 return —— 异步回包之后代码
-              继续落到「按 backend 分派」的 when，走 else -> notImplemented()，同一个 Result
-              被 reply 两次（Reply already submitted）；第二次 reply 又发生在 runSuspend 的
-              catch 里，协程直接 FATAL。
-            - 通道层统一 OnceResult（AtomicBoolean 只放行第一次回包），同一缺陷的另外 6 个
-              形态（McpServer / RemoteMcpConfig / Cache / VoicePlayback / SpecialPermission /
-              Overlay）一并收掉。
+            一、回合永久卡在 thinking（SSE 静默断流）
+            - 通道层：ChatTask（小万普通对话）的收尾只挂在 onClosed / onFailure 上，而上游或
+              中间代理静默断流时两者都不回调 —— Dart 侧永远收不到 onChatMessageEnd，任务不
+              结束、taskId 永久占位。补按「最后一次事件」的空闲看门狗（180s），超时走既有
+              失败收尾。
+            - 上下文压缩：摘要流裸 await() 一个只能由回调完成的 Deferred，断流时永不返回，
+              而它正处在回合主链上 → 整条回合永久 thinking。同样补空闲看门狗，超时按压缩
+              失败处理（AgentLlmClient 早就有这个 watchdog，这两处漏了）。
 
-            二、「停止」有了统一定义
-            - 只中止当前回合：保留用户消息与已产出内容，以 cancelled 收敛，只移除纯占位卡；
-              700ms 去抖；ACP 回合以官方 cancel 为准则 + 12s 本地兜底；本地回合直接收尾。
-            - 入口补全：agent 正在等你回答澄清时，停止按钮不再消失。
+            二、Android 15 / targetSdk 36 兼容
+            - IM 渠道开机自启：Android 15 禁止从 BOOT_COMPLETED 启动 dataSync 型前台服务，
+              原来没兜住 → 开机即崩且渠道永久不恢复。补异常兜底（下次打开 App 再拉起）。
+            - IM 渠道常驻服务：补 onTimeout —— dataSync 型 FGS 有 6h/24h 配额，到点不自己
+              stopSelf 会抛 RemoteServiceException 崩进程。
+            - 提醒闹钟：响铃服务原来返回 START_STICKY，进程被回收后系统以 null intent 重启，
+              代码直接 stopSelf → 铃声和通知一起消失，而记录已落成 ringing、重排又把
+              ringing 排除 —— 这条提醒本次开机周期内永远不会再响。改为 START_NOT_STICKY。
+            - 开机重排补「精确闹钟权限」判断（原来函数名叫 IfPermitted 却没检查，没权限时
+              静默降级成非精确闹钟，仍报成功）。
 
-            三、切会话模式的草稿交接
-            - 「存旧草稿 → 恢复新草稿 → 切模式」放进同一段同步代码，await 间隙里敲的字不会再
-              被覆盖；恢复草稿不再触发 slash 面板 / 自动保存。
+            三、本地模型下载
+            - MNN 仓库下载：缺 416 分支，.part 长度已达标后每次「继续下载」都 416 且 .part
+              永不清理 → 永久失败；renameTo 返回值被丢弃 → 可能报 success 但盘上只有 .part
+              （列表还看不到）。补 416 清理与 rename 校验。
+            - LiteRT 下载：同样缺 416 恢复，补「删 .part 后报可重试错误」。
+            - QNN / MNN：补下载前剩余空间预检（llama.cpp 分支早就有），避免下到一半 ENOSPC
+              只留几 GB 垃圾。
+            - 端口变更：四个后端的 saveConfig 都在方法通道主线程执行，而改端口会连带 stop()
+              卸载引擎（native free 掉几 GB 模型）。统一挪到 IO。
+            - llama / QNN / LiteRT 的 startDownload / pauseDownload 同样从主线程挪到 IO
+              （MNN 分支早已如此）。
+            - litert-npu 后端在通道分派里缺失：会落到 else 被当成 llama.cpp（列 GGUF、下
+              GGUF，再把 .gguf 交给 NPU 后端加载）。分派与 getCurrentConfig 两处补齐。
 
-            四、插件按「操作顺序」生效
-            - 启用顺序落盘（activationSeq）：先启用的先注册、同名工具先到先得；UI 列表顺序与
-              你的操作顺序一致（升级前这个顺序是丢的）。
+            四、局域网代理
+            - start(wait=false) 后不核对端口是否真绑上就置 running：端口被占用时对外报一个
+              连不上的地址，且之后每次 start() 都被「已运行且端口相同」早退拦住，只能杀
+              进程恢复。补 600ms 异步自检，失败则释放并允许重试。
 
-            五、通道层与 UI 层的「永久卡死」大扫除
-            - Kotlin：7 个 channel 接入 OnceResult；3 个 scope 换 SupervisorJob（一次逃逸异常
-              会让整个通道静默失效）；ScreenDialogChannel 的 scope 取消后不重建；7 处把取消当
-              业务错误回包 → 改为 CancellationException 穿透。
-            - Dart：device / permission / 上传 / 浏览器会话 / 本地模型 / 运行日志 / 语音 /
-              快捷记录 / 存储 / PDF / 场景模型 / 浮层关闭 / 定时任务 等 20+ 处平台调用补超时与
-              兜底；终端初始化进度流在原生分发被拆后会复位缓存（不再永久「初始化中」）。
-            - AssistCore 的 42 个原生调用补分档超时（10s~120s），4 处裸 await 补容错，回调分发
-              改为快照遍历 + 逐个隔离（一个监听器抛异常不再让其余监听器全收不到）。
+            五、文件与保存
+            - 系统保存对话框（SAF）与 MediaStore 直存两条路径都在主线程整文件 copyTo，
+              几十 MB 的录屏/日志必然 ANR。两条都挪到 IO，直存失败回主线程回退到对话框。
+            - 浏览器分享暂存目录 browser_shared_exports 只写不删 → 补「保留 24 个 / 2 天」清理；
+              目录落在 FileProvider 覆盖范围外时不再重试同一个必然失败的调用。
 
-            六、网络 / 文件 / 大响应
-            - OkHttp：429 与取消分支不关 Response 导致连接泄漏；SSE 每次新建 client（线程池
-              泄漏 + 每次重做 DNS/TCP/TLS）；下载非 2xx 不关流、失败留半截文件、循环里调
-              System.gc()（整进程 STW）。
-            - HttpChannel：响应体整包进内存（大响应 OOM）→ 4MB 上限 + truncated 标记；
-              multipart 上传所有文件硬写成 image/*、且无视 method 强制 POST。
-            - FileSaveChannel：分享时在主线程整文件复制（大文件 ANR）→ 64MB 上限 + 分块复制 +
-              失败清理。
+            六、浏览器
+            - 补 onRenderProcessGone：渲染进程崩溃时默认返回 false 会让系统连宿主进程一起
+              杀；即便不崩，该 WebView 的 evaluateJavascript 回调也永不回调（只能等满 15s），
+              tab 还占位不重建。现在接管异常、收掉该 tab。
+            - 截图 JPEG 压缩 / 写盘 / base64 从主线程挪到 Default（只有 draw 必须在主线程）。
+            - 面板快照原来一次调 6 次 downloadManager.snapshot()（每次读 MMKV + 全量 JSON
+              反序列化），而页面进度 400ms 就重建一次快照，全落在主线程。改为只读一次。
+            - 文件选择器投递 Activity 被系统重建时按取消收场，避免页面 <input type=file>
+              永久卡在「等待选择」。
 
-            七、上游同步（逐个 hunk 核过，不只三方比对）
-            - 已合：conversation_slidable 整文件（全滑后重建 Slidable key）+ 归档页两处调用点。
-            - 其余 25 个文件按四类理由写入 docs/reference/upstream-sync-ledger.md：依赖我们已
-              删除的组件、依赖我们未采用的版式、tour 步数模型不同（我们 6 步、上游 4 步）、
-              onboarding 联动。要真正跟上这三块 UI 需要单独立项。
+            七、日程 / 定时 / 记忆
+            - 全天日程「只改标题」也会把结束日往后推一天（更新时 DTEND 已是排他端点，又被
+              +1 天）。为已排他的端点单独分支。
+            - 定时任务「停用」原来走 cancelTask，原生会连 Flutter 侧记录一起删 —— 停用变成
+              彻底删除、重启后消失且无法再启用。统一改走 scheduleTask（upsert 保留记录）。
+            - MEMORY.md 设置页整篇覆盖写会吃掉期间 agent / 夜间整理追加的条目：保存前比对
+              最新内容，变了且用户编辑过则弹窗选「重新加载」或「覆盖保存」。
 
-            八、性能与无障碍
-            - 长会话消息列表：findChildIndexCallback 从每帧 O(n×可见数) 降到 O(1)；流式刷新
-              不再每帧重建全量 {id: message}。
-            - Agent 会话页 3 秒轮询不再每次 setState 两遍。
-            - 模式切换器补读屏语义（原来纯图标 GestureDetector 不可操作）；提示条在 1.5~2.0x
-              大字体下不再裁字。
+            八、UI 与性能
+            - 附件卡片两处 await 后 setState 缺 mounted 守卫（卡片被复用即崩）。
+            - 触底自动加载历史的 catch 里 rethrow，而这个 Future 被 unawaited 丢弃 → 变成
+              无人接收的异步错误。改为静默收场。
+            - 消息 linkPreviews 每次访问都整份反序列化（流式每个 chunk 都触发）→ 惰性缓存。
+            - 多图附件渲染的 indexOf 线性查找（O(n²)）→ 同一性查表。
+            - 计时条每秒 setState 重建整行 → ValueNotifier + ValueListenableBuilder 只重建文本。
+            - 批量静态文案改走 LegacyTextLocalizer（68 处），跟随语言设置。
+            - 平台调用补超时：overlay 7 个方法 10s 上限 + 通用 catch；网络公共参数 version
+              取真实 versionName（原来硬编码 1.0.0），同名 query 参数由 add 改 set。
 
-            全部改动只经过编译门（verify-omniinfer）验证，尚未做真机回归；安装后如遇异常请反馈
-            具体操作路径。
+            九、CI
+            - 删除早已被清空的 sync-models-dev workflow（每次 push 都跑出一个无效 workflow
+              的 failure，把 Actions 列表长期染红）。
+
+            上游同步：a5334740 的 onboarding 改动已按新版重写落地（新增可选的「选择模型服务商」
+            步骤、provider 页常驻渲染保持登录态、footer 增加导航中心），26ac7f4d 的会话滑动
+            归档早已随 conversation_slidable 落地；抽屉顶部搜索头保留我们自己的实现（上游那版
+            依赖我们尚未引入的组件，功能等价）。provider 页保留本仓版本（含本地模型 / 自定义
+            API 入口）。
+
+            安装后如遇异常，请反馈具体操作路径。
           files: apk-out/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
