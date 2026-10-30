@@ -64,6 +64,13 @@ class BrowserFileChooserRequestActivity : ComponentActivity() {
             finishWithCancel()
             return
         }
+        if (savedInstanceState != null) {
+            // 系统重建（配置变更 / 内存回收）时原来什么都不做：界面变成一个空白 Activity，
+            // 而注入页面的 file chooser 回调永远不会被调用，那个 <input type=file> 就此卡在
+            // 「等待选择」，之后同页面再点上传也没反应。这里按取消收场，让页面能重新发起。
+            finishWithCancel()
+            return
+        }
         if (savedInstanceState == null) {
             val allowMultiple = intent.getBooleanExtra(BrowserFileChooserCoordinator.allowMultipleExtra(), false)
             val mimeTypes = intent.getStringArrayExtra(BrowserFileChooserCoordinator.mimeTypesExtra())
