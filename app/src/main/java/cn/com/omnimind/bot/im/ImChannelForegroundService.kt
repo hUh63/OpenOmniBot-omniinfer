@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.R
 import cn.com.omnimind.bot.activity.MainActivity
 
@@ -33,6 +34,16 @@ class ImChannelForegroundService : Service() {
     override fun onDestroy() {
         ImChannelManager.stop()
         super.onDestroy()
+    }
+
+    /**
+     * Android 15 给 dataSync 型前台服务 6 小时/24 小时配额，到点系统会调用 onTimeout：
+     * 不自己 stopSelf 就会抛 RemoteServiceException 直接把进程崩掉。
+     */
+    override fun onTimeout(startId: Int) {
+        OmniLog.e(TAG, "IM channel foreground service hit dataSync timeout; stopping")
+        ImChannelManager.stop()
+        stopSelf(startId)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -80,6 +91,7 @@ class ImChannelForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "ImChannelService"
         private const val CHANNEL_ID = "im_channel_service"
         private const val NOTIFICATION_ID = 23061
         private const val ACTION_STOP = "cn.com.omnimind.bot.im.STOP"

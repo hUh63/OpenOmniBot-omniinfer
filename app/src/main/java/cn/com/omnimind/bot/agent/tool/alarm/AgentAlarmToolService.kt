@@ -170,6 +170,13 @@ class AgentAlarmToolService(
     }
 
     fun reschedulePersistedExactRemindersIfPermitted(): Int {
+        // 名字里的 IfPermitted 之前并没有真的检查：没有精确闹钟权限时 setAlarmClock()
+        // 抛 SecurityException，被 scheduleExactAlarms 的 runCatching 吞掉后降级成
+        // set()（Doze 下能晚几十分钟），而这里仍返回「成功条数」，用户以为精确提醒还在。
+        if (!hasExactAlarmPermission()) {
+            // 不动记录：权限恢复后（用户重新授权）下一次开机重排仍能把它们装回去。
+            return 0
+        }
         val now = System.currentTimeMillis()
         val records = loadRecords()
         val activeRecords = records.filter { record ->

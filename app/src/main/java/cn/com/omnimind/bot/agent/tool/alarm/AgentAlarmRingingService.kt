@@ -84,7 +84,10 @@ class AgentAlarmRingingService : Service() {
         startAlarmAudio()
         startVibrationLoop()
 
-        return START_STICKY
+        // 不能用 START_STICKY：sticky 重启时系统以 intent == null 调用，上面的分支会直接
+        // stopSelf()，铃声与通知一起消失；而记录在起服务前已被写成 state=ringing，
+        // 重排逻辑又把 ringing 全部排除 —— 这条提醒本次开机周期内永远不会再响。
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {

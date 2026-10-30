@@ -28,6 +28,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest as WebPermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -1062,7 +1063,15 @@ class BrowserUseEngine(
         }
         activeTabId = tab.tabId
         val sessionHistory = buildSessionHistory(tab)
+        // snapshot() 每次都是「读 MMKV + 全量 JSON 反序列化」。原来同一个快照里调了 6 次
+        // （snapshot + activeCount ×2 + failedCount + overallProgress +
+        // latestCompletedFileName），而页面进度回调节流后只有 400ms 就重建一次，
+        // 这些全落在主线程上。改成只读一次，其余从这一份列表算。
         val downloads = downloadManager.snapshot()
+        val activeDownloads = downloads.filter {
+            it.status == BrowserDownloadManager.STATUS_QUEUED ||
+                it.status == BrowserDownloadManager.STATUS_DOWNLOADING
+        }
         val pendingInstall = hostStore.readPendingUserscript()
         return linkedMapOf(
             "available" to true,
@@ -1117,15 +1126,20 @@ class BrowserUseEngine(
                     "visitedAt" to item.visitedAt
                 )
             },
-            "activeDownloadCount" to downloadManager.activeCount(),
+            "activeDownloadCount" to activeDownloads.size,
             "downloads" to downloads.map { item ->
                 buildDownloadPayload(item)
             },
             "downloadSummary" to linkedMapOf(
-                "activeCount" to downloadManager.activeCount(),
-                "failedCount" to downloadManager.failedCount(),
-                "overallProgress" to downloadManager.overallProgress(),
-                "latestCompletedFileName" to downloadManager.latestCompletedFileName()
+                "activeCount" to activeDownloads.size,
+                "failedCount" to downloads.count {
+                    it.status == BrowserDownloadManager.STATUS_FAILED
+                },
+                "overallProgress" to overallProgressOf(activeDownloads),
+                "latestCompletedFileName" to downloads
+                    .filter { it.status == BrowserDownloadManager.STATUS_COMPLETED }
+                    .maxByOrNull { it.updatedAt }
+                    ?.fileName
             ),
             "sessionHistory" to sessionHistory,
             "externalOpenPrompt" to pendingExternalOpen?.let { prompt ->
@@ -1194,6 +1208,16 @@ class BrowserUseEngine(
                 }
             )
         )
+    }
+
+    /** 与 BrowserDownloadManager.overallProgress() 同口径，但作用在已读到的列表上。 */
+    private fun overallProgressOf(active: List<BrowserDownloadTaskRecord>): Double? {
+        val measured = active.filter { it.totalBytes > 0L }
+        if (measured.isEmpty()) return null
+        val total = measured.sumOf { it.totalBytes }
+        if (total <= 0L) return null
+        val downloaded = measured.sumOf { it.downloadedBytes.coerceAtMost(it.totalBytes) }
+        return downloaded.toDouble() / total.toDouble()
     }
 
     private fun buildDownloadPayload(item: BrowserDownloadTaskRecord): Map<String, Any?> {
@@ -1765,6 +1789,7 @@ class BrowserUseEngine(
         var imageDataUrl: String? = null
         var captureWidth = vpWidth
         var captureHeight = vpHeight
+        var capturedBitmap: Bitmap? = null
         withContext(Dispatchers.Main.immediate) {
             val layoutSize = layoutWebView(tab.webView, vpWidth, vpHeight)
             captureWidth = layoutSize.first
@@ -1780,6 +1805,12 @@ class BrowserUseEngine(
             val canvas = Canvas(bitmap)
             canvas.drawColor(Color.WHITE)
             tab.webView.draw(canvas)
+            capturedBitmap = bitmap
+        }
+        // 压缩 / 写盘 / base64 编码是纯 CPU + IO：原来全在主线程里做，桌面档一张
+        // 1280×density 的位图编码期间 UI 完全冻住，还有 OOM 风险。只有 draw 必须在主线程。
+        withContext(Dispatchers.Default) {
+            val bitmap = capturedBitmap ?: return@withContext
             FileOutputStream(screenshotFile).use { stream ->
                 bitmap.compress(Bitmap.CompressFormat.JPEG, SCREENSHOT_JPEG_QUALITY, stream)
             }
@@ -3789,6 +3820,30 @@ class BrowserUseEngine(
                 publishSnapshotUpdate()
                 true
             }
+        }
+
+        override fun onRenderProcessGone(
+            view: WebView?,
+            detail: RenderProcessGoneDetail?
+        ): Boolean {
+            // 渲染进程崩溃（低内存 / 超大页面很常见）。默认返回 false 会让系统把宿主进程
+            // 一起杀掉；就算不崩，这个 WebView 也已经不可用：evaluateJavascript 的回调
+            // 永不回调，只能等满 15s 超时，而 tab 还留在 tabs 里占位、也不会重建 ——
+            // 整条浏览器链路一次失败后永久不可用。这里收掉该 tab 并返回 true 接管。
+            val crashed = runCatching { detail?.didCrash() }.getOrNull() == true
+            OmniLog.w(
+                "BrowserUseEngine",
+                "render process gone for tab ${tab.tabId} (crashed=$crashed); closing tab"
+            )
+            tab.loadWaiter?.takeIf { it.isActive }?.completeExceptionally(
+                IllegalStateException("网页渲染进程已崩溃，请重新打开页面")
+            )
+            tab.pendingFileChooserCallback?.onReceiveValue(null)
+            tab.pendingFileChooserCallback = null
+            mainScope.launch {
+                runCatching { hostCloseTab(tab.tabId) }
+            }
+            return true
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
