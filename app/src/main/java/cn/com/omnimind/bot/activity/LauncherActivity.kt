@@ -64,8 +64,8 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun applyResponsiveOrientation() {
-        val isTablet = resources.configuration.smallestScreenWidthDp >= 600
-        requestedOrientation = if (isTablet) {
+        val allowRotation = resources.configuration.smallestScreenWidthDp >= 600 || isInMultiWindowMode
+        requestedOrientation = if (allowRotation) {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         } else {
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -93,16 +93,9 @@ class LauncherActivity : ComponentActivity() {
         }
         OmniLog.d(TAG, "startMainActivity")
         startActivity(intent)
-        // 不调用 finish()，让 MainActivity 的 Flutter 页面自然覆盖 Loading
-        // LauncherActivity 会在 MainActivity 渲染完成后被系统回收
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // 当 MainActivity 覆盖 LauncherActivity 后，finish 自己
-        if (!isFinishing) {
-            OmniLog.d(TAG, "LauncherActivity onStop, finishing")
-            finish()
-        }
+        // This activity only routes intents and never draws content. Finish
+        // before onResume so the starting window can transfer to MainActivity
+        // without displaying an intermediate launcher window.
+        finish()
     }
 }

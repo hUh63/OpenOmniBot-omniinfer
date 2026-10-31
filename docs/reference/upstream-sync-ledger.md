@@ -161,3 +161,41 @@
    `mt6991` 线程默认值），**覆盖上游文件前先看这些加固是否还在**。
 
 4. 合并后按惯例过编译门（workflow `363430385`，约 25 分钟），再考虑发版。
+
+---
+
+## 上游 `v0.7.0.2`（`bfe8ba1e99`，40 个提交 / 601 个文件，2026-10-30 评估）
+
+这是 `v0.6.3.6` 之后的一次**大版本跃迁**（0.6.3.7 → 0.7.0.2），含 ACP 运行时重构、
+FlClash 导航组件族、可选 Root 后端、会话历史读取架构重构等多条主线。逐文件三方比对后，
+本轮只吸收与主线解耦的部分。
+
+### 已吸收
+
+| 提交 | 内容 | 落地方式 |
+| --- | --- | --- |
+| `aadb83dcc4` | Preserve Gson models from R8 shrinking | 三方合并 `app/proguard-rules.pro`（`-keepclassmembers,allowoptimization` → `-keep` + `<init>(...)`，保住类身份/构造器/泛型目标），0 冲突 |
+| `ace39919fb` | Optimize cold startup and remove the launcher transition | 三方合并 `LauncherActivity.kt`（启动即 finish，不再等 MainActivity 覆盖）与 `MainActivity.kt`（splash `setOnExitAnimationListener` 立即移除、抽 `applyResponsiveOrientation` + `onConfigurationChanged`、分屏允许旋转），0 冲突 |
+| `48e6350a0d` | Measure startup costs and defer cache and shader work | 只取 `ui/lib/app_bootstrap.dart`、`ui/lib/services/models_dev_catalog_service.dart`（本分支未分叉，0 冲突）；`App.kt` 因引入 `measureStartupStep` / `AppSecretStore.prepare` / workspace seed 线程化，与本分支启动序列（含 `LocalModelFeatureInstaller`）交叉，保留本地版 |
+| `08daea9d1c` | Prefer compressed DEX packaging | 本分支 `dex.useLegacyPackaging` 本来就是 `true`；上游只是把它改成 gradle property 可关闭，无实质收益，不引入 |
+
+### 未吸收（按依赖关系与改动性质）
+
+| 提交 | 内容 | 为什么不合并 |
+| --- | --- | --- |
+| `084b44fb61` | 可选 Root 后端与系统设备控制（新增 `baselib/privileged` 包，约 30 文件） | **新功能**，且改动横跨 ACP（`XiaowanAcpConnection` / `OmniAgentExecutor` / `AgentToolRegistry` / `AgentToolDefinitions`）与本分支定制区 |
+| `cf436b7e42` | 修正系统命令能力检测误判 | **依赖 `084b44fb61`**：新版 `ShizukuCapabilityManager` 直接 import `PrivilegedRequest/Result/Provider/Policy`，单取必然编译不过；要这条修复就得整体引入 Root 后端 |
+| `765e1f8cae` | 限制历史展示与运行日志的内存占用（52 文件） | 本质是**会话历史读取架构重构**（新增 `HistoryMessageJsonReader` / `AgentHistoryDisplayPager` / `AgentHistoryDisplayProjection`），与本分支的分页 `scanned` 口径、按需快照、`refreshConversationMetadata` 定向更新深度交叉 |
+| `4746538b1f`、`13fea761dc`、`e463001ce0`、`9a1d76878e`、`11b26b790d` | ACP runtime 生命周期与会话归属重构（5 轮） | 结构性重构，本分支保留自己的 ACP 集成与 OmniInfer 运行时 |
+| `52562f9615`、`25b32e03ad` | 移除全局助手选择 / 移除内置 DeepSeek Harness（BREAKING） | 破坏性删除，需先确认本分支的功能取舍 |
+| `d2b8b804c1`、`ad7f2c607b`、`c2486eba05`、`c472873696` | FlClash 导航与 `liquid_glass` 组件族、移除 Miuix、移除自定义预测性返回 | 引入整套新 UI 框架（新增约 15 个文件、上万行），必须单独一期连同集成点一起做 |
+| `bfe8ba1e99` | 上下文贴纸 + 有界 API 重试 | 贴纸是新功能；重试策略需与 `AgentLlmClient` 既有退避/幂等守卫逐条比对 |
+| `0edcb929f3`、`ddc51ffc34` | 侧边栏行距、筛选标签文案 | 改的是上游 `home_drawer_home.dart`，本分支已拆成 `home_drawer_*.dart`，需手工移植（收益低） |
+
+### 教训（下次先查这个）
+
+**上游某条修复是否可以单取，取决于它是否依赖「更早的新增包/新 API」。**
+`cf436b7e42` 与 `084b44fb61` 就是典型：修的是老文件的 bug，但新版实现被搬进了新包，
+单取老文件会引用不存在的类。判断顺序应是：先看 `files` 里有没有 `status=added` 的包，
+再看被改文件的新 import 指向哪里。
+

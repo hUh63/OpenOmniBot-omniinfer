@@ -11,12 +11,15 @@ import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/features/home/state/predictive_back_controller.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
+import 'package:ui/services/models_dev_catalog_service.dart';
 import 'package:ui/services/app_background_service.dart';
 import 'package:ui/services/scheduled_task_scheduler_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme_controller.dart';
 import 'package:ui/theme/app_theme_mode.dart';
 import 'package:ui/theme/app_theme.dart';
+import 'package:ui/theme/liquid_glass_controller.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
 import 'package:ui/widgets/startup_account_prompt.dart';
 import 'package:ui/widgets/omnibot_error_widget.dart';
 
@@ -24,6 +27,7 @@ import 'core/router/go_router_manager.dart';
 import 'services/event_bus.dart';
 
 Future<void> bootstrapMain(List<String> args) async {
+  final startupWatch = Stopwatch()..start();
   String? initialRoute;
 
   // 可以在这里处理从原生传递过来的参数
@@ -47,24 +51,9 @@ Future<void> bootstrapMain(List<String> args) async {
   }
   WidgetsFlutterBinding.ensureInitialized();
   installOmnibotErrorWidget();
-  try {
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  } catch (error, stackTrace) {
-    debugPrint('[FlutterStartup] system UI mode setup failed: $error');
-    debugPrint('$stackTrace');
-  }
-
+  final prerequisites = initializeMainStartupPrerequisites();
   final container = ProviderContainer();
-  // Keep the first frame fail-open. A transient platform/plugin failure during
-  // startup must not leave the Flutter engine alive behind a permanently
-  // blank window. Services that depend on storage or a native channel can
-  // retry from their own pages after the shell is visible.
-  try {
-    await StorageService.init();
-  } catch (error, stackTrace) {
-    debugPrint('[FlutterStartup] StorageService.init failed: $error');
-    debugPrint('$stackTrace');
-  }
+  await prerequisites;
   try {
     SystemChrome.setSystemUIOverlayStyle(
       AppTheme.overlayStyleForBrightness(
@@ -82,22 +71,51 @@ Future<void> bootstrapMain(List<String> args) async {
       child: MyApp(args: args),
     ),
   );
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    unawaited(_initializeDeferredStartupServices());
-  });
+  unawaited(
+    WidgetsBinding.instance.waitUntilFirstFrameRasterized.then((_) async {
+      debugPrint(
+        '[FlutterStartup] Bootstrap to first rasterized frame: '
+        '${startupWatch.elapsedMilliseconds}ms',
+      );
+      // Submit the usable shell before optional services or legacy cache I/O
+      // compete with startup. Post-frame runs before rasterization completes.
+      await Future<void>(_initializeDeferredStartupServices);
+    }),
+  );
+}
+
+/// Starts independent platform setup together, settling both before the saved
+/// theme is read or the app is mounted. Each step remains fail-open so a
+/// transient plugin failure cannot leave the engine behind a blank window.
+Future<void> initializeMainStartupPrerequisites({
+  Future<void> Function()? configureSystemUi,
+  Future<void> Function()? initializeStorage,
+}) async {
+  await Future.wait<void>([
+    _runStartupStep(
+      'system UI mode setup',
+      configureSystemUi ??
+          () => SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+    ),
+    _runStartupStep(
+      'StorageService.init',
+      initializeStorage ?? StorageService.init,
+    ),
+  ]);
 }
 
 Future<void> _initializeDeferredStartupServices() async {
   await Future.wait(<Future<void>>[
-    _runDeferredStartupStep(
-      'AppBackgroundService.load',
-      AppBackgroundService.load,
+    _runStartupStep(
+      'ModelsDevCatalogService.migrateLegacyCache',
+      ModelsDevCatalogService.migrateLegacyCache,
     ),
-    _runDeferredStartupStep(
+    _runStartupStep('AppBackgroundService.load', AppBackgroundService.load),
+    _runStartupStep(
       'ScheduledTaskSchedulerService.initialize',
       ScheduledTaskSchedulerService.initialize,
     ),
-    _runDeferredStartupStep(
+    _runStartupStep(
       'OmnibotResourceService.ensureWorkspacePathsLoaded',
       () async {
         await OmnibotResourceService.ensureWorkspacePathsLoaded();
@@ -106,7 +124,7 @@ Future<void> _initializeDeferredStartupServices() async {
   ]);
 }
 
-Future<void> _runDeferredStartupStep(
+Future<void> _runStartupStep(
   String name,
   Future<void> Function() operation,
 ) async {
@@ -172,6 +190,7 @@ class _MyAppState extends ConsumerState<MyApp> {
     final themeMode = ref.watch(appThemeModeProvider).materialThemeMode;
     final resolvedLocale = ref.watch(appResolvedLocaleProvider);
     final predictiveBackEnabled = ref.watch(predictiveBackEnabledProvider);
+    final glass = ref.watch(liquidGlassSettingsProvider);
     // Imperative Material routes share the GoRouter motion and geometry.
     final pageTransitionsTheme = PageTransitionsTheme(
       builders: {
@@ -209,14 +228,21 @@ class _MyAppState extends ConsumerState<MyApp> {
           value: AppTheme.overlayStyleForBrightness(brightness),
           child: ColoredBox(
             color: theme.scaffoldBackgroundColor,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                StartupAccountPrompt(
-                  routeListenable: _router.routeInformationProvider,
-                  child: child ?? const SizedBox.shrink(),
+            child: LiquidGlassScope(
+              enabled: glass.enabled,
+              quality: glass.quality,
+              child: LiquidGlassHost(
+                enabled: glass.enabled,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    StartupAccountPrompt(
+                      routeListenable: _router.routeInformationProvider,
+                      child: child ?? const SizedBox.shrink(),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         );
