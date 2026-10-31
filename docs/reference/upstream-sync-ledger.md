@@ -176,7 +176,7 @@ FlClash 导航组件族、可选 Root 后端、会话历史读取架构重构等
 | --- | --- | --- |
 | `aadb83dcc4` | Preserve Gson models from R8 shrinking | 三方合并 `app/proguard-rules.pro`（`-keepclassmembers,allowoptimization` → `-keep` + `<init>(...)`，保住类身份/构造器/泛型目标），0 冲突 |
 | `ace39919fb` | Optimize cold startup and remove the launcher transition | 三方合并 `LauncherActivity.kt`（启动即 finish，不再等 MainActivity 覆盖）与 `MainActivity.kt`（splash `setOnExitAnimationListener` 立即移除、抽 `applyResponsiveOrientation` + `onConfigurationChanged`、分屏允许旋转），0 冲突 |
-| `48e6350a0d` | Measure startup costs and defer cache and shader work | 只取 `ui/lib/app_bootstrap.dart`、`ui/lib/services/models_dev_catalog_service.dart`（本分支未分叉，0 冲突）；`App.kt` 因引入 `measureStartupStep` / `AppSecretStore.prepare` / workspace seed 线程化，与本分支启动序列（含 `LocalModelFeatureInstaller`）交叉，保留本地版 |
+| `48e6350a0d` | Measure startup costs and defer cache and shader work | 只取 `ui/lib/services/models_dev_catalog_service.dart`（把 catalog 缓存从 SharedPreferences 迁到文件 + `compute` 解析 + 异步 IO 串行化，与本分支无交叉）。`ui/lib/app_bootstrap.dart` **不能单取**：上游对它的改动其实属于 FlClash `liquid_glass` 迁移（多出 `LiquidGlassScope`/`LiquidGlassHost` 包裹与 `liquidGlassSettingsProvider`），本分支没有该组件族，编译门直接报「Error when reading liquid_glass_controller.dart」；`App.kt` 因引入 `measureStartupStep` / `AppSecretStore.prepare` / workspace seed 线程化，与本分支启动序列（含 `LocalModelFeatureInstaller`）交叉，均保留本地版 |
 | `08daea9d1c` | Prefer compressed DEX packaging | 本分支 `dex.useLegacyPackaging` 本来就是 `true`；上游只是把它改成 gradle property 可关闭，无实质收益，不引入 |
 
 ### 未吸收（按依赖关系与改动性质）
