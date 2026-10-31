@@ -24,6 +24,8 @@ class SpecialPermissionChannel {
 
     fun onCreate(context: Context) {
         appContext = context.applicationContext
+        // 重建 channel 时先收起上一个 Root 设置会话，避免它继续持有旧 Activity。
+        specialPermissionManager?.closeRootSettings()
         specialPermissionManager = SpecialPermissionManager(context)
     }
 
@@ -121,6 +123,9 @@ class SpecialPermissionChannel {
                     "requestShizukuPermission" -> specialPermissionManager!!.requestShizukuPermission(
                         result
                     )
+                    "getRootStatus" -> specialPermissionManager!!.getRootStatus(result)
+                    "setRootEnabled" -> specialPermissionManager!!.setRootEnabled(call, result)
+                    "requestRootAccess" -> specialPermissionManager!!.requestRootAccess(result)
                     "getShizukuStatus" -> specialPermissionManager!!.getShizukuStatus(
                         result
                     )
@@ -201,6 +206,11 @@ class SpecialPermissionChannel {
                         call, result
                     )
 
+                    // Root 后端（默认关闭，仅本机生效）：状态读回 / 开关 / 申请授权。
+                    "getRootStatus" -> specialPermissionManager!!.getRootStatus(result)
+                    "setRootEnabled" -> specialPermissionManager!!.setRootEnabled(call, result)
+                    "requestRootAccess" -> specialPermissionManager!!.requestRootAccess(result)
+
                     else -> {
                         result.notImplemented()
                     }
@@ -209,6 +219,8 @@ class SpecialPermissionChannel {
     }
 
     fun clear() {
+        // 本分支没有 personalContextActions（早期已移除该功能），只保留 Root 设置的收尾。
+        specialPermissionManager?.closeRootSettings()
         embeddedTerminalInitListener?.let {
             EmbeddedTerminalInitCoordinator.removeListener(it)
         }

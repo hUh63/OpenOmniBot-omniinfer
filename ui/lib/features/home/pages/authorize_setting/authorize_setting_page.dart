@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_switch/flutter_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/home/pages/authorize/accessibility_permission_prompt.dart';
+import 'package:ui/features/home/pages/authorize_setting/root_access_setting.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/special_permission.dart';
 import 'package:ui/theme/theme_context.dart';
@@ -229,6 +230,27 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
               if (mounted) {
                 await _checkPermissions();
               }
+            },
+          ),
+          // Root 后端默认关闭，且只在本机生效（不进系统备份）。放在 Shizuku 后面，
+          // 作为「同一类特权能力的另一种来源」。
+          _AuthorizeSettingItem(
+            icon: LucideIcons.shieldCheck,
+            title: _localeText(zh: 'Root 权限', en: 'Root access'),
+            subtitle: _localeText(
+              zh: '设备已 Root 时可作为 Shizuku 的替代后端；授权仅在本机生效，不会随备份迁移。',
+              en: 'Useful when the device is rooted, as an alternative to Shizuku. Authorization stays on this device and is never backed up.',
+            ),
+            trailing: _buildPermissionTrailing(
+              label: _localeText(zh: '去设置', en: 'Configure'),
+              color: _accentColor,
+            ),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const RootAccessSetting(),
+                ),
+              );
             },
           ),
         ],
