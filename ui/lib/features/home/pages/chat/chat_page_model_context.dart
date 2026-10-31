@@ -120,10 +120,15 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
       });
       return;
     }
+    // 捕获调用时刻的会话目标代际号：快速连续切会话时，上一个会话的 model override
+    // 读盘可能后返回并覆盖当前会话的模型 chip / 思考强度（进而让下一次发送带上
+    // 错误的 provider profile）。同 mixin 的其它路径都做了这个校验，这里补齐。
+    final requestId = _conversationTargetRequestId;
     final results = await Future.wait<dynamic>([
       ConversationModelOverrideService.getOverride(conversationId),
       ConversationReasoningEffortService.getEffort(conversationId),
     ]);
+    if (!_isConversationTargetRequestCurrent(requestId)) return;
     final override = results[0] as ConversationModelOverride?;
     final reasoningEffort = results[1] as String?;
     if (!mounted) return;

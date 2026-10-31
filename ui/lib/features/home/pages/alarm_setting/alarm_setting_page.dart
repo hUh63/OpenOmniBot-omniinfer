@@ -43,7 +43,21 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
   }
 
   Future<void> _loadAlarmSettings() async {
-    final payload = await AssistsMessageService.getAlarmSettings();
+    // 原生调用没有 try/catch 又没超时的话，一次异常/不回包就让 _loading 永远为 true，
+    // 整个页面停在转圈且拿不到任何提示。
+    Map<String, dynamic> payload;
+    try {
+      payload = await AssistsMessageService.getAlarmSettings().timeout(
+        const Duration(seconds: 10),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+      });
+      showToast(error.toString(), type: ToastType.error);
+      return;
+    }
     if (!mounted) return;
 
     setState(() {
@@ -119,13 +133,24 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
       _saving = true;
     });
 
-    final payload = await AssistsMessageService.saveAlarmSettings(
-      source: _source,
-      localPath: _source == _sourceLocalMp3 ? _localPath.trim() : null,
-      remoteUrl: _source == _sourceRemoteMp3
-          ? _remoteUrlController.text.trim()
-          : null,
-    );
+    Map<String, dynamic> payload;
+    try {
+      payload = await AssistsMessageService.saveAlarmSettings(
+        source: _source,
+        localPath: _source == _sourceLocalMp3 ? _localPath.trim() : null,
+        remoteUrl: _source == _sourceRemoteMp3
+            ? _remoteUrlController.text.trim()
+            : null,
+      ).timeout(const Duration(seconds: 15));
+    } catch (error) {
+      // 保存失败若不复位 _saving，按钮会永久禁用且没有任何提示。
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+      });
+      showToast(error.toString(), type: ToastType.error);
+      return;
+    }
 
     if (!mounted) return;
     setState(() {

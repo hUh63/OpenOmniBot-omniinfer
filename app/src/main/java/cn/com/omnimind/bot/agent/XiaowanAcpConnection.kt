@@ -914,12 +914,30 @@ private class XiaowanAgentSession(
             closeMutex.withLock {
                 if (!cleanupComplete) {
                     closed.set(true)
-                    this@XiaowanAgentSession.cancel()
-                    cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
-                        .closeExistingAcpSession(sessionId.value)
-                    mcpSession.close()
-                    onClosed(sessionId.value)
-                    cleanupComplete = true
+                    // 每一步都可能抛：cancel 抛、特权会话关闭抛、MCP close 按设计会在
+                    // 清理失败时 rethrow。一旦抛出，后面 onClosed()（唯一把会话从
+                    // activeSessions 移除的地方）与 cleanupComplete 就被跳过，会话对象
+                    // 永久留在表里、其余 MCP 子进程也不再释放。所以逐步收集异常，
+                    // finally 里保证 onClosed + cleanupComplete 一定执行。
+                    var failure: Throwable? = null
+                    fun record(error: Throwable) {
+                        val previous = failure
+                        if (previous == null) failure = error else previous.addSuppressed(error)
+                    }
+                    try {
+                        runCatching { this@XiaowanAgentSession.cancel() }.onFailure { error -> record(error) }
+                        runCatching {
+                            cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
+                                .closeExistingAcpSession(sessionId.value)
+                        }.onFailure { error -> record(error) }
+                        runCatching { mcpSession.close() }.onFailure { error -> record(error) }
+                    } finally {
+                        // 即便上面的清理失败，会话也已经 closed=true（prompt 全部被拒），
+                        // 留在 activeSessions 里只会泄漏，必须无条件摘除。
+                        runCatching { onClosed(sessionId.value) }.onFailure { error -> record(error) }
+                        cleanupComplete = true
+                    }
+                    failure?.let { throw it }
                 }
                 CloseSessionResponse(JsonNull)
             }

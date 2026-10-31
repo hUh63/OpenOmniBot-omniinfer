@@ -115,6 +115,9 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
             _nextCursor = null;
             _error = null;
             _isLoading = false;
+            // 这条 early return 之前必须复位：否则 _isRefreshing 永远为 true，
+            // 之后的 3 秒轮询/下拉刷新/重试全被入口守卫挡掉，配置好后也不会自愈。
+            _isRefreshing = false;
           });
           return;
         }
@@ -137,6 +140,9 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
           _error =
               status.error ??
               (LegacyTextLocalizer.localize('Agent 运行时不可用'));
+          // 同上：运行时没起来这条 early return 也必须复位，否则运行时恢复后
+          // 页面不会自己刷新（只能退出重进）。
+          _isRefreshing = false;
         });
         return;
       }

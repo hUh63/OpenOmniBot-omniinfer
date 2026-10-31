@@ -82,38 +82,53 @@ internal class XiaowanMcpSession private constructor(
         ): XiaowanMcpSession {
             if (servers.isEmpty()) return XiaowanMcpSession(null, emptyList())
 
-            val ready = coroutineScope {
-                servers.mapIndexed { index, server ->
-                    async {
-                        val connection = createXiaowanMcpConnection(
-                            context = context,
-                            scope = scope,
-                            sessionId = sessionId,
-                            cwd = cwd,
-                            index = index,
-                            server = server,
-                        )
-                        try {
-                            connection.start()
-                            connection to connection.listTools()
-                        } catch (error: CancellationException) {
-                            runCatching { connection.close() }
-                            throw error
-                        } catch (error: Throwable) {
-                            runCatching { connection.close() }
-                            // One unavailable optional server must not make the
-                            // Agent session unusable. Other supplied servers still
-                            // contribute tools, while the failure remains visible
-                            // in diagnostics and can be retried in a new session.
-                            Log.w(
-                                TAG,
-                                "MCP connect failed session=$sessionId server=${server.name}",
-                                error,
+            // 已成功连上的连接单独记账：awaitAll() 因取消/超时抛出时，Deferred 里的结果
+            // 不会被取回，那些已经拉起 MCP 子进程的连接就没有任何关闭路径了（原实现
+            // 只在 awaitAll 正常返回后才拿到列表）。这里在成功分支登记，异常路径统一回收。
+            val established = java.util.Collections.synchronizedList(
+                mutableListOf<XiaowanMcpServerConnection>()
+            )
+            val ready = try {
+                coroutineScope {
+                    servers.mapIndexed { index, server ->
+                        async {
+                            val connection = createXiaowanMcpConnection(
+                                context = context,
+                                scope = scope,
+                                sessionId = sessionId,
+                                cwd = cwd,
+                                index = index,
+                                server = server,
                             )
-                            null
+                            try {
+                                connection.start()
+                                val tools = connection.listTools()
+                                established.add(connection)
+                                connection to tools
+                            } catch (error: CancellationException) {
+                                runCatching { connection.close() }
+                                throw error
+                            } catch (error: Throwable) {
+                                runCatching { connection.close() }
+                                // One unavailable optional server must not make the
+                                // Agent session unusable. Other supplied servers still
+                                // contribute tools, while the failure remains visible
+                                // in diagnostics and can be retried in a new session.
+                                Log.w(
+                                    TAG,
+                                    "MCP connect failed session=$sessionId server=${server.name}",
+                                    error,
+                                )
+                                null
+                            }
                         }
-                    }
-                }.awaitAll().filterNotNull()
+                    }.awaitAll().filterNotNull()
+                }
+            } catch (error: Throwable) {
+                established.toList().forEach { connection ->
+                    withContext(NonCancellable) { runCatching { connection.close() } }
+                }
+                throw error
             }
             val opened = ready.map { (connection, _) -> connection }
             val discovered = ready.flatMap { (connection, tools) ->
@@ -318,12 +333,14 @@ private class XiaowanStdioMcpConnection(
     override val serverName: String = server.name
 
     private val requestMutex = Mutex()
-    private var process: Process? = null
-    private var reader: BufferedReader? = null
-    private var writer: BufferedWriter? = null
-    private var stdoutJob: Job? = null
-    private var stderrJob: Job? = null
-    private var stdoutLines: Channel<String>? = null
+    // close() 在锁外停读、关通道（见 close 注释），request() 在锁内读，故这些字段需要
+    // 跨线程可见性保证。
+    @Volatile private var process: Process? = null
+    @Volatile private var reader: BufferedReader? = null
+    @Volatile private var writer: BufferedWriter? = null
+    @Volatile private var stdoutJob: Job? = null
+    @Volatile private var stderrJob: Job? = null
+    @Volatile private var stdoutLines: Channel<String>? = null
 
     override suspend fun start() {
         if (process != null) return
@@ -419,13 +436,17 @@ private class XiaowanStdioMcpConnection(
     }
 
     override suspend fun close() {
+        // 先停 stdout 读取并关闭通道，再抢 requestMutex。反过来的话（原来就是先抢锁），
+        // 在途 request() 正持锁等 stdoutLines.receiveCatching()，最长要等 RPC_TIMEOUT_MS
+        // （40s）才释放，close 就卡在锁上几十秒 —— 用户在关闭会话/退出时看到的是
+        // 「关不掉」。关通道能让在途请求立刻返回并放锁。
+        stdoutJob?.cancel()
+        stdoutJob = null
+        stderrJob?.cancel()
+        stderrJob = null
+        stdoutLines?.close()
+        stdoutLines = null
         requestMutex.withLock {
-            stdoutJob?.cancel()
-            stdoutJob = null
-            stderrJob?.cancel()
-            stderrJob = null
-            stdoutLines?.close()
-            stdoutLines = null
             val active = process
             process = null
             withContext(Dispatchers.IO + NonCancellable) {

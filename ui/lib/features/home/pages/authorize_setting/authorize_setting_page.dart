@@ -84,11 +84,24 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
   }
 
   Future<void> _toggleNotification(bool value) async {
-    await CacheUtil.cacheBool("notification_enabled", value);
-    if (!mounted) return;
+    // 先改 UI 再落盘：原来先 await 写盘再 setState，写盘抛异常时开关会弹回原位、
+    // 且没有任何提示，用户只会觉得「点了没反应」。写盘失败时回滚并提示。
     setState(() {
       notificationEnabled = value;
     });
+    try {
+      await CacheUtil.cacheBool("notification_enabled", value);
+    } catch (error) {
+      debugPrint('Failed to persist notification setting: $error');
+      if (!mounted) return;
+      setState(() {
+        notificationEnabled = !value;
+      });
+      showToast(
+        _localeText(zh: '设置保存失败，请重试', en: 'Failed to save setting'),
+        type: ToastType.error,
+      );
+    }
   }
 
   String _localeText({required String zh, required String en}) {
