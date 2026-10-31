@@ -1,6 +1,8 @@
 package cn.com.omnimind.bot.webchat
 
 import android.content.Context
+import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
 import cn.com.omnimind.bot.agent.runtime.AcpAgentProfileStore
 import java.util.UUID
@@ -390,6 +392,25 @@ class AgentRunService(
         val taskId = request["taskId"]?.toString()?.trim()?.ifEmpty { null }
             ?: UUID.randomUUID().toString()
         val normalizedPayload = AgentRunRequestNormalizer.normalize(request)
+        // 浏览器上传的图片只有 data: URL，没有本地文件。原样落库会把 base64 写进
+        // 消息 payload：既顶着 Room 单行 2MB 的 CursorWindow 上限，又让每次
+        // messages_replaced 全量快照都带上几 MB 图片。这里和 Flutter 侧一致先落盘，
+        // 历史只留路径，图片由 /conversations/attachment 端点按需取。
+        val preparedAttachments = if (normalizedPayload.attachments.isEmpty()) {
+            normalizedPayload.attachments
+        } else {
+            runCatching {
+                AgentWorkspaceAttachmentSupport.prepareAttachmentsForRuntime(
+                    context = context,
+                    taskId = taskId,
+                    rawAttachments = normalizedPayload.attachments
+                )
+            }.getOrElse { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                OmniLog.w("AgentRunService", "persist webchat attachments failed: ${error.message}")
+                normalizedPayload.attachments
+            }
+        }
         val storedConversation = conversationService.getConversationPayload(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
         val conversationMode = resolveWebConversationMode(
@@ -432,7 +453,7 @@ class AgentRunService(
                     conversationId = conversationId,
                     conversationMode = conversationMode,
                     userMessage = normalizedPayload.userMessage,
-                    attachments = normalizedPayload.attachments,
+                    attachments = preparedAttachments,
                     cwd = (
                         storedConversation["agentCwd"]
                             ?: storedConversation["codexCwd"]
@@ -449,7 +470,7 @@ class AgentRunService(
                     conversationId = conversationId,
                     conversationMode = conversationMode,
                     userMessage = normalizedPayload.userMessage,
-                    attachments = normalizedPayload.attachments,
+                    attachments = preparedAttachments,
                     cwd = (
                         storedConversation["agentCwd"]
                             ?: storedConversation["codexCwd"]
@@ -464,7 +485,7 @@ class AgentRunService(
                 conversationId = conversationId,
                 conversationMode = conversationMode,
                 userMessage = normalizedPayload.userMessage,
-                attachments = normalizedPayload.attachments,
+                attachments = preparedAttachments,
                 cwd = (
                     storedConversation["agentCwd"]
                         ?: storedConversation["codexCwd"]

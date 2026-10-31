@@ -567,13 +567,93 @@ class ConversationDomainService(
     suspend fun listConversationMessages(
         conversationId: Long,
         conversationMode: String,
-        finalizeInterruptedEntries: Boolean = true
+        finalizeInterruptedEntries: Boolean = true,
+        /**
+         * webchat 用：把附件里的 base64 换成可按需拉取的 URL。
+         * messages_replaced 是全量快照（流式期间每 150ms 一次），图片 base64
+         * 每帧都带一遍会把局域网打满。Flutter 侧仍需要原样 payload，故默认关闭。
+         */
+        resolveAttachmentUrls: Boolean = false
     ): List<Map<String, Any?>> {
-        return historyRepository.listConversationMessages(
+        val messages = historyRepository.listConversationMessages(
             conversationId = conversationId,
             conversationMode = normalizeConversationMode(conversationMode),
             finalizeInterruptedEntries = finalizeInterruptedEntries
         )
+        if (!resolveAttachmentUrls) return messages
+        return withAttachmentUrls(conversationId, normalizeConversationMode(conversationMode), messages)
+    }
+
+    /** 读取某个附件的原始字节（webchat 图片按需取用）。 */
+    suspend fun loadAttachmentBytes(
+        conversationId: Long,
+        conversationMode: String,
+        entryId: String,
+        index: Int
+    ): Pair<ByteArray, String>? {
+        return historyRepository.loadAttachmentBytes(
+            conversationId = conversationId,
+            conversationMode = normalizeConversationMode(conversationMode),
+            entryId = entryId,
+            index = index
+        )
+    }
+
+    /**
+     * 附件字节端点。相对路径即可：浏览器与 webchat 同源，Cookie 会一起带上，
+     * 而 <img src> 没法带 Authorization 头。
+     */
+    private fun attachmentResourceUrl(
+        conversationId: Long,
+        conversationMode: String,
+        entryId: String,
+        index: Int
+    ): String = buildString {
+        append("/webchat/api/conversations/attachment")
+        append("?conversationId=").append(conversationId)
+        append("&mode=").append(java.net.URLEncoder.encode(conversationMode, "UTF-8"))
+        append("&entryId=").append(java.net.URLEncoder.encode(entryId, "UTF-8"))
+        append("&index=").append(index)
+    }
+
+    private fun withAttachmentUrls(
+        conversationId: Long,
+        conversationMode: String,
+        messages: List<Map<String, Any?>>
+    ): List<Map<String, Any?>> = messages.map { message ->
+        val content = message["content"] as? Map<*, *> ?: return@map message
+        val attachments = content["attachments"] as? List<*> ?: return@map message
+        if (attachments.isEmpty()) return@map message
+        val entryId = (content["id"] ?: message["id"])?.toString()?.takeIf { it.isNotBlank() }
+            ?: return@map message
+        var changed = false
+        val resolved = attachments.mapIndexed { index, raw ->
+            val attachment = raw as? Map<*, *> ?: return@mapIndexed raw
+            val hasDataUrl = attachment["dataUrl"]?.toString()
+                ?.startsWith("data:", ignoreCase = true) == true
+            val hasLocalFile = hasDataUrl.not() && (
+                !attachment["path"]?.toString().isNullOrBlank() ||
+                    !attachment["workspacePath"]?.toString().isNullOrBlank()
+                )
+            // 远端 http(s) 附件本身已是 URL，保持原样。
+            val remoteUrl = attachment["url"]?.toString().orEmpty()
+            if (remoteUrl.startsWith("http://") || remoteUrl.startsWith("https://")) return@mapIndexed raw
+            if (!hasDataUrl && !hasLocalFile) return@mapIndexed raw
+            val copy = LinkedHashMap<String, Any?>()
+            attachment.forEach { (key, value) -> copy[key.toString()] = value }
+            copy.remove("dataUrl")
+            copy["url"] = attachmentResourceUrl(conversationId, conversationMode, entryId, index)
+            changed = true
+            copy
+        }
+        if (!changed) return@map message
+        val contentCopy = LinkedHashMap<String, Any?>()
+        content.forEach { (key, value) -> contentCopy[key.toString()] = value }
+        contentCopy["attachments"] = resolved
+        val messageCopy = LinkedHashMap<String, Any?>()
+        message.forEach { (key, value) -> messageCopy[key.toString()] = value }
+        messageCopy["content"] = contentCopy
+        messageCopy
     }
 
     suspend fun listConversationMessagesPaged(

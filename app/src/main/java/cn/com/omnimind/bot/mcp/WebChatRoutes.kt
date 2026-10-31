@@ -181,9 +181,43 @@ object WebChatRoutes {
                     conversationService.listConversationMessages(
                         conversationId = conversationId,
                         conversationMode = mode,
-                        finalizeInterruptedEntries = finalizeInterruptedEntries
+                        finalizeInterruptedEntries = finalizeInterruptedEntries,
+                        // 附件 base64 换成按需 URL：一张图就有几 MB，直接塞进响应
+                        // 会让每次会话加载都很慢（且 Room 单行有 2MB 读取上限）。
+                        resolveAttachmentUrls = true
                     )
                 )
+            }
+
+            /**
+             * 附件字节（webchat 图片按需加载）。
+             *
+             * 消息快照里的附件只给 URL 不给 base64：一张图 base64 后就是几 MB，
+             * 而 messages_replaced 在流式期间每 150ms 全量推一次。浏览器用
+             * <img src> 直接请求这里，同源 Cookie 自动带鉴权。
+             */
+            get("/conversations/attachment") {
+                if (!McpServerManager.requireWebChatAuth(call)) return@get
+                val conversationId = call.request.queryParameters["conversationId"]?.toLongOrNull()
+                if (conversationId == null || conversationId <= 0L) {
+                    call.respondJson(mapOf("error" to "INVALID_CONVERSATION_ID"), HttpStatusCode.BadRequest)
+                    return@get
+                }
+                val entryId = call.request.queryParameters["entryId"].orEmpty()
+                val index = call.request.queryParameters["index"]?.toIntOrNull() ?: 0
+                val mode = call.request.queryParameters["mode"] ?: "agent"
+                val attachment = conversationService.loadAttachmentBytes(
+                    conversationId = conversationId,
+                    conversationMode = mode,
+                    entryId = entryId,
+                    index = index
+                )
+                if (attachment == null) {
+                    call.respondJson(mapOf("error" to "ATTACHMENT_NOT_FOUND"), HttpStatusCode.NotFound)
+                    return@get
+                }
+                call.response.header(HttpHeaders.CacheControl, "private, max-age=86400")
+                call.respondBytes(attachment.first, ContentType.parse(attachment.second))
             }
 
             post("/conversations/{conversationId}/runs") {

@@ -164,7 +164,14 @@ function attachmentImage(attachment: Record<string, unknown>): string {
     || mimeType.startsWith("image/")
     || source.startsWith("data:image/")
     || /\.(avif|gif|jpe?g|png|webp)(?:[?#]|$)/i.test(source);
-  return isImage && (source.startsWith("data:image/") || source.startsWith("https://") || source.startsWith("http://"))
+  // 服务端现在把附件 base64 换成按需端点（/webchat/api/conversations/attachment…），
+  // 同源相对路径，img 请求会带上登录 Cookie。
+  return isImage && (
+    source.startsWith("data:image/")
+    || source.startsWith("https://")
+    || source.startsWith("http://")
+    || source.startsWith("/")
+  )
     ? source
     : "";
 }

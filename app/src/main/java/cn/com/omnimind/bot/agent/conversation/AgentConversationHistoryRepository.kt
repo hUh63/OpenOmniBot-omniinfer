@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.agent
 
 import android.content.Context
+import android.util.Base64
 import cn.com.omnimind.baselib.database.AgentConversationEntry
 import cn.com.omnimind.baselib.database.AgentConversationEntryHeader
 import cn.com.omnimind.baselib.database.Conversation
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import java.io.File
 
 class AgentConversationHistoryRepository(
     @Suppress("UNUSED_PARAMETER")
@@ -569,6 +571,68 @@ class AgentConversationHistoryRepository(
             if (page.size < SAFE_HISTORY_PAGE_SIZE) break
         }
         ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
+    }
+
+    /**
+     * webchat 按需读取某个附件的原始字节。
+     *
+     * 图片附件如果把 base64 直接存进消息 payload，有两条代价：Room 单行的
+     * CursorWindow 上限是 2MB（一张图就能让整段历史读不出来），而且 webchat 的
+     * messages_replaced 是全量快照（流式期间每 150ms 一次），几 MB 的图片会被反复
+     * 序列化 + 推送。现在附件先落盘，消息里只留路径，图片由浏览器按需取。
+     */
+    suspend fun loadAttachmentBytes(
+        conversationId: Long,
+        conversationMode: String,
+        entryId: String,
+        index: Int
+    ): Pair<ByteArray, String>? = withContext(Dispatchers.IO) {
+        if (entryId.isBlank() || index < 0) return@withContext null
+        val entry = loadThreadEntryByIdSafe(conversationId, conversationMode, entryId)
+            ?: return@withContext null
+        val content = AgentConversationHistorySupport.readMap(entry.payloadJson)["content"] as? Map<*, *>
+            ?: return@withContext null
+        val attachment = (content["attachments"] as? List<*>)?.getOrNull(index) as? Map<*, *>
+            ?: return@withContext null
+        val mimeType = attachment["mimeType"]?.toString()
+            ?.takeIf { it.isNotBlank() && it.contains('/') }
+            ?: "application/octet-stream"
+        decodeAttachmentDataUrl(attachment["dataUrl"]?.toString().orEmpty(), mimeType)
+            ?.let { return@withContext it }
+        val file = attachment["path"]?.toString()?.takeIf { it.isNotBlank() }?.let(::File)
+            ?: return@withContext null
+        if (!isOwnedAttachmentFile(file)) return@withContext null
+        runCatching { file.readBytes() to mimeType }.getOrNull()
+    }
+
+    private fun decodeAttachmentDataUrl(dataUrl: String, mimeType: String): Pair<ByteArray, String>? {
+        if (!dataUrl.startsWith("data:", ignoreCase = true)) return null
+        val comma = dataUrl.indexOf(',')
+        if (comma <= 0) return null
+        val meta = dataUrl.substring(5, comma)
+        val payload = dataUrl.substring(comma + 1)
+        val bytes = runCatching {
+            if (meta.contains(";base64", ignoreCase = true)) {
+                Base64.decode(payload, Base64.DEFAULT)
+            } else {
+                java.net.URLDecoder.decode(payload, "UTF-8").toByteArray()
+            }
+        }.getOrNull() ?: return null
+        val declared = meta.substringBefore(';').takeIf { it.contains('/') } ?: mimeType
+        return bytes to declared
+    }
+
+    /** 只允许读应用私有目录下的附件，别让 payload 里的 path 变成任意文件读取。 */
+    private fun isOwnedAttachmentFile(file: File): Boolean {
+        if (!file.isFile) return false
+        val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return false
+        val roots = listOfNotNull(
+            context.filesDir,
+            context.cacheDir,
+            context.noBackupFilesDir,
+            runCatching { AgentWorkspaceManager.rootDirectory(context) }.getOrNull()
+        ).mapNotNull { runCatching { it.canonicalPath }.getOrNull() }
+        return roots.any { root -> canonical == root || canonical.startsWith(root + File.separator) }
     }
 
     suspend fun listConversationMessagesPaged(

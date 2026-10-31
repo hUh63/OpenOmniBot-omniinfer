@@ -14,11 +14,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 internal data class WebAgentToolUpdate(
     val entryId: String?,
@@ -45,13 +47,24 @@ internal data class WebAgentEventUpdate(
 
 private const val WEB_AGENT_MODE_STORAGE_VALUE = "agent"
 
+/** 流式快照广播的最小间隔（小会话）。 */
+private const val SNAPSHOT_MIN_INTERVAL_MS = 150L
+
+/** 快照广播的目标带宽上限：全量快照的间隔按体量放大，避免长会话打满局域网。 */
+private const val SNAPSHOT_BYTES_PER_SECOND = 1_500_000L
+
+/** 节流上限：再大的会话也至少每秒推一次，否则观感会像卡死。 */
+private const val SNAPSHOT_MAX_INTERVAL_MS = 1_200L
+
 private data class WebAgentTextEntryState(
     val entryId: String,
     val parentTaskId: String,
     val createdAt: Long,
     val sequence: Long,
-    var text: String = "",
-    var isFinal: Boolean = false
+    // 字段会被事件消费协程与收尾协程（finish/看门狗）同时读写，用 @Volatile
+    // 保证可见性；容器本身由 WebAgentRunState.entryLock 保护。
+    @Volatile var text: String = "",
+    @Volatile var isFinal: Boolean = false
 )
 
 private data class WebAgentToolEntryState(
@@ -59,7 +72,7 @@ private data class WebAgentToolEntryState(
     val parentTaskId: String,
     val createdAt: Long,
     val sequence: Long,
-    var update: WebAgentToolUpdate
+    @Volatile var update: WebAgentToolUpdate
 )
 
 private data class WebAgentRunState(
@@ -68,6 +81,10 @@ private data class WebAgentRunState(
     val conversationMode: String,
     val createdAt: Long,
     val finished: AtomicBoolean = AtomicBoolean(false),
+    /** 收到停止请求的时间戳，0 表示没请求过。ACP 不保证 cancel 后一定回终态。 */
+    val cancelRequestedAt: AtomicLong = AtomicLong(0L),
+    /** 最近一次 agent 事件的时间，看门狗用它判断「整条链路是否已经哑掉」。 */
+    val lastActivityAt: AtomicLong = AtomicLong(System.currentTimeMillis()),
     var threadId: String? = null,
     var turnId: String? = null,
     var agentId: String? = null,
@@ -75,10 +92,39 @@ private data class WebAgentRunState(
     var sequence: Long = 0,
     /** 上次把全量快照推给客户端的时间；流式 token 会密集触发，必须节流。 */
     var lastPublishAt: Long = 0L,
+    /** 当前快照的实际发送间隔（按上一帧体量自适应，见 resolvePublishInterval）。 */
+    var publishIntervalMs: Long = SNAPSHOT_MIN_INTERVAL_MS,
     val assistantEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val reasoningEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val toolEntries: LinkedHashMap<String, WebAgentToolEntryState> = linkedMapOf()
-)
+) {
+    /**
+     * 三张 entry 表原本是裸 LinkedHashMap：事件消费协程在 getOrPut / 迭代，
+     * finishSuccessfully / finishWithError 可能同时在另一个协程（startRun 的 catch、
+     * 看门狗）里迭代同一张表 —— 并发 modify 会抛 ConcurrentModificationException，
+     * 表现是整条事件消费协程被打断、run 卡在「运行中」。所有读写都过这把锁，
+     * 迭代一律拿快照。
+     */
+    private val entryLock = Any()
+
+    fun assistantEntry(entryId: String, create: () -> WebAgentTextEntryState): WebAgentTextEntryState =
+        synchronized(entryLock) { assistantEntries.getOrPut(entryId, create) }
+
+    fun assistantSnapshot(): List<WebAgentTextEntryState> =
+        synchronized(entryLock) { assistantEntries.values.toList() }
+
+    fun reasoningEntry(entryId: String, create: () -> WebAgentTextEntryState): WebAgentTextEntryState =
+        synchronized(entryLock) { reasoningEntries.getOrPut(entryId, create) }
+
+    fun reasoningSnapshot(): List<WebAgentTextEntryState> =
+        synchronized(entryLock) { reasoningEntries.values.toList() }
+
+    fun toolEntry(entryId: String, create: () -> WebAgentToolEntryState): WebAgentToolEntryState =
+        synchronized(entryLock) { toolEntries.getOrPut(entryId, create) }
+
+    fun toolSnapshot(): List<WebAgentToolEntryState> =
+        synchronized(entryLock) { toolEntries.values.toList() }
+}
 
 internal class WebAgentRunBridge(
     context: Context,
@@ -91,8 +137,18 @@ internal class WebAgentRunBridge(
 ) {
     companion object {
         private const val TAG = "WebAgentRunBridge"
-        /** 流式快照广播的最小间隔。 */
-        private const val PUBLISH_THROTTLE_MS = 150L
+        /** 看门狗巡检间隔。 */
+        private const val WATCHDOG_TICK_MS = 5_000L
+        /**
+         * 收到停止请求后等 ACP 回终态的宽限期。超过这个时间还没回终态，就认定
+         * 那条 turn 已经不可控（进程挂死 / 连接断 / 服务端丢事件），由本地收敛。
+         */
+        private const val CANCEL_GRACE_MS = 12_000L
+        /**
+         * 完全没有任何 agent 事件的最长时间。正常长任务也会持续吐 thinking /
+         * 工具进度，30 分钟全哑基本等于链路已死。
+         */
+        private const val RUN_IDLE_TIMEOUT_MS = 30 * 60_000L
     }
 
     private val appContext = context.applicationContext
@@ -124,6 +180,9 @@ internal class WebAgentRunBridge(
                 OmniLog.w(TAG, "agent event dropped: queue full")
             }
         }
+        // 终态看门狗：ACP 只保证「尽力取消」，不回终态时兜底收敛，
+        // 否则该会话会被永久锁在「运行中」。
+        scope.launch { watchdogLoop() }
         scope.launch {
             for (event in events) {
                 // 单条事件处理失败（脏数据、数据库异常、JSON 结构变化）不能让消费
@@ -143,6 +202,57 @@ internal class WebAgentRunBridge(
 
     fun hasActiveRun(conversationId: Long): Boolean {
         return runsByConversationId[conversationId]?.finished?.get() == false
+    }
+
+    /**
+     * 终态看门狗。
+     *
+     * 两条会把会话永久锁死的路径：
+     * 1. 用户点了停止，但 ACP 没回终态 —— finished 恒为 false，hasActiveRun 恒真，
+     *    之后每次发消息都被「该 Agent 会话已有运行中的任务」拒掉；
+     * 2. ACP 侧无声挂死（子进程被杀、连接断），连一条事件都没有。
+     *
+     * 这里按「停止请求超宽限」和「长时间零事件」两种条件兜底收尾，
+     * 保证前端最多等一个宽限期就能重新开始对话。
+     */
+    private suspend fun watchdogLoop() {
+        while (true) {
+            delay(WATCHDOG_TICK_MS)
+            val now = System.currentTimeMillis()
+            // ConcurrentHashMap.values 的迭代是弱一致的，别处 remove 不会抛异常。
+            runsByTaskId.values.forEach { state ->
+                if (state.finished.get()) return@forEach
+                val cancelAt = state.cancelRequestedAt.get()
+                if (cancelAt > 0L && now - cancelAt >= CANCEL_GRACE_MS) {
+                    OmniLog.w(
+                        TAG,
+                        "cancel watchdog: ${state.taskId} 超过 ${CANCEL_GRACE_MS}ms 未收到终态，本地收敛"
+                    )
+                    runWatchdogFinish(state, "已停止：Agent 未在预期时间内结束")
+                    return@forEach
+                }
+                if (now - state.lastActivityAt.get() >= RUN_IDLE_TIMEOUT_MS) {
+                    OmniLog.w(
+                        TAG,
+                        "idle watchdog: ${state.taskId} 超过 ${RUN_IDLE_TIMEOUT_MS}ms 没有任何事件，本地收敛"
+                    )
+                    runWatchdogFinish(state, "Agent 长时间无响应，已自动结束该任务")
+                }
+            }
+        }
+    }
+
+    private suspend fun runWatchdogFinish(state: WebAgentRunState, message: String) {
+        try {
+            finishWithError(state, message)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            // 写库/广播失败也必须把内存态清掉，否则会话仍然锁着。
+            OmniLog.e(TAG, "watchdog finish ${state.taskId} failed: ${error.message}")
+            state.finished.set(true)
+            removeState(state)
+        }
     }
 
     suspend fun startRun(
@@ -237,6 +347,12 @@ internal class WebAgentRunBridge(
 
     suspend fun cancelRun(taskId: String): Boolean {
         val state = runsByTaskId[taskId] ?: return false
+        // 记下停止请求时间：ACP 只保证「尽力取消」，进程已挂死 / 连接已断时
+        // 终态事件永远不会回来，state 就永久留在 map 里，hasActiveRun 恒为 true，
+        // 该会话此后每一次发消息都被「已有运行中的任务」拒掉，只能重启进程。
+        // 看门狗（watchdogLoop）按这个时间戳兜底收敛。
+        state.cancelRequestedAt.compareAndSet(0L, System.currentTimeMillis())
+        state.lastActivityAt.set(System.currentTimeMillis())
         val arguments = linkedMapOf<String, Any?>(
             "conversationId" to state.conversationId
         )
@@ -255,6 +371,7 @@ internal class WebAgentRunBridge(
             ?: turnId?.let(runsByTurnId::get)
             ?: return
         if (state.finished.get()) return
+        state.lastActivityAt.set(System.currentTimeMillis())
         if (turnId != null && state.turnId != null && turnId != state.turnId) {
             return
         }
@@ -276,7 +393,7 @@ internal class WebAgentRunBridge(
             val entryId = update.assistantEntryId
                 ?.takeIf(String::isNotBlank)
                 ?: "$parentTaskId-agent-message"
-            val entry = state.assistantEntries.getOrPut(entryId) {
+            val entry = state.assistantEntry(entryId) {
                 newTextEntry(state, entryId, parentTaskId)
             }
             entry.text = if (update.assistantSnapshot != null) {
@@ -296,7 +413,7 @@ internal class WebAgentRunBridge(
             val entryId = update.reasoningEntryId
                 ?.takeIf(String::isNotBlank)
                 ?: "$parentTaskId-agent-thinking"
-            val entry = state.reasoningEntries.getOrPut(entryId) {
+            val entry = state.reasoningEntry(entryId) {
                 newTextEntry(state, entryId, parentTaskId)
             }
             entry.text = if (update.reasoningSnapshot != null) {
@@ -316,7 +433,7 @@ internal class WebAgentRunBridge(
             val toolParentTaskId = toolUpdate.parentTaskId
                 ?.takeIf(String::isNotBlank)
                 ?: parentTaskId
-            val entry = state.toolEntries.getOrPut(entryId) {
+            val entry = state.toolEntry(entryId) {
                 state.sequence += 1
                 WebAgentToolEntryState(
                     entryId = entryId,
@@ -336,7 +453,7 @@ internal class WebAgentRunBridge(
             // 就是 O(N) × token 数，网页端流式会明显卡顿、手机发热。节流到 ~7 次/秒；
             // 最后一个 token 一定会在 finish 时按最终态推一次，不会丢内容。
             val now = System.currentTimeMillis()
-            if (now - state.lastPublishAt >= PUBLISH_THROTTLE_MS) {
+            if (now - state.lastPublishAt >= state.publishIntervalMs) {
                 state.lastPublishAt = now
                 publishMessages(state, finalizeInterruptedEntries = false)
             }
@@ -386,15 +503,15 @@ internal class WebAgentRunBridge(
 
     private suspend fun finishSuccessfully(state: WebAgentRunState) {
         if (!state.finished.compareAndSet(false, true)) return
-        state.assistantEntries.values.forEach { entry ->
+        state.assistantSnapshot().forEach { entry ->
             entry.isFinal = true
             persistAssistantEntry(state, entry, isError = false)
         }
-        state.reasoningEntries.values.forEach { entry ->
+        state.reasoningSnapshot().forEach { entry ->
             entry.isFinal = true
             persistReasoningEntry(state, entry)
         }
-        state.toolEntries.values.forEach { entry ->
+        state.toolSnapshot().forEach { entry ->
             if (entry.update.status == "running") {
                 entry.update = entry.update.copy(status = "success")
                 persistToolEntry(state, entry)
@@ -405,7 +522,7 @@ internal class WebAgentRunBridge(
         notifyScheduledTaskResult(
             state = state,
             success = true,
-            summary = state.assistantEntries.values.lastOrNull()?.text
+            summary = state.assistantSnapshot().lastOrNull()?.text
         )
         removeState(state)
     }
@@ -415,23 +532,23 @@ internal class WebAgentRunBridge(
         message: String
     ) {
         if (!state.finished.compareAndSet(false, true)) return
-        val entry = state.assistantEntries.values.lastOrNull() ?: run {
+        val entry = state.assistantSnapshot().lastOrNull() ?: run {
             val parentTaskId = state.turnId ?: state.taskId
             val entryId = "$parentTaskId-agent-message"
-            newTextEntry(state, entryId, parentTaskId).also {
-                state.assistantEntries[entryId] = it
-            }
+            // 与事件消费协程并发的创建：走带锁版本，避免同一 entryId 被创建两次，
+            // 后创建的那份会把正在流式追加的正文顶掉。
+            state.assistantEntry(entryId) { newTextEntry(state, entryId, parentTaskId) }
         }
         if (entry.text.isBlank()) {
             entry.text = AgentTextSanitizer.sanitizeUtf16(message)
         }
         entry.isFinal = true
         persistAssistantEntry(state, entry, isError = true)
-        state.reasoningEntries.values.forEach { reasoning ->
+        state.reasoningSnapshot().forEach { reasoning ->
             reasoning.isFinal = true
             persistReasoningEntry(state, reasoning)
         }
-        state.toolEntries.values.forEach { tool ->
+        state.toolSnapshot().forEach { tool ->
             if (tool.update.status == "running") {
                 tool.update = tool.update.copy(status = "error")
                 persistToolEntry(state, tool)
@@ -617,10 +734,12 @@ internal class WebAgentRunBridge(
         state: WebAgentRunState,
         finalizeInterruptedEntries: Boolean
     ) {
-        val messages = historyRepository.listConversationMessages(
+        val messages = conversationService.listConversationMessages(
             conversationId = state.conversationId,
             conversationMode = state.conversationMode,
-            finalizeInterruptedEntries = finalizeInterruptedEntries
+            finalizeInterruptedEntries = finalizeInterruptedEntries,
+            // 图片附件不再以 base64 随每帧快照下发，改由浏览器按需拉取。
+            resolveAttachmentUrls = true
         )
         RealtimeHub.publish(
             "messages_replaced",
@@ -630,6 +749,21 @@ internal class WebAgentRunBridge(
                 "messages" to messages
             )
         )
+        // 下一帧的间隔按这一帧的实际体量定：150ms 的固定节流在长会话里等于每秒
+        // 推 6 次整段历史（几百 KB ~ 几 MB），局域网和浏览器主线程都吃不消。
+        state.publishIntervalMs = resolvePublishInterval(messages)
+    }
+
+    private fun resolvePublishInterval(messages: List<Map<String, Any?>>): Long {
+        var bytes = 0L
+        messages.forEach { message ->
+            bytes += 256L
+            val content = message["content"] as? Map<*, *>
+            bytes += (content?.get("text") as? String)?.length?.toLong() ?: 0L
+            bytes += (message["reasoning_content"] as? String)?.length?.toLong() ?: 0L
+        }
+        val interval = bytes * 1000L / SNAPSHOT_BYTES_PER_SECOND
+        return interval.coerceIn(SNAPSHOT_MIN_INTERVAL_MS, SNAPSHOT_MAX_INTERVAL_MS)
     }
 
     private fun publishTaskEvent(

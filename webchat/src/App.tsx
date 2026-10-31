@@ -42,6 +42,11 @@ const MOBILE_SECTION_ICON = {
   browser: "browser",
 } as const;
 const CONVERSATION_MODES = new Set<ConversationMode>(["normal", "codex", "chat_only"]);
+/**
+ * 一次消息往来会连续触发多条 conversation_created/updated（appendUserMessage、
+ * refreshConversationMetadata、会话绑定变化各发一次）。窗口内合并成一轮刷新。
+ */
+const CONVERSATION_REFRESH_DEBOUNCE_MS = 400;
 
 function normalizeConversationMode(mode: string | undefined): ConversationMode {
   return CONVERSATION_MODES.has(mode as ConversationMode)
@@ -109,6 +114,28 @@ export default function App() {
   const workspacePathRef = useRef("");
   const toastTimerRef = useRef<number | null>(null);
   const autoLoginToken = useRef(initialToken());
+  // conversation_* 事件的刷新去抖/合并状态（见 scheduleConversationRefresh）。
+  const conversationsRef = useRef<Conversation[]>([]);
+  const archivedConversationsRef = useRef<Conversation[]>([]);
+  const conversationRefreshTimerRef = useRef<number | null>(null);
+  const conversationRefreshArchiveRef = useRef(false);
+  const conversationRefreshInFlightRef = useRef(false);
+  const conversationRefreshPendingRef = useRef<{ archived: boolean } | null>(null);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    archivedConversationsRef.current = archivedConversations;
+  }, [archivedConversations]);
+
+  useEffect(() => () => {
+    if (conversationRefreshTimerRef.current !== null) {
+      window.clearTimeout(conversationRefreshTimerRef.current);
+      conversationRefreshTimerRef.current = null;
+    }
+  }, []);
 
   function showError(error: unknown) {
     setGlobalError(errorMessage(error));
@@ -244,6 +271,58 @@ export default function App() {
     } finally {
       setArchivedLoading(false);
     }
+  }
+
+  /**
+   * 归档列表只有在「事件的归档状态和本地记录不一致」时才需要重拉：
+   * 归档会话被更新（archivedNow=true）要更新摘要，从归档恢复要把它移出列表，
+   * 纯未归档会话的更新（最常见的流式场景）跟归档列表无关。
+   */
+  function shouldRefreshArchived(data: RealtimeEventData): boolean {
+    const rawId = data.id ?? data.conversationId;
+    const id = typeof rawId === "number" ? rawId : Number(rawId ?? 0);
+    if (!id) return true;
+    const archivedNow = data.isArchived === true;
+    const knownArchived = archivedConversationsRef.current
+      .some((item) => Number(item.id) === id);
+    return archivedNow || knownArchived !== archivedNow;
+  }
+
+  function refreshConversationLists(includeArchived: boolean) {
+    if (conversationRefreshInFlightRef.current) {
+      // 已经在飞：不要并发再打一轮，记下这次要不要刷归档，等当前请求结束后补跑。
+      conversationRefreshPendingRef.current = {
+        archived: includeArchived || (conversationRefreshPendingRef.current?.archived ?? false),
+      };
+      return;
+    }
+    conversationRefreshInFlightRef.current = true;
+    void (async () => {
+      try {
+        // 串行而不是并行：两个请求打的是同一个端点，只是筛选条件不同，
+        // 流式期间并发只会让服务端多排两次全量查询。
+        await loadConversations(true);
+        if (includeArchived) await loadArchivedConversations(false);
+      } catch (error) {
+        showError(error);
+      } finally {
+        conversationRefreshInFlightRef.current = false;
+        const pending = conversationRefreshPendingRef.current;
+        conversationRefreshPendingRef.current = null;
+        if (pending) scheduleConversationRefresh(pending.archived);
+      }
+    })();
+  }
+
+  function scheduleConversationRefresh(includeArchived: boolean) {
+    conversationRefreshArchiveRef.current = conversationRefreshArchiveRef.current || includeArchived;
+    if (conversationRefreshTimerRef.current !== null) return;
+    conversationRefreshTimerRef.current = window.setTimeout(() => {
+      conversationRefreshTimerRef.current = null;
+      const archived = conversationRefreshArchiveRef.current;
+      conversationRefreshArchiveRef.current = false;
+      refreshConversationLists(archived);
+    }, CONVERSATION_REFRESH_DEBOUNCE_MS);
   }
 
   async function loadWorkspace(path = workspacePathRef.current, reportError = true) {
@@ -602,8 +681,10 @@ export default function App() {
 
   function handleRealtimeEvent(eventName: RealtimeEventName, data: RealtimeEventData) {
     if (["conversation_created", "conversation_updated", "conversation_deleted"].includes(eventName)) {
-      void loadConversations(true).catch(showError);
-      void loadArchivedConversations(false);
+      // 原来每条事件都立刻并行拉「在线 + 归档」两次全量列表；流式期间服务端会连发
+      // 多条 conversation_updated，网页端就变成一串持续的列表请求。改成去抖 + 串行 +
+      // 在飞合并，且归档列表按归档状态变化按需刷新。
+      scheduleConversationRefresh(shouldRefreshArchived(data));
       return;
     }
     if (eventName === "messages_replaced" && sameSelectedConversation(data)) {
