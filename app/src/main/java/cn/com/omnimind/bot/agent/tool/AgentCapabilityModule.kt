@@ -64,7 +64,6 @@ class BuiltInAgentCapabilityModule(
     private val privilegedHandler = PrivilegedToolHandler(
         helper,
         workspaceManager,
-        terminalHandler,
     )
 
     companion object { val definitions = listOf(NotificationToolHandler.definition, NotificationToolHandler.waitDefinition) }

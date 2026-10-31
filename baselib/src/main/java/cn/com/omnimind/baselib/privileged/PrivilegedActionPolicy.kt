@@ -90,30 +90,30 @@ object PrivilegedActionPolicy {
 
     private val commandBlockRules = listOf(
         CommandBlockRule(
-            Regex("""(^|[;&|()\s])(reboot|shutdown)(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
+            Regex("""(?<![A-Za-z0-9_.\-])(reboot|shutdown)(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Power-off and reboot commands are blocked."
         ),
         CommandBlockRule(
-            Regex("""(^|[;&|()\s])(svc|cmd)\s+power(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
+            Regex("""(?<![A-Za-z0-9_.\-])(svc|cmd)\s+power(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Direct power-management commands are blocked."
         ),
         CommandBlockRule(
             Regex(
-                """(^|[;&|()\s])am\s+force-stop\s+cn\.com\.omnimind\.bot(?:\.[A-Za-z0-9._-]+)?(?=($|[;&|()\s]))""",
+                """(?<![A-Za-z0-9_.\-])am\s+force-stop\s+cn\.com\.omnimind\.bot(?:\.[A-Za-z0-9._-]+)?(?=($|[;&|()\s]))""",
                 RegexOption.IGNORE_CASE
             ),
             "Force-stopping the host app would disable its accessibility service."
         ),
         CommandBlockRule(
-            Regex("""(^|[;&|()\s])recovery\s+--wipe_[A-Za-z0-9_-]+""", RegexOption.IGNORE_CASE),
+            Regex("""(?<![A-Za-z0-9_.\-])recovery\s+--wipe_[A-Za-z0-9_-]+""", RegexOption.IGNORE_CASE),
             "Recovery wipe commands are blocked."
         ),
         CommandBlockRule(
-            Regex("""(^|[;&|()\s])sm\s+partition(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
+            Regex("""(?<![A-Za-z0-9_.\-])sm\s+partition(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Storage repartition commands are blocked."
         ),
         CommandBlockRule(
-            Regex("""(^|[;&|()\s])fastboot(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
+            Regex("""(?<![A-Za-z0-9_.\-])fastboot(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Fastboot commands are blocked."
         ),
         CommandBlockRule(
@@ -121,12 +121,12 @@ object PrivilegedActionPolicy {
             "Direct block-device writes are blocked."
         ),
         CommandBlockRule(
-            Regex("""(^|[;&|()\s])(mkfs\S*|newfs\S*)(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
+            Regex("""(?<![A-Za-z0-9_.\-])(mkfs\S*|newfs\S*)(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Filesystem formatting commands are blocked."
         ),
         CommandBlockRule(
             Regex(
-                """(^|[;&|()\s])(mount|toybox\s+mount|busybox\s+mount)\b[^\n]*\b(remount|rw)\b[^\n]*\s/(system|vendor|product|system_ext)(/|\b)""",
+                """(?<![A-Za-z0-9_.\-])(mount|toybox\s+mount|busybox\s+mount)\b[^\n]*\b(remount|rw)\b[^\n]*\s/(system|vendor|product|system_ext)(/|\b)""",
                 RegexOption.IGNORE_CASE
             ),
             "Remounting protected system partitions is blocked."

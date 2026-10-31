@@ -271,6 +271,50 @@ interface AgentConversationEntryDao {
 
     @Query(
         """
+        SELECT $CHUNKED_ENTRY_PROJECTION FROM agent_conversation_entries
+        WHERE conversationId = :conversationId
+          AND conversationMode = :conversationMode
+          AND entryType != 'stream_event'
+          AND id > :afterEntryId
+          AND (:afterEntryId = 0 OR NOT EXISTS (
+            SELECT 1 FROM agent_conversation_entries AS preferred
+            WHERE preferred.conversationId = :conversationId
+              AND preferred.entryId = agent_conversation_entries.entryId
+              AND preferred.entryType != 'stream_event'
+              AND ((:conversationMode = 'codex' AND preferred.conversationMode = 'agent')
+                OR (:conversationMode = 'normal' AND preferred.conversationMode IN ('agent', 'codex')))
+          ))
+          AND (:cursorId = 0
+            OR createdAt < :cursorCreatedAt
+            OR (createdAt = :cursorCreatedAt AND id < :cursorId))
+        ORDER BY createdAt DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getThreadEntriesDescAfterCursorSlices(
+        conversationId: Long,
+        conversationMode: String,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long,
+        afterEntryId: Long = 0
+    ): List<AgentConversationEntrySlice>
+
+    @Transaction
+    suspend fun getThreadEntriesDescAfterCursor(
+        conversationId: Long,
+        conversationMode: String,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long,
+        afterEntryId: Long = 0
+    ): List<AgentConversationEntry> =
+        getThreadEntriesDescAfterCursorSlices(
+            conversationId, conversationMode, limit, cursorCreatedAt, cursorId, afterEntryId
+        ).map { hydrate(it) }
+
+    @Query(
+        """
         SELECT COUNT(*) FROM agent_conversation_entries
         WHERE conversationId = :conversationId
           AND conversationMode = :conversationMode
@@ -365,6 +409,42 @@ interface AgentConversationEntryDao {
     @Transaction
     suspend fun getLogicalThreadPage(conversationId: Long, modes: List<String>, limit: Int, offset: Int): List<AgentConversationEntry> =
         getLogicalThreadPageSlices(conversationId, modes, limit, offset).map { hydrate(it) }
+
+    @Query("""
+        SELECT $CHUNKED_ENTRY_PROJECTION FROM agent_conversation_entries
+        WHERE conversationId = :conversationId AND conversationMode IN (:modes)
+          AND entryType != 'stream_event'
+          AND NOT EXISTS (
+            SELECT 1 FROM agent_conversation_entries AS preferred
+            WHERE preferred.conversationId = :conversationId
+              AND preferred.entryId = agent_conversation_entries.entryId
+              AND preferred.conversationMode IN (:modes)
+              AND preferred.entryType != 'stream_event'
+              AND (CASE preferred.conversationMode WHEN 'agent' THEN 0 WHEN 'codex' THEN 1 ELSE 2 END)
+                < (CASE agent_conversation_entries.conversationMode WHEN 'agent' THEN 0 WHEN 'codex' THEN 1 ELSE 2 END)
+          )
+          AND (:cursorId = 0
+            OR createdAt < :cursorCreatedAt
+            OR (createdAt = :cursorCreatedAt AND id < :cursorId))
+        ORDER BY createdAt DESC, id DESC LIMIT :limit
+    """)
+    suspend fun getLogicalThreadPageAfterCursorSlices(
+        conversationId: Long,
+        modes: List<String>,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long
+    ): List<AgentConversationEntrySlice>
+
+    @Transaction
+    suspend fun getLogicalThreadPageAfterCursor(
+        conversationId: Long,
+        modes: List<String>,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long
+    ): List<AgentConversationEntry> =
+        getLogicalThreadPageAfterCursorSlices(conversationId, modes, limit, cursorCreatedAt, cursorId).map { hydrate(it) }
 
     @Transaction
     suspend fun getThreadEntriesDescPaged(

@@ -380,6 +380,24 @@ object DatabaseHelper {
         }
     }
 
+    private val MIGRATION_19_20 = object : Migration(19, 20) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            // 19 及之前 agent_conversation_entries 只有 (conversationId, mode, entryId) 与
+            // (conversationId, mode, updatedAt) 两个索引，历史读取按 createdAt 排序时用不上，
+            // 每页都要全量排序一次（O(n^2)）。这里补时间序索引。
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS " +
+                    "`index_agent_conversation_entries_conversationId_conversationMode_createdAt` " +
+                    "ON `agent_conversation_entries` (`conversationId`, `conversationMode`, `createdAt`)"
+            )
+            // 旧 transport 事件（entryType = 'stream_event'）的普查与批量清理原本全表扫描。
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_agent_conversation_entries_entryType` " +
+                    "ON `agent_conversation_entries` (`entryType`)"
+            )
+        }
+    }
+
     internal val ALL_MIGRATIONS = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -398,7 +416,8 @@ object DatabaseHelper {
         MIGRATION_15_16,
         MIGRATION_16_17,
         MIGRATION_17_18,
-        MIGRATION_18_19
+        MIGRATION_18_19,
+        MIGRATION_19_20
     )
 
     fun init(context: Context) {
@@ -722,6 +741,17 @@ object DatabaseHelper {
     suspend fun getLogicalAgentConversationPage(conversationId: Long, modes: List<String>, limit: Int, offset: Int): List<AgentConversationEntry> =
         getDatabase().agentConversationEntryDao().getLogicalThreadPage(conversationId, modes, limit, offset)
 
+    suspend fun getLogicalAgentConversationPageAfterCursor(
+        conversationId: Long,
+        modes: List<String>,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long
+    ): List<AgentConversationEntry> =
+        getDatabase().agentConversationEntryDao().getLogicalThreadPageAfterCursor(
+            conversationId, modes, limit, cursorCreatedAt, cursorId
+        )
+
     suspend fun getAgentConversationEntriesDescPaged(
         conversationId: Long,
         conversationMode: String,
@@ -734,6 +764,24 @@ object DatabaseHelper {
             conversationMode = conversationMode,
             limit = limit,
             offset = offset,
+            afterEntryId = afterEntryId
+        )
+    }
+
+    suspend fun getAgentConversationEntriesDescAfterCursor(
+        conversationId: Long,
+        conversationMode: String,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long,
+        afterEntryId: Long = 0
+    ): List<AgentConversationEntry> {
+        return getDatabase().agentConversationEntryDao().getThreadEntriesDescAfterCursor(
+            conversationId = conversationId,
+            conversationMode = conversationMode,
+            limit = limit,
+            cursorCreatedAt = cursorCreatedAt,
+            cursorId = cursorId,
             afterEntryId = afterEntryId
         )
     }

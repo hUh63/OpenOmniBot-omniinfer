@@ -82,7 +82,12 @@ internal class RootAccessController(
     fun markUnavailable(status: RootAccessStatus = RootAccessStatus.UNAVAILABLE) {
         synchronized(lock) {
             if (!snapshot.enabled) return
-            preferences.previouslyGranted = false
+            // 只有「授权被拒」才抹掉 previouslyGranted。su 进程瞬时起不来、binder 抖动
+            // 这类失败如果也清标记，下次启动 initialize() 就不再自动重探，Root 会永久
+            // 停在未授权，只能让用户手动关一次再开。
+            if (status == RootAccessStatus.DENIED) {
+                preferences.previouslyGranted = false
+            }
             mutableState.value = snapshot.copy(status = status, generation = snapshot.generation + 1)
             revoke()
         }
@@ -91,6 +96,7 @@ internal class RootAccessController(
     private fun startCheck(): Deferred<Unit> {
         pending?.takeIf { it.isActive }?.let { return it }
         val generation = snapshot.generation + 1
+        val wasGranted = preferences.previouslyGranted
         preferences.previouslyGranted = false
         mutableState.value = snapshot.copy(status = RootAccessStatus.CHECKING, generation = generation)
         return scope.async {
@@ -99,7 +105,13 @@ internal class RootAccessController(
             } catch (_: Exception) { RootAccessStatus.UNAVAILABLE }
             synchronized(lock) {
                 if (snapshot.enabled && snapshot.generation == generation) {
-                    preferences.previouslyGranted = result == RootAccessStatus.GRANTED
+                    // GRANTED 才算已授权、DENIED 明确清掉；UNAVAILABLE / TIMED_OUT 这类
+                    // 瞬时失败保留旧标记，保证下次启动还能自动重探。
+                    preferences.previouslyGranted = when (result) {
+                        RootAccessStatus.GRANTED -> true
+                        RootAccessStatus.DENIED -> false
+                        else -> wasGranted
+                    }
                     mutableState.value = snapshot.copy(status = result)
                 }
             }

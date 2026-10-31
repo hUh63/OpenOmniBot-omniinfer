@@ -183,7 +183,10 @@ class OmniAgentExecutor(
         runControl: AgentRunControl = NoOpAgentRunControl,
         permissionRequester: AgentPermissionRequester? = null,
         continueMode: Boolean = false,
-        historyMessagesOverride: List<ChatCompletionMessage>? = null
+        historyMessagesOverride: List<ChatCompletionMessage>? = null,
+        // ACP 会话 id：特权持久 shell 只能挂在某个 ACP 会话上（关闭会话时按它回收），
+        // 非 ACP 入口（网页/工作区/定时任务）传 null。
+        acpSessionId: String? = null
     ): AgentResult {
         var toolRouter: AgentToolRouter? = null
         var pluginSession: OmniPluginSession? = null
@@ -363,7 +366,8 @@ class OmniAgentExecutor(
                         terminalEnvironment = terminalEnvironment,
                         runControl = runControl,
                         permissionRequester = permissionRequester,
-                        longTermMemoryIndex = ltmIndex
+                        longTermMemoryIndex = ltmIndex,
+                        acpSessionId = acpSessionId
                     )
                 )
             )

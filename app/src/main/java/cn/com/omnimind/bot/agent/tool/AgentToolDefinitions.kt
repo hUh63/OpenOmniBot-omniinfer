@@ -3,7 +3,6 @@ package cn.com.omnimind.bot.agent
 import cn.com.omnimind.baselib.shizuku.ShizukuBackend
 import cn.com.omnimind.baselib.privileged.PrivilegedProvider
 import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
-import cn.com.omnimind.bot.agent.personal.PersonalContextTools
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.i18n.PromptLocale
 import com.rk.terminal.runtime.TerminalDistribution

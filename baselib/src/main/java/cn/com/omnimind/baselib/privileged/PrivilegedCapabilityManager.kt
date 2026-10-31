@@ -3,10 +3,13 @@ package cn.com.omnimind.baselib.privileged
 import android.content.Context
 import android.os.Process
 import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
+import cn.com.omnimind.baselib.util.OmniLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 import cn.com.omnimind.baselib.privileged.PrivilegedSessionRegistry.Binding as SessionBinding
@@ -102,8 +105,19 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
 
     suspend fun closeAcpSession(acpSessionId: String) {
         sessions.forSession(acpSessionId).forEach { (sessionId, binding) ->
-            val result = Access(binding.ownerId, acpSessionId, binding.status).stopPrivilegedSession(sessionId)
-            check(result.success || result.code == "session_not_found") { "Could not close privileged shell: ${result.code}" }
+            // 关闭路径不能抛：调用方（XiaowanAcpConnection.close）在 NonCancellable 里顺序执行
+            // 「关特权会话 → 关 MCP session → onClosed」，这里一抛就会跳过后面两步，
+            // 会话资源永久泄漏。stop 失败只记日志，当作已清理。
+            val result = runCatching {
+                Access(binding.ownerId, acpSessionId, binding.status).stopPrivilegedSession(sessionId)
+            }.getOrElse { error ->
+                OmniLog.w(TAG, "close privileged session $sessionId failed: ${error.message}")
+                return@forEach
+            }
+            if (!result.success && result.code != "session_not_found") {
+                OmniLog.w(TAG, "close privileged session $sessionId returned ${result.code}")
+            }
+            sessions.remove(sessionId)
         }
     }
 
@@ -140,18 +154,30 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
         ): PrivilegedResult {
             require(!acpSessionId.isNullOrBlank()) { "An ACP session is required for a persistent privileged shell." }
             val sessionId = UUID.randomUUID().toString()
-            val result = execute(PrivilegedRequest(
+            val binding = SessionBinding(ownerId, acpSessionId, status)
+            val request = PrivilegedRequest(
                 UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_START,
                 confirmation(confirmed) + mapOf("sessionName" to sessionName.orEmpty()),
                 workingDirectory = workingDirectory, environment = environment, sessionId = sessionId, userId = userId,
-            ), checkSession = false)
-            if (result.success) {
-                sessions.register(sessionId, SessionBinding(ownerId, acpSessionId, status))
-                if (!isValid()) {
-                    stopPrivilegedSession(sessionId)
-                    return failure(PrivilegedRequest(result.requestId, result.action), "privileged_access_changed")
-                }
+            )
+            // 先登记再发请求：execute 可能被取消（用户中断、ACP 侧超时），而服务端那时大概率
+            // 已经拉起 shell。没登记的话 closeAcpSession / revoke 按 sessionId 找不到 binding，
+            // 按 requestId cancel 也杀不到 session:<uuid>，进程就泄漏在后台。
+            sessions.register(sessionId, binding)
+            val result = try {
+                execute(request, checkSession = false)
+            } catch (error: Throwable) {
+                withContext(NonCancellable) { discardSession(sessionId, binding) }
+                throw error
             }
+            if (result.success) {
+                if (!isValid()) {
+                    withContext(NonCancellable) { discardSession(sessionId, binding) }
+                    return failure(request, "privileged_access_changed")
+                }
+                return result
+            }
+            withContext(NonCancellable) { discardSession(sessionId, binding) }
             return result
         }
 
@@ -179,6 +205,12 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
             }
             if (result.success || result.code == "session_not_found") sessions.remove(sessionId, binding)
             return result.copy(provider = status.provider, backend = status.backend)
+        }
+
+        /** 回收一个刚建起来（或建了一半）的持久会话；失败只吞掉，不掩盖原始异常。 */
+        private suspend fun discardSession(sessionId: String, binding: SessionBinding) {
+            runCatching { stopPrivilegedSession(sessionId) }
+            sessions.remove(sessionId, binding)
         }
 
         private suspend fun execute(request: PrivilegedRequest, checkSession: Boolean = true): PrivilegedResult {
@@ -219,6 +251,7 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
     }
 
     companion object {
+        private const val TAG = "PrivilegedCapability"
         @Volatile private var instance: PrivilegedCapabilityManager? = null
         suspend fun closeExistingAcpSession(acpSessionId: String) {
             instance?.closeAcpSession(acpSessionId)

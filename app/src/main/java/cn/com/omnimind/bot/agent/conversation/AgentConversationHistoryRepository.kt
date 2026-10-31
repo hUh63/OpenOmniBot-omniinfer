@@ -552,14 +552,20 @@ class AgentConversationHistoryRepository(
     ): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
         val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
         val messagePayloads = mutableListOf<Map<String, Any?>>()
-        var offset = 0
+        val storageModes = conversationModeCandidates(effectiveConversationMode)
+        // 键集游标翻页（同 loadThreadEntriesDescSafePagedForMode）：整段历史一次性读出时，
+        // LIMIT/OFFSET 的每页都要重新扫过并丢弃前面全部行，长会话是 O(n^2)。
+        var cursorCreatedAt = 0L
+        var cursorId = 0L
         while (true) {
-            val page = DatabaseHelper.getLogicalAgentConversationPage(
-                conversationId, conversationModeCandidates(effectiveConversationMode), SAFE_HISTORY_PAGE_SIZE, offset)
+            val page = DatabaseHelper.getLogicalAgentConversationPageAfterCursor(
+                conversationId, storageModes, SAFE_HISTORY_PAGE_SIZE, cursorCreatedAt, cursorId)
             if (page.isEmpty()) break
             val displayEntries = if (finalizeInterruptedEntries) normalizeEntriesForDisplay(page) else page
             messagePayloads += displayEntries.mapNotNull(::entryToMessagePayload)
-            offset += page.size
+            val last = page.last()
+            cursorCreatedAt = last.createdAt
+            cursorId = last.id
             if (page.size < SAFE_HISTORY_PAGE_SIZE) break
         }
         ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
@@ -802,16 +808,20 @@ class AgentConversationHistoryRepository(
         if (sourceEntries.isEmpty()) return@withContext 0
 
         val targetMode = canonicalConversationMode(targetConversationMode)
-        sourceEntries.forEach { entry ->
-            DatabaseHelper.upsertAgentConversationEntry(
-                entry.copy(
-                    id = 0,
-                    conversationId = targetConversationId,
-                    conversationMode = targetMode,
+        // 逐条 upsert 不包事务时，中途失败会留下一份被截断的（或半旧半新的）分叉历史，
+        // 而 refreshConversationMetadata 又会把它当成完整历史写进会话元数据。
+        DatabaseHelper.withTransaction {
+            sourceEntries.forEach { entry ->
+                DatabaseHelper.upsertAgentConversationEntry(
+                    entry.copy(
+                        id = 0,
+                        conversationId = targetConversationId,
+                        conversationMode = targetMode,
+                    )
                 )
-            )
+            }
+            refreshConversationMetadata(targetConversationId)
         }
-        refreshConversationMetadata(targetConversationId)
         sourceEntries.size
     }
 
@@ -880,18 +890,22 @@ class AgentConversationHistoryRepository(
         // 原来是「读整行快照 → 5 次聚合查询 → 整行写回」：读取与写回之间用户改名、
         // 置顶、归档、切换状态都会被那份旧快照覆盖回去（updatePreservingCheckpoint
         // 只保住了 checkpoint 与 token 字段）。改成只写条目派生的聚合列。
-        val conversation = DatabaseHelper.getConversationById(conversationId) ?: return
-        val lastEntry = DatabaseHelper.getLatestAgentConversationEntryHeader(conversationId)
-        val firstEntry = DatabaseHelper.getEarliestAgentConversationEntryHeader(conversationId)
-        val lastUpdate = DatabaseHelper.getLatestAgentConversationUpdateHeader(conversationId)
-        val messageCount = DatabaseHelper.countAgentConversationEntries(conversationId)
-        DatabaseHelper.updateConversationAggregates(
-            id = conversationId,
-            lastMessage = lastEntry?.let(::conversationLastMessageFromHeader)?.takeIf { it.isNotBlank() },
-            messageCount = messageCount,
-            createdAt = firstEntry?.createdAt ?: conversation.createdAt,
-            updatedAt = lastUpdate?.updatedAt ?: conversation.updatedAt
-        )
+        // 读 + 4 次聚合 + 写必须在同一事务内：两次 refresh 并发时，先读到的旧 messageCount
+        // 可能在后写回时把新值覆盖掉（写的是绝对值，不是增量）。
+        DatabaseHelper.withTransaction {
+            val conversation = DatabaseHelper.getConversationById(conversationId) ?: return@withTransaction
+            val lastEntry = DatabaseHelper.getLatestAgentConversationEntryHeader(conversationId)
+            val firstEntry = DatabaseHelper.getEarliestAgentConversationEntryHeader(conversationId)
+            val lastUpdate = DatabaseHelper.getLatestAgentConversationUpdateHeader(conversationId)
+            val messageCount = DatabaseHelper.countAgentConversationEntries(conversationId)
+            DatabaseHelper.updateConversationAggregates(
+                id = conversationId,
+                lastMessage = lastEntry?.let(::conversationLastMessageFromHeader)?.takeIf { it.isNotBlank() },
+                messageCount = messageCount,
+                createdAt = firstEntry?.createdAt ?: conversation.createdAt,
+                updatedAt = lastUpdate?.updatedAt ?: conversation.updatedAt
+            )
+        }
     }
 
     private suspend fun resetContextSummary(conversationId: Long) {
@@ -1106,18 +1120,24 @@ class AgentConversationHistoryRepository(
         promptProjection: AgentHistoryToolOutputProjection? = null
     ): List<AgentConversationEntry> {
         val entries = mutableListOf<AgentConversationEntry>()
-        var offset = 0
+        // 键集游标翻页。原来用 LIMIT/OFFSET：SQLite 每页都要重新扫过并丢弃前面所有行、
+        // 再排序取前 16 行，整段历史读下来是 O(n^2)，长会话越读越慢。
+        var cursorCreatedAt = 0L
+        var cursorId = 0L
         while (true) {
-            val page = loadThreadEntriesDescPagedSafe(
+            val page = DatabaseHelper.getAgentConversationEntriesDescAfterCursor(
                 conversationId = conversationId,
                 conversationMode = conversationMode,
                 limit = SAFE_HISTORY_PAGE_SIZE,
-                offset = offset,
+                cursorCreatedAt = cursorCreatedAt,
+                cursorId = cursorId,
                 afterEntryId = afterEntryId
             )
             if (page.isEmpty()) break
             entries += if (promptProjection == null) page else page.map(promptProjection::project)
-            offset += page.size
+            val last = page.last()
+            cursorCreatedAt = last.createdAt
+            cursorId = last.id
             if (page.size < SAFE_HISTORY_PAGE_SIZE) break
         }
         return entries
@@ -1150,22 +1170,6 @@ class AgentConversationHistoryRepository(
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
         return canonicalConversationMode(persistedMode ?: requestedMode)
-    }
-
-    private suspend fun loadThreadEntriesDescPagedSafe(
-        conversationId: Long,
-        conversationMode: String,
-        limit: Int,
-        offset: Int,
-        afterEntryId: Long = 0
-    ): List<AgentConversationEntry> {
-        return DatabaseHelper.getAgentConversationEntriesDescPaged(
-            conversationId = conversationId,
-            conversationMode = conversationMode,
-            limit = limit,
-            offset = offset,
-            afterEntryId = afterEntryId
-        )
     }
 
     private fun toStringAnyMap(value: Any?): Map<String, Any?> {

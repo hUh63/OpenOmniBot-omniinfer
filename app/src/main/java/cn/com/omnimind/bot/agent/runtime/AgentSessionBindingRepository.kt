@@ -324,6 +324,10 @@ internal class AgentSessionBindingRepository(
             return
         }
         DatabaseHelper.deleteConversationById(conversationId)
+        // 会话行删掉后 binding 就是孤儿：threadId 仍指向已不存在的会话，
+        // session/list 会把它当成可恢复线程重新拉起来。deleteConversation 的主流程
+        // 已经清了，这条占位清理路径也必须清。
+        DatabaseHelper.deleteAgentSessionBindingByConversationId(conversationId)
         publishConversationEvent("conversation_deleted", conversation)
     }
 

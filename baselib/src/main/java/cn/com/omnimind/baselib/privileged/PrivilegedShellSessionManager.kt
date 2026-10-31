@@ -598,7 +598,13 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
                 require(ENV_KEY_PATTERN.matches(key)) { "Invalid environment variable name: $key" }
                 lines += "export $key=${shellQuote(value)}"
             }
-            lines += command
+            // 持久会话的 stdin 就是 shell 的脚本源（无参数 /system/bin/sh 会从此读脚本文本），
+            // 子命令继承同一个 fd0。原来直接写命令：任何读 stdin 的命令（cat / read / sh /
+            // su / python / vi）会把紧随其后的结束标记和后续脚本一起当成自己的输入，
+            // 于是 marker 永不出现，命令只能等到超时后被整会话杀掉。
+            // 用 { ... } </dev/null 分组，保证只有 shell 本身读脚本源。
+            lines += "{ $command"
+            lines += "} </dev/null"
             lines += "__omnibot_exit_code=\$?"
             lines += "__omnibot_pwd=\$(pwd 2>/dev/null || printf '')"
             lines += "printf '\\n%s\\037%s\\037%s\\n' ${shellQuote(stdoutMarker(token))} \"\$__omnibot_exit_code\" \"\$__omnibot_pwd\""

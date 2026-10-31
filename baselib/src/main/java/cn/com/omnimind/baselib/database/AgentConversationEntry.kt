@@ -12,7 +12,12 @@ import java.util.Date
             value = ["conversationId", "conversationMode", "entryId"],
             unique = true
         ),
-        Index(value = ["conversationId", "conversationMode", "updatedAt"])
+        Index(value = ["conversationId", "conversationMode", "updatedAt"]),
+        // 历史读取是 WHERE conversationId + conversationMode ORDER BY createdAt DESC, id DESC，
+        // 没有这个索引时每翻一页都要把整段条目排序一次。
+        Index(value = ["conversationId", "conversationMode", "createdAt"]),
+        // 旧 stream_event 的普查与清理按 entryType 过滤，之前是全表扫描。
+        Index(value = ["entryType"])
     ]
 )
 data class AgentConversationEntry(
