@@ -30,20 +30,27 @@ class RootAccessSnapshot {
 }
 
 abstract final class RootAccessService {
-  static Future<RootAccessSnapshot> status() async =>
-      RootAccessSnapshot.fromMap(
-        await spePermission.invokeMapMethod('getRootStatus'),
-      );
+  /// 走 `invokeSpecialPermission`（10s 超时 + 异常兜底）：原生不回包时按钮不能永久
+  /// 停在「正在检查授权」，拿不到结果就按「未知」回落。
+  static Future<RootAccessSnapshot> status() async {
+    final map = await invokeSpecialPermission<Map<Object?, Object?>>(
+      'getRootStatus',
+    );
+    return RootAccessSnapshot.fromMap(map);
+  }
 
-  static Future<RootAccessSnapshot> setEnabled(bool enabled) async =>
-      RootAccessSnapshot.fromMap(
-        await spePermission.invokeMapMethod('setRootEnabled', {
-          'enabled': enabled,
-        }),
-      );
+  static Future<RootAccessSnapshot> setEnabled(bool enabled) async {
+    final map = await invokeSpecialPermission<Map<Object?, Object?>>(
+      'setRootEnabled',
+      <String, dynamic>{'enabled': enabled},
+    );
+    return RootAccessSnapshot.fromMap(map);
+  }
 
-  static Future<RootAccessSnapshot> requestAccess() async =>
-      RootAccessSnapshot.fromMap(
-        await spePermission.invokeMapMethod('requestRootAccess'),
-      );
+  static Future<RootAccessSnapshot> requestAccess() async {
+    final map = await invokeSpecialPermission<Map<Object?, Object?>>(
+      'requestRootAccess',
+    );
+    return RootAccessSnapshot.fromMap(map);
+  }
 }
