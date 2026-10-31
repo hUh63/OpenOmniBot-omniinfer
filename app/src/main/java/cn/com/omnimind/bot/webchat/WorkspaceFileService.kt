@@ -5,13 +5,16 @@ import cn.com.omnimind.bot.agent.AgentWorkspaceDescriptor
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import java.io.File
 
+/** 预览窗口的字符上限；top-level 的流式切片函数也要用它，故提到文件级。 */
+private const val PREVIEW_MAX_CHARS = 200_000
+
 class WorkspaceFileService(
     context: Context
 ) {
     private companion object {
         /** 超过这个体积就不再整文件读入预览（String 还会按 UTF-16 再翻一倍）。 */
         const val DEFAULT_PREVIEW_MAX_BYTES = 1L * 1024L * 1024L
-        const val DEFAULT_PREVIEW_MAX_CHARS = 200_000
+        const val DEFAULT_PREVIEW_MAX_CHARS = PREVIEW_MAX_CHARS
     }
 
     private val workspaceManager = AgentWorkspaceManager(context)
@@ -338,7 +341,7 @@ internal fun sliceWorkspaceFileByStream(
         // 不指定 lineCount 时也必须受字符预算约束：原来这里从 lineStart 一直读到文件尾
         // 全塞进 ArrayList（每行一个 String 对象，比 readText 还费内存），一个几百 MB 的
         // 日志就能把进程 OOM 掉、连带正在跑的 Agent 一起被杀。
-        val budget = charLimit ?: DEFAULT_PREVIEW_MAX_CHARS
+        val budget = charLimit ?: PREVIEW_MAX_CHARS
         val lines = ArrayList<String>()
         var consumed = 0
         var moreLines = false
