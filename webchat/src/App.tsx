@@ -55,7 +55,16 @@ function errorMessage(error: unknown): string {
 
 function initialToken(): string {
   const queryToken = new URLSearchParams(window.location.search).get("token")?.trim();
-  return queryToken || localStorage.getItem(TOKEN_STORAGE_KEY)?.trim() || "";
+  if (queryToken) {
+    // token 留在地址栏会进浏览器历史、截图，也会随外链 Referer 发出去。读完即抹掉。
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.hash}`,
+    );
+    return queryToken;
+  }
+  return localStorage.getItem(TOKEN_STORAGE_KEY)?.trim() || "";
 }
 
 function createTaskId(): string {

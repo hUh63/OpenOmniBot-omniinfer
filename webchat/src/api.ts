@@ -31,6 +31,13 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
+/**
+ * 供「拿不到 HTTP 状态码」的通道（EventSource）在自行探测到 401 后复用同一套处理。
+ */
+export function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
+}
+
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, query, timeoutMs = 30_000 } = options;
   const url = new URL(`${API_ROOT}${path}`, window.location.origin);

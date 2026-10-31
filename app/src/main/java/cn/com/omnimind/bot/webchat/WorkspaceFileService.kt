@@ -173,13 +173,32 @@ class WorkspaceFileService(
             workspace = workspace
         )
         require(source.exists()) { "源文件不存在：${source.absolutePath}" }
+        // 同路径 = 自己覆盖自己（原来会先把目标 deleteRecursively 掉，源就没了，
+        // 接着 copy 因源不存在失败：文件不可恢复地丢失）；目标在源目录内部 = 把目录
+        // 拷进自己的子目录，磁盘被递归撑爆。两种都在动手前拦掉。
+        val sourceCanonical = source.canonicalFile
+        val targetCanonical = target.canonicalFile
+        require(sourceCanonical != targetCanonical) { "源与目标相同：${target.absolutePath}" }
+        require(!targetCanonical.path.startsWith(sourceCanonical.path + File.separator)) {
+            "目标不能位于源目录内部：${target.absolutePath}"
+        }
         require(overwrite || !target.exists()) { "目标已存在：${target.absolutePath}" }
         target.parentFile?.mkdirs()
-        if (overwrite && target.exists()) {
-            target.deleteRecursively()
+        // 先拷到同父目录的临时名，成功后再替换目标、最后删源：任何一步失败都不会
+        // 让源文件先消失。
+        val staging = File(targetCanonical.parentFile, ".${targetCanonical.name}.omnibot-move")
+        staging.deleteRecursively()
+        try {
+            source.copyRecursively(staging, overwrite = true)
+            if (target.exists()) {
+                require(target.deleteRecursively()) { "无法覆盖目标：${target.absolutePath}" }
+            }
+            require(staging.renameTo(target)) { "重命名失败：${target.absolutePath}" }
+            source.deleteRecursively()
+        } catch (error: Throwable) {
+            staging.deleteRecursively()
+            throw error
         }
-        source.copyRecursively(target, overwrite = overwrite)
-        source.deleteRecursively()
         publishWorkspaceChanged("move", target, workspace)
         return linkedMapOf(
             "source" to filePayload(source, workspace),
@@ -316,7 +335,12 @@ internal fun sliceWorkspaceFileByStream(
     if (lineStart != null) {
         val from = (lineStart - 1).coerceAtLeast(0)
         val want = lineCount?.coerceAtLeast(1)
+        // 不指定 lineCount 时也必须受字符预算约束：原来这里从 lineStart 一直读到文件尾
+        // 全塞进 ArrayList（每行一个 String 对象，比 readText 还费内存），一个几百 MB 的
+        // 日志就能把进程 OOM 掉、连带正在跑的 Agent 一起被杀。
+        val budget = charLimit ?: DEFAULT_PREVIEW_MAX_CHARS
         val lines = ArrayList<String>()
+        var consumed = 0
         var moreLines = false
         file.bufferedReader().use { reader ->
             var index = 0
@@ -327,13 +351,22 @@ internal fun sliceWorkspaceFileByStream(
                         moreLines = true
                         break
                     }
+                    if (consumed > 0 && consumed + line.length + 1 > budget) {
+                        moreLines = true
+                        break
+                    }
                     lines.add(line)
+                    consumed += line.length + 1
+                    if (consumed >= budget) {
+                        moreLines = true
+                        break
+                    }
                 }
                 index++
             }
         }
         val sliced = lines.joinToString("\n")
-        val rendered = charLimit?.let { sliced.take(it) } ?: sliced
+        val rendered = sliced.take(budget)
         return WorkspaceFileTextSlice(
             content = rendered,
             truncated = moreLines || rendered.length < sliced.length
