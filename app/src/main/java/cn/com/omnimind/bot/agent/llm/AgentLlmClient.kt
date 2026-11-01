@@ -149,6 +149,8 @@ class HttpAgentLlmClient(
     private val modelOverride: AgentModelOverride? = modelOverride?.normalized()
     private val tag = "HttpAgentLlmClient"
     private companion object {
+        /** 单次重试等待上限（含服务器 Retry-After）：再长就直接把错误抛给上层。 */
+        const val MAX_RETRY_WAIT_MS = 30_000L
         const val REASONING_UPDATE_INTERVAL_MS =
             ReasoningStreamUpdatePolicy.DEFAULT_INTERVAL_MS
         /** 正文流式刷新最小间隔：避免每个分片都做一次全量快照（O(n²)）。 */
@@ -413,7 +415,17 @@ class HttpAgentLlmClient(
     private fun Response?.retryAfterMillisOrNull(): Long? {
         val raw = runCatching { this?.header("Retry-After") }.getOrNull()?.trim().orEmpty()
         if (raw.isEmpty()) return null
-        return raw.toLongOrNull()?.let { seconds -> (seconds * 1000L).coerceIn(0L, 60_000L) }
+        // 秒数是主流写法；HTTP-date（IMF-fixdate）也合法，之前直接 toLongOrNull 会把它
+        // 当「没有 Retry-After」，于是按拍脑袋的 500ms 重试、立刻再次 429。
+        raw.toLongOrNull()?.let { seconds -> (seconds * 1000L).coerceIn(0L, MAX_RETRY_WAIT_MS) }
+            ?.let { return it }
+        val dateMillis = runCatching {
+            java.time.ZonedDateTime.parse(raw, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+                .toInstant()
+                .toEpochMilli()
+        }.getOrNull() ?: return null
+        val waitMs = dateMillis - System.currentTimeMillis()
+        return waitMs.coerceIn(0L, MAX_RETRY_WAIT_MS)
     }
 
     private fun isTransientStreamFailure(error: AgentStreamRequestException): Boolean {
