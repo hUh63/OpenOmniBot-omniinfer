@@ -27,6 +27,40 @@ private const val OFFICIAL_SKILLS_DIRECTORY_NAME = "OmniBotSkills"
 private val RETIRED_BUILTIN_SKILL_IDS = setOf("hatch-pet")
 private val SKILL_INDEX_LOCK = Any()
 
+/**
+ * 技能索引缓存。
+ *
+ * 每次 skills_list / skills_read 都会 walkTopDown 整个 skillsRoot，并对每个 SKILL.md
+ * 做 front matter 解析；官方仓库 clone 后就是几百个目录，而这两个工具还在「可并行」
+ * 白名单里 —— 并行批次因此被全局锁串成串行，每轮对话都要白扫几遍磁盘。
+ * 这里按「目录指纹 + 短 TTL」缓存结果：命中时不做任何 parse、也不持全局锁。
+ * 指纹包含每个 skill 目录与 SKILL.md 的 mtime/size，用户手工改动同样能被发现。
+ */
+private object SkillIndexCache {
+    private const val TTL_MS = 500L
+    private val lock = Any()
+    private var entries: List<SkillIndexEntry>? = null
+    private var fingerprint: String = ""
+    private var computedAt: Long = 0L
+
+    fun lookup(key: String, now: Long): List<SkillIndexEntry>? = synchronized(lock) {
+        val cached = entries
+        if (cached != null && key == fingerprint && now - computedAt < TTL_MS) cached else null
+    }
+
+    fun store(key: String, value: List<SkillIndexEntry>) = synchronized(lock) {
+        entries = value
+        fingerprint = key
+        computedAt = System.currentTimeMillis()
+    }
+
+    fun invalidate() = synchronized(lock) {
+        entries = null
+        fingerprint = ""
+        computedAt = 0L
+    }
+}
+
 private data class BuiltinSkillManifest(
     val skills: List<BuiltinSkillAsset> = emptyList()
 )
@@ -356,33 +390,72 @@ class SkillIndexService(
     }
 
     fun listSkillsForManagement(): List<SkillIndexEntry> {
+        // 命中缓存时完全不持 SKILL_INDEX_LOCK：skills_list / skills_read 在并行白名单里，
+        // 原来每次调用都要抢全局锁再全盘解析，等于把并行批次串成串行。
+        val fingerprint = skillsFingerprint()
+        SkillIndexCache.lookup(fingerprint, System.currentTimeMillis())?.let { return it }
         synchronized(SKILL_INDEX_LOCK) {
-            seedBuiltinSkillsIfNeeded()
-            val registryStore = registryStore()
-            val registry = registryStore.read()
-            val builtinAssets = builtinStore().listBuiltins().associateBy { it.id }
-            val installedEntries = scanInstalledEntries(registry, builtinAssets)
-            val installedIds = installedEntries.mapTo(mutableSetOf()) { it.id }
-            val removedBuiltinEntries = builtinAssets.values
-                .asSequence()
-                .filter { builtin ->
-                    builtin.id !in installedIds &&
-                        registry[builtin.id]?.installState == INSTALL_STATE_REMOVED_BUILTIN
-                }
-                .map { builtin ->
-                    buildBuiltinPlaceholderEntry(
-                        builtin = builtin,
-                        registryState = registry[builtin.id]
-                    )
-                }
-                .toList()
+            SkillIndexCache.lookup(fingerprint, System.currentTimeMillis())?.let { return it }
+            return recomputeIndexLocked()
+        }
+    }
 
-            return (installedEntries + removedBuiltinEntries).sortedWith(
-                compareByDescending<SkillIndexEntry> { it.installed }
-                    .thenBy { sourceRank(it.source) }
-                    .thenBy { it.name.lowercase() }
+    /**
+     * 必须在 SKILL_INDEX_LOCK 内调用：跳过缓存读取，直接重扫磁盘并刷新缓存。
+     * 写路径（启用/禁用/删除）内部查找用它 —— 否则会读到写之前的旧索引，
+     * 出现「刚改完又弹回去」。
+     */
+    private fun recomputeIndexLocked(): List<SkillIndexEntry> {
+        seedBuiltinSkillsIfNeeded()
+        val registryStore = registryStore()
+        val registry = registryStore.read()
+        val builtinAssets = builtinStore().listBuiltins().associateBy { it.id }
+        val installedEntries = scanInstalledEntries(registry, builtinAssets)
+        val installedIds = installedEntries.mapTo(mutableSetOf()) { it.id }
+        val removedBuiltinEntries = builtinAssets.values
+            .asSequence()
+            .filter { builtin ->
+                builtin.id !in installedIds &&
+                    registry[builtin.id]?.installState == INSTALL_STATE_REMOVED_BUILTIN
+            }
+            .map { builtin ->
+                buildBuiltinPlaceholderEntry(
+                    builtin = builtin,
+                    registryState = registry[builtin.id]
+                )
+            }
+            .toList()
+
+        val result = (installedEntries + removedBuiltinEntries).sortedWith(
+            compareByDescending<SkillIndexEntry> { it.installed }
+                .thenBy { sourceRank(it.source) }
+                .thenBy { it.name.lowercase() }
+        )
+        // seed 可能刚复制了内置技能，指纹要重算。
+        SkillIndexCache.store(skillsFingerprint(), result)
+        return result
+    }
+
+    /**
+     * 索引指纹：skillsRoot 下每个 skill 目录与 SKILL.md 的 mtime/size + registry 文件。
+     * 只做 stat，不读文件内容 —— 比逐个 parse 便宜一个数量级。
+     */
+    private fun skillsFingerprint(): String {
+        val root = workspaceManager.skillsRoot()
+        val builder = StringBuilder()
+        val registryFile = File(root, SKILL_REGISTRY_FILE_NAME)
+        builder.append(
+            if (registryFile.exists()) "${registryFile.length()}x${registryFile.lastModified()}" else "-"
+        )
+        root.listFiles()?.sortedBy { it.name }?.forEach { child ->
+            if (!child.isDirectory) return@forEach
+            builder.append('|').append(child.name).append(':').append(child.lastModified())
+            val skillFile = File(child, "SKILL.md")
+            builder.append(':').append(
+                if (skillFile.exists()) "${skillFile.length()}x${skillFile.lastModified()}" else "-"
             )
         }
+        return builder.toString()
     }
 
     fun listInstalledSkills(): List<SkillIndexEntry> {
@@ -395,11 +468,13 @@ class SkillIndexService(
 
     private fun findManagedInstalledSkill(
         identifier: String,
-        includeDisabled: Boolean
+        includeDisabled: Boolean,
+        useCache: Boolean = true
     ): SkillIndexEntry? {
         val normalizedIdentifier = normalizeSkillLookup(identifier)
         if (normalizedIdentifier.isBlank()) return null
-        val entries = listSkillsForManagement().filter { entry ->
+        val source = if (useCache) listSkillsForManagement() else recomputeIndexLocked()
+        val entries = source.filter { entry ->
             entry.installed && (includeDisabled || entry.enabled)
         }
         return entries.firstOrNull { normalizeSkillLookup(it.id) == normalizedIdentifier }
@@ -445,6 +520,7 @@ class SkillIndexService(
                     installState = INSTALL_STATE_INSTALLED
                 )
             )
+            SkillIndexCache.invalidate()
             return entry.copy(enabled = true, source = USER_SOURCE, installed = true)
         }
     }
@@ -480,7 +556,7 @@ class SkillIndexService(
         // 和 seedBuiltinSkillsIfNeeded / deleteSkill 的批量改写交错时，
         // 会把刚写的 removed_builtin 墓碑覆盖成 installed（技能删了又回来）。
         synchronized(SKILL_INDEX_LOCK) {
-            val entry = findManagedInstalledSkill(skillId, includeDisabled = true)
+            val entry = findManagedInstalledSkill(skillId, includeDisabled = true, useCache = false)
                 ?: throw IllegalArgumentException("未找到已安装 skill：$skillId")
             val current = registryStore().read()[entry.id]
             val written = registryStore().set(
@@ -495,6 +571,7 @@ class SkillIndexService(
             if (!written) {
                 throw IllegalStateException("技能开关写入失败，请重试：${entry.id}")
             }
+            SkillIndexCache.invalidate()
             return entry.copy(enabled = enabled)
         }
     }
@@ -504,7 +581,7 @@ class SkillIndexService(
         // 「删目录」与「seed 发现目录缺失就重新拷回来」交错，结果磁盘有目录、
         // registry 是墓碑，用户看到技能删了又回来且是关着的。
         synchronized(SKILL_INDEX_LOCK) {
-            val entry = listSkillsForManagement().firstOrNull { it.id == skillId && it.installed }
+            val entry = recomputeIndexLocked().firstOrNull { it.id == skillId && it.installed }
                 ?: return false
             val targetDir = File(entry.rootPath)
             if (entry.source == BUILTIN_SOURCE) {
@@ -522,7 +599,8 @@ class SkillIndexService(
                         installState = INSTALL_STATE_REMOVED_BUILTIN
                     )
                 )
-                return true
+                SkillIndexCache.invalidate()
+            return true
             }
             val deleted = !targetDir.exists() || targetDir.deleteRecursively()
             if (!deleted && targetDir.exists()) {
@@ -532,6 +610,7 @@ class SkillIndexService(
                 return false
             }
             registryStore().remove(entry.id)
+            SkillIndexCache.invalidate()
             return true
         }
     }

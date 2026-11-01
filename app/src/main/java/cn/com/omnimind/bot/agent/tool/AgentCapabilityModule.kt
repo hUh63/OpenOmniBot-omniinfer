@@ -9,6 +9,7 @@ import cn.com.omnimind.bot.agent.tool.handlers.BrowserToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ContextToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.FileToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ImageGenerationToolHandler
+import cn.com.omnimind.bot.agent.tool.handlers.McpToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.MemoryLoadToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.MemoryToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.PrivilegedToolHandler
@@ -83,5 +84,8 @@ class BuiltInAgentCapabilityModule(
         MemoryToolHandler(helper),
         MemoryLoadToolHandler(helper),
         SubagentToolHandler(helper, subagentDispatcher),
+        // 远端 MCP 工具的名字由服务器决定，无法写进 toolNames；交给 AgentToolRouter
+        // 在 handlerMap 未命中且调用带 remoteTool 描述符时兜底分发。
+        McpToolHandler(helper),
     )
 }

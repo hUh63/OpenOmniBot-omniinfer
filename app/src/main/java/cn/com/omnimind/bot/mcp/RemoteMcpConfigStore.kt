@@ -54,12 +54,16 @@ object RemoteMcpConfigStore {
             current.add(merged)
         }
         saveServers(current)
+        // 配置变了：上一次发现结果作废，下一轮工具目录/设置页会重新 listTools。
+        RemoteMcpDiscoveryRegistry.invalidate(merged.id)
         return merged
     }
 
     fun deleteServer(serverId: String) = synchronized(writeLock) {
         val current = listServers().filterNot { it.id == serverId }
         saveServers(current)
+        // 配置变了：上一次发现结果作废，下一轮工具目录/设置页会重新 listTools。
+        RemoteMcpDiscoveryRegistry.invalidate(serverId)
     }
 
     fun setServerEnabled(serverId: String, enabled: Boolean): RemoteMcpServerConfig? = synchronized(writeLock) {
@@ -69,6 +73,8 @@ object RemoteMcpConfigStore {
         val updated = current[index].copy(enabled = enabled)
         current[index] = updated
         saveServers(current)
+        // 配置变了：上一次发现结果作废，下一轮工具目录/设置页会重新 listTools。
+        RemoteMcpDiscoveryRegistry.invalidate(serverId)
         return updated
     }
 

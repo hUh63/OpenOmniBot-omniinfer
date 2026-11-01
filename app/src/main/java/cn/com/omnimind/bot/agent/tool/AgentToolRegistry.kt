@@ -31,6 +31,11 @@ class AgentToolRegistry(
     // Keep the visual-operation entry visible so the Agent can explain how
     // to enable it. VlmToolHandler gates execution until OmniFlow is enabled.
     includeVlmTool: Boolean = true,
+    /**
+     * 用户自己配置的远端 MCP 服务器暴露的工具。工具名由服务器决定（运行时才知道），
+     * 无法写进静态 definitions，所以单独注入。
+     */
+    remoteMcpTools: List<RemoteMcpToolDescriptor> = emptyList(),
     ) : AgentToolCatalog {
     data class RuntimeToolDescriptor(
         val name: String,
@@ -178,6 +183,7 @@ class AgentToolRegistry(
         conversationDefinitions.forEach { definition ->
             registerModelDefinition(definition)
         }
+        registerRemoteMcpTools(remoteMcpTools)
 
         // Debug dump: full registered tool list to verify which ones the LLM actually receives.
         OmniLog.i(
@@ -190,8 +196,52 @@ class AgentToolRegistry(
         )
     }
 
+    /**
+     * 注册远端 MCP 工具。名字用 `mcp__<serverId>__<tool>` 编码（与 McpToolHandler
+     * 的执行路径一致），schema 直接用服务器返回的 inputSchema。
+     *
+     * 之前这条链路是断的：RemoteMcpDiscoveryRegistry 没有任何调用方、McpToolHandler
+     * 的 toolNames 为空也从不进入 handlerMap、RuntimeToolDescriptor.remoteTool 全项目
+     * 从未被赋值 —— 用户在设置里配好远端 MCP 后，内置 Agent 一个工具都拿不到。
+     */
+    private fun registerRemoteMcpTools(tools: List<RemoteMcpToolDescriptor>) {
+        if (tools.isEmpty()) return
+        // chat-only 会话不暴露工具，与 builtin 的过滤口径保持一致。
+        if (AgentConversationModePolicy.isChatOnlyMode(conversationMode)) return
+        val gson = com.google.gson.Gson()
+        tools.forEach { descriptor ->
+            val name = descriptor.encodedToolName
+            if (name in allToolsByName) return@forEach
+            val parameters = runCatching {
+                kotlinx.serialization.json.Json.parseToJsonElement(gson.toJson(descriptor.inputSchema))
+                    as? JsonObject
+            }.getOrNull() ?: JsonObject(emptyMap())
+            val sanitized = runCatching {
+                canonicalizeJson(parameters) as? JsonObject
+            }.getOrNull() ?: JsonObject(emptyMap())
+            registerModelDefinition(
+                buildJsonObject {
+                    put("type", JsonPrimitive("function"))
+                    put("function", buildJsonObject {
+                        put("name", JsonPrimitive(name))
+                        put("displayName", JsonPrimitive(descriptor.toolName))
+                        put("toolType", JsonPrimitive("mcp"))
+                        put("serverName", JsonPrimitive(descriptor.serverName))
+                        put(
+                            "description",
+                            JsonPrimitive(descriptor.description.ifBlank { descriptor.toolName })
+                        )
+                        put("parameters", sanitized)
+                    })
+                },
+                remoteTool = descriptor
+            )
+        }
+    }
+
     private fun registerModelDefinition(
         definition: JsonObject,
+        remoteTool: RemoteMcpToolDescriptor? = null,
     ) {
         val function = definition["function"] as? JsonObject ?: return
         val name = function["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -213,6 +263,7 @@ class AgentToolRegistry(
             displayName = displayName,
             toolType = toolType,
             serverName = serverName,
+            remoteTool = remoteTool,
             parallelSafe = function["parallelSafe"]?.jsonPrimitive?.booleanOrNull == true,
         )
         ChatCompletionTool(

@@ -927,13 +927,22 @@ object RemoteMcpClient {
         val result = responseMap["result"]
         val resultType = deepStringMap(result)?.get("resultType")?.toString()
         when (resultType) {
-            "complete" -> Unit
+            // 缺字段说明对端没有实现这个「完成标记」（早期 modern 实现/代理会把它剥掉），
+            // 属于正常响应；直接判死会让整台服务器 100% 不可用。
+            "complete", null -> Unit
             "input_required" -> throw IllegalStateException(
                 "MCP server requires a multi-round-trip input that this Agent cannot provide yet"
             )
-            else -> throw IllegalStateException(
-                "Modern MCP response has an unsupported resultType: ${resultType ?: "missing"}"
-            )
+            else -> {
+                // resultType 的取值集合还在演进：未知值只有在「完全没有 result 内容」
+                // 时才当协议错误，否则按 complete 处理（并留日志便于排障）。
+                if (result == null) {
+                    throw IllegalStateException(
+                        "Modern MCP response has an unsupported resultType: $resultType"
+                    )
+                }
+                OmniLog.w(TAG, "modern MCP unknown resultType=$resultType, treating as complete")
+            }
         }
         return result
     }
@@ -992,6 +1001,9 @@ object RemoteMcpClient {
                 val modernCode = modernErrorCode(error.responseBody)
                 modernCode == null || modernCode !in MODERN_REQUEST_ERROR_CODES
             }
+            // 探测阶段如果服务器「答了但不是现代协议的形状」（缺/未知 resultType），
+            // 说明它只是普通 HTTP MCP 端点，应当回退 legacy initialize 而不是直接失败。
+            is IllegalStateException -> error.message.orEmpty().contains("resultType")
             else -> false
         }
     }

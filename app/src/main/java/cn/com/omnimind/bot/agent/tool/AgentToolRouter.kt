@@ -75,6 +75,11 @@ class AgentToolRouter(
         }
         val toolCallback = callback.scopedToToolCall(toolCall.id, toolName)
         val handler = handlerMap[toolName]
+            // 远端 MCP 工具的名字运行时才知道，无法预登记进 handlerMap：只要这次调用
+            // 带着 remoteTool 描述符，就交给「接受任意名字」的处理器（McpToolHandler）。
+            ?: runtimeDescriptor.remoteTool?.let { remote ->
+                allHandlers.firstOrNull { candidate -> candidate.canHandle(remote.encodedToolName) }
+            }
         return if (handler != null) {
             handler.execute(toolCall, args, runtimeDescriptor, env, toolCallback, toolHandle)
         } else {

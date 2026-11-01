@@ -1018,7 +1018,10 @@ private class XiaowanAgentSession(
         val modelId = selectedModelId.trim()
         if (modelId.isEmpty()) return null
         if (!providerProfile.isConfigured()) return null
-        return AgentModelOverride.fromProviderProfile(
+        // 带上模型真实上下文窗口：否则压缩阈值永远按「会话阈值/128k」算（见
+        // AgentModelOverride.fromProviderProfileWithLimits 的注释）。
+        return AgentModelOverride.fromProviderProfileWithLimits(
+            context = context,
             profile = providerProfile,
             modelId = modelId,
         )

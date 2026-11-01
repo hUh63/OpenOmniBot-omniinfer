@@ -55,6 +55,33 @@ data class AgentModelOverride(
                 contextLimit = contextLimit?.takeIf { it > 0 },
             ).normalizedOrNull()
         }
+
+        /**
+         * 同 [fromProviderProfile]，但当调用方没给 contextLimit 时，从 Provider 编辑器缓存
+         * 的模型目录里按 modelId 查一次上下文窗口。
+         *
+         * 在此之前 contextLimit 全链路恒为 null：`resolveModelContextThreshold()` 永远返回
+         * null，上下文预算退化成「会话阈值，否则 128k」——大窗口模型提前压缩、小窗口模型
+         * 压缩过晚直接被 provider 400，都是这一个「从未赋值」导致的。
+         */
+        fun fromProviderProfileWithLimits(
+            context: android.content.Context,
+            profile: ModelProviderProfile,
+            modelId: String,
+            contextLimit: Int? = null,
+        ): AgentModelOverride? {
+            val resolved = contextLimit?.takeIf { it > 0 }
+                ?: runCatching {
+                    ModelProviderConfigStore.cachedModels(context, profile)
+                        .firstOrNull { it.id.equals(modelId.trim(), ignoreCase = true) }
+                        ?.contextLimit
+                }.getOrNull()
+            return fromProviderProfile(
+                profile = profile,
+                modelId = modelId,
+                contextLimit = resolved,
+            )
+        }
     }
 }
 

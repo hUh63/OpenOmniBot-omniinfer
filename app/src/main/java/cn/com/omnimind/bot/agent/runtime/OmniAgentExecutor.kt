@@ -7,6 +7,7 @@ import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.agent.workspace.memory.LongTermMemoryIndex
 import cn.com.omnimind.bot.agent.tool.AgentCapabilityModule
 import cn.com.omnimind.bot.agent.tool.AgentToolHandlerModule
+import cn.com.omnimind.bot.mcp.RemoteMcpDiscoveryRegistry
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.OmniPluginSession
 import com.rk.terminal.runtime.TerminalDistribution
@@ -243,6 +244,14 @@ class OmniAgentExecutor(
                 null
             }
             pluginSession = activePluginSession
+            // 用户在设置里配置的远端 MCP 服务器：工具名/数量运行时才知道，短超时刷新一次
+            // 后塞进工具目录（超时退回进程内缓存，不拖住本轮 prompt）。
+            val remoteMcpTools = if (AgentConversationModePolicy.isChatOnlyMode(conversationMode)) {
+                emptyList()
+            } else {
+                runCatching { RemoteMcpDiscoveryRegistry.toolsForPrompt() }
+                    .getOrDefault(emptyList())
+            }
             val toolRegistry = AgentToolRegistry(
                 context = context,
                 conversationMode = conversationMode,
@@ -251,6 +260,7 @@ class OmniAgentExecutor(
                 capabilityToolDefinitions = sessionCapabilityModules.flatMap {
                     it.toolDefinitions
                 },
+                remoteMcpTools = remoteMcpTools,
             )
             val llmClient = HttpAgentLlmClient(
                 scope = scope,

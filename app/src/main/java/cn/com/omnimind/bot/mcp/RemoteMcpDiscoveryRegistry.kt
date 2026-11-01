@@ -91,6 +91,19 @@ object RemoteMcpDiscoveryRegistry {
         }
     }
 
+    /**
+     * 供 Agent 工具目录使用：短超时刷新一次发现结果，超时/失败就退回进程内缓存。
+     *
+     * 远端 MCP 的工具名由服务器决定，必须在组装工具目录时可用；但 listTools 走网络，
+     * 不能让它把每一轮 prompt 拖住 —— 首次调用超时只意味着这一轮看不到远端工具，
+     * 下一轮缓存就有了。
+     */
+    suspend fun toolsForPrompt(timeoutMs: Long = 2_000L): List<RemoteMcpToolDescriptor> {
+        if (RemoteMcpConfigStore.listEnabledServers().isEmpty()) return emptyList()
+        runCatching { kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { discoverEnabledServers() } }
+        return cachedEnabledServers().flatMap { it.tools }
+    }
+
     fun invalidate(serverId: String? = null) {
         if (serverId == null) {
             cache.clear()
