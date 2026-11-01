@@ -11,6 +11,7 @@ import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/chat_drawer_gesture_guard.dart';
+import 'package:ui/widgets/omnibot_chat_sticker.dart';
 import 'package:ui/widgets/omnibot_resource_widgets.dart';
 
 // ── Module-level reusable singletons ──
@@ -708,6 +709,10 @@ class OmnibotMarkdownBody extends StatelessWidget {
           onResourceOpen: onResourceOpen,
         ),
         imageBuilder: (uri, title, alt) {
+          // sticker_search 的产物在 Markdown 里用 "sticker" 标记，聊天页渲染成紧凑表情。
+          if (title == 'sticker') {
+            return OmnibotChatSticker(uri: uri, alternativeText: alt ?? '');
+          }
           if (uri.scheme == 'omnibot') {
             final metadata = OmnibotResourceService.resolveUri(uri.toString());
             if (metadata != null) {

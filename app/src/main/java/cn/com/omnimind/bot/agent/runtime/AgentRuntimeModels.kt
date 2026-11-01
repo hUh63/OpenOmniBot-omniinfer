@@ -163,7 +163,10 @@ data class ArtifactRef(
                 .replace("[", "\\[")
                 .replace("]", "\\]")
             return if (embedKind == "image") {
-                "![${safeTitle}]($uri)"
+                // sticker_search 的产物在 Markdown 里带上 "sticker" 标题标记：聊天页
+                // 据此渲染成紧凑表情（而不是普通大图），历史回放也不需要新的消息类型。
+                val markdownTitle = if (sourceTool == "sticker_search") " \"sticker\"" else ""
+                "![${safeTitle}]($uri$markdownTitle)"
             } else {
                 "[${safeTitle}]($uri)"
             }
