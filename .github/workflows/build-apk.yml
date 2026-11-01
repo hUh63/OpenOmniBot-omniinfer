@@ -113,100 +113,87 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.9
+          tag_name: v0.6.3-omniinfer-v6.5.10
           # Without this the tag lands on the default branch's HEAD instead of the
           # commit this build actually checked out.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 静默断流不再卡死 / Android 15 前台服务 / 提醒与下载一组 (v0.6.3-omniinfer-v6.5.9)"
+          name: "OmniInfer 版 · 可选 Root 后端 / 特权链路与数据库修复 / webchat 稳定性 (v0.6.3-omniinfer-v6.5.10)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6.5.9)：6 个提交，主线是「不再永久停在思考中」和「targetSdk 36 下的
-            前台服务 / 提醒 / 下载不再静默坏掉」。全部改动只过编译门，未做真机回归。
+            本轮 (v6.5.10)：9 个提交，主线是「合并上游 0.7 的可选 Root 后端」「把特权链路 / 数据库 / webchat
+            一批真实缺陷修掉」，以及一轮新的全域排查（崩溃、泄漏、启动阻塞）。全部改动只过编译门，未做
+            真机回归；涉及 Root / Shizuku 的功能请在已授权设备上验证。
 
-            一、回合永久卡在 thinking（SSE 静默断流）
-            - 通道层：ChatTask（小万普通对话）的收尾只挂在 onClosed / onFailure 上，而上游或
-              中间代理静默断流时两者都不回调 —— Dart 侧永远收不到 onChatMessageEnd，任务不
-              结束、taskId 永久占位。补按「最后一次事件」的空闲看门狗（180s），超时走既有
-              失败收尾。
-            - 上下文压缩：摘要流裸 await() 一个只能由回调完成的 Deferred，断流时永不返回，
-              而它正处在回合主链上 → 整条回合永久 thinking。同样补空闲看门狗，超时按压缩
-              失败处理（AgentLlmClient 早就有这个 watchdog，这两处漏了）。
+            一、可选 Root 后端（对齐上游 0.7）
+            - baselib 新增 privileged 包（能力管理 / 命令执行 / 会话注册 / 设备控制 / 动作策略 / Root 探测），
+              Shizuku 与 Root 共用同一套工具面；设置页新增「Root 访问」入口（开关 + 状态 + 一键检测）。
+            - 工具层：android_privileged_action 支持 root 后端，shell.exec / 设备动作按授权结果放行。
 
-            二、Android 15 / targetSdk 36 兼容
-            - IM 渠道开机自启：Android 15 禁止从 BOOT_COMPLETED 启动 dataSync 型前台服务，
-              原来没兜住 → 开机即崩且渠道永久不恢复。补异常兜底（下次打开 App 再拉起）。
-            - IM 渠道常驻服务：补 onTimeout —— dataSync 型 FGS 有 6h/24h 配额，到点不自己
-              stopSelf 会抛 RemoteServiceException 崩进程。
-            - 提醒闹钟：响铃服务原来返回 START_STICKY，进程被回收后系统以 null intent 重启，
-              代码直接 stopSelf → 铃声和通知一起消失，而记录已落成 ringing、重排又把
-              ringing 排除 —— 这条提醒本次开机周期内永远不会再响。改为 START_NOT_STICKY。
-            - 开机重排补「精确闹钟权限」判断（原来函数名叫 IfPermitted 却没检查，没权限时
-              静默降级成非精确闹钟，仍报成功）。
+            二、特权执行链路 5 处缺陷
+            - 命令黑名单左边界不含 `/`：`/system/bin/reboot` 这类绝对路径可直接绕过；改为否定前瞻。
+            - 持久 shell 把「命令 + 结束标记」一起写进 stdin，读 stdin 的命令会吞掉结束标记，卡到超时被
+              整会话杀掉；改为 `{ command } </dev/null` 分组。
+            - 一次 su IO 失败就把 Root 判为不可用并清掉「曾授权」标记，下次启动不再自动探测，Root 永久
+              停在未授权；改为只有「明确被拒」才清标记。
+            - ACP 会话关闭路径用 check() 断言关闭结果，抛异常会跳过 mcpSession.close() 与 onClosed()，
+              会话资源永久泄漏；改为 runCatching + 日志，保证清理链一定走完。
+            - session_start 被取消 / 远程超时后服务端会话残留（按 binding 找不到、按 requestId 也杀不到）；
+              改为先登记再请求，取消路径在 NonCancellable 里回收。
 
-            三、本地模型下载
-            - MNN 仓库下载：缺 416 分支，.part 长度已达标后每次「继续下载」都 416 且 .part
-              永不清理 → 永久失败；renameTo 返回值被丢弃 → 可能报 success 但盘上只有 .part
-              （列表还看不到）。补 416 清理与 rename 校验。
-            - LiteRT 下载：同样缺 416 恢复，补「删 .part 后报可重试错误」。
-            - QNN / MNN：补下载前剩余空间预检（llama.cpp 分支早就有），避免下到一半 ENOSPC
-              只留几 GB 垃圾。
-            - 端口变更：四个后端的 saveConfig 都在方法通道主线程执行，而改端口会连带 stop()
-              卸载引擎（native free 掉几 GB 模型）。统一挪到 IO。
-            - llama / QNN / LiteRT 的 startDownload / pauseDownload 同样从主线程挪到 IO
-              （MNN 分支早已如此）。
-            - litert-npu 后端在通道分派里缺失：会落到 else 被当成 llama.cpp（列 GGUF、下
-              GGUF，再把 .gguf 交给 NPU 后端加载）。分派与 getCurrentConfig 两处补齐。
+            三、数据库与历史读取
+            - agent_conversation_entries 补 (conversationId, conversationMode, createdAt) 与 entryType 索引，
+              schema 19 → 20（MIGRATION_19_20）：历史读取与 stream_event 普查不再全量排序/全表扫描。
+            - 历史读取与整段加载从 LIMIT/OFFSET 改键集游标，长会话 O(n²) → O(n)。
+            - copyConversationHistory 逐条写入与 refreshConversationMetadata 的读-算-写包进事务
+              （避免半截分叉历史、messageCount 回退）。
+            - 删除会话/占位清理路径连带清 codex_thread_bindings，避免孤儿绑定把已删线程复活。
 
-            四、局域网代理
-            - start(wait=false) 后不核对端口是否真绑上就置 running：端口被占用时对外报一个
-              连不上的地址，且之后每次 start() 都被「已运行且端口相同」早退拦住，只能杀
-              进程恢复。补 600ms 异步自检，失败则释放并允许重试。
+            四、ACP / webchat 稳定性
+            - ACP 会话关闭链路补 finally：mcpSession.close() 失败不再跳过 onClosed/cleanupComplete；
+              stdio MCP 关闭改为先停读再抢锁（原来会卡到 40s 超时，观感是「关不掉」）。
+            - open() 取消时回收已连上的兄弟连接，避免泄漏 MCP 子进程。
+            - webchat：工作区文件 move 原来先删目标再拷贝（同路径会删掉源文件、自嵌套会写满磁盘），
+              改为 canonical 校验 + staging 改名；readFile 带 lineStart 会绕过 1MB 保护并整文件读进内存
+              （几百 MB 日志直接 OOM），改为受字符预算约束并如实标记 truncated。
+            - webchat 实时通道：401 时主动探测并回登录页（原来只标记 offline、每 3 秒无限重连）；
+              ?token= 读完即从地址栏清除。
+            - run 终态看门狗：用户点停止后 ACP 不回终态（进程挂死/连接断）时，该会话会永久锁在
+              「运行中」，之后每次发消息都被拒。补 12s 取消宽限 + 30 分钟零事件双条件本地收敛。
+            - 三张消息 entry 表跨协程读写加锁 + 快照迭代（原会抛 ConcurrentModificationException，
+              打断事件消费协程，run 卡在运行中）。
+            - 流式快照间隔按体量自适应（150ms → 最多 1.2s，目标 ≤1.5MB/s），长会话不再每秒推 6 次整段历史。
 
-            五、文件与保存
-            - 系统保存对话框（SAF）与 MediaStore 直存两条路径都在主线程整文件 copyTo，
-              几十 MB 的录屏/日志必然 ANR。两条都挪到 IO，直存失败回主线程回退到对话框。
-            - 浏览器分享暂存目录 browser_shared_exports 只写不删 → 补「保留 24 个 / 2 天」清理；
-              目录落在 FileProvider 覆盖范围外时不再重试同一个必然失败的调用。
+            五、附件（webchat）
+            - 浏览器上传的图片只有 data URL，原来原样落库：base64 进消息 payload，既顶到 Room 单行 2MB
+              的 CursorWindow 上限，又被每帧全量快照重推。改为先落盘，历史只留路径。
+            - 新增 GET /webchat/api/conversations/attachment 按需取图（Cookie 鉴权、Cache-Control 24h），
+              消息里的附件 dataUrl 换成该 URL。
+            - 会话列表实时刷新改为 400ms 去抖 + 串行 + 在飞合并，归档列表只在归档状态变化时刷新
+              （原来每条事件并行拉两次全量列表）。
 
-            六、浏览器
-            - 补 onRenderProcessGone：渲染进程崩溃时默认返回 false 会让系统连宿主进程一起
-              杀；即便不崩，该 WebView 的 evaluateJavascript 回调也永不回调（只能等满 15s），
-              tab 还占位不重建。现在接管异常、收掉该 tab。
-            - 截图 JPEG 压缩 / 写盘 / base64 从主线程挪到 Default（只有 draw 必须在主线程）。
-            - 面板快照原来一次调 6 次 downloadManager.snapshot()（每次读 MMKV + 全量 JSON
-              反序列化），而页面进度 400ms 就重建一次快照，全落在主线程。改为只读一次。
-            - 文件选择器投递 Activity 被系统重建时按取消收场，避免页面 <input type=file>
-              永久卡在「等待选择」。
+            六、本轮新排查（崩溃 / 泄漏 / 启动）
+            - stdio MCP 的 stdout/stderr 读取协程没有 catch：子进程退出时抛 IOException 会逃逸到没有
+              CoroutineExceptionHandler 的共享 scope → 进程被杀。一个可选的第三方 MCP 挂掉不该带走整个 App。
+            - 远端重连恢复逐条隔离：任一陈旧 sessionId 失败不再中断整张表的恢复（原来会退避重试 6 次
+              仍命中同一条，所有会话都恢复不了，表现为「bridge 一连就断」）。
+            - 无 listener 期间的事件缓冲加 512 条上限（原来一轮长回答几万条 delta 会一路涨到 OOM）；
+              connect() 等待远端恢复加 20s 上限（原来在 sessionMutex 内可能卡 60s+，切 Provider 全部串行）。
+            - App.onCreate 删掉 runBlocking 等 workspace seed：大迁移必然超过 2s，既把启动钉成 2s 白屏，
+              超时后插件恢复还会和仍在跑的 seeder 并发写 skills 目录。插件恢复改到 seeder 线程末尾串行。
+            - 语音播放 release() 补 scope.cancel() + OkHttp 回收（FlutterEngine 每次重建都泄漏一套）；
+              已缓存 PCM 的停止不再被判定为播放失败。
+            - 闹钟响铃加 5 分钟自动静音（原来 looping + 振动 repeat=0，只能手动关）。
+            - 通知读取设置（枚举全部已安装应用）从平台主线程移到后台线程。
+            - 手动录制浮层：show() 后一帧内取消会跳过 removeView 并清空句柄，留下一层吞掉全屏触摸的
+              幽灵浮层（只能杀进程）；改为无条件 removeViewImmediate。
+            - 自动保存进行中到达的编辑不再被丢弃（Remote PC Bridge 设置）；本地模型页轮询在页面被覆盖时
+              停止；聊天页事件流被原生关闭后自动重订；权限页加载态收进 finally。
 
-            七、日程 / 定时 / 记忆
-            - 全天日程「只改标题」也会把结束日往后推一天（更新时 DTEND 已是排他端点，又被
-              +1 天）。为已排他的端点单独分支。
-            - 定时任务「停用」原来走 cancelTask，原生会连 Flutter 侧记录一起删 —— 停用变成
-              彻底删除、重启后消失且无法再启用。统一改走 scheduleTask（upsert 保留记录）。
-            - MEMORY.md 设置页整篇覆盖写会吃掉期间 agent / 夜间整理追加的条目：保存前比对
-              最新内容，变了且用户编辑过则弹窗选「重新加载」或「覆盖保存」。
-
-            八、UI 与性能
-            - 附件卡片两处 await 后 setState 缺 mounted 守卫（卡片被复用即崩）。
-            - 触底自动加载历史的 catch 里 rethrow，而这个 Future 被 unawaited 丢弃 → 变成
-              无人接收的异步错误。改为静默收场。
-            - 消息 linkPreviews 每次访问都整份反序列化（流式每个 chunk 都触发）→ 惰性缓存。
-            - 多图附件渲染的 indexOf 线性查找（O(n²)）→ 同一性查表。
-            - 计时条每秒 setState 重建整行 → ValueNotifier + ValueListenableBuilder 只重建文本。
-            - 批量静态文案改走 LegacyTextLocalizer（68 处），跟随语言设置。
-            - 平台调用补超时：overlay 7 个方法 10s 上限 + 通用 catch；网络公共参数 version
-              取真实 versionName（原来硬编码 1.0.0），同名 query 参数由 add 改 set。
-
-            九、CI
-            - 删除早已被清空的 sync-models-dev workflow（每次 push 都跑出一个无效 workflow
-              的 failure，把 Actions 列表长期染红）。
-
-            上游同步：a5334740 的 onboarding 改动已按新版重写落地（新增可选的「选择模型服务商」
-            步骤、provider 页常驻渲染保持登录态、footer 增加导航中心），26ac7f4d 的会话滑动
-            归档早已随 conversation_slidable 落地；抽屉顶部搜索头保留我们自己的实现（上游那版
-            依赖我们尚未引入的组件，功能等价）。provider 页保留本仓版本（含本地模型 / 自定义
-            API 入口）。
+            七、安全与上游吸收杂项
+            - MCP token 加密失败时不再降级写明文（该 token 能调 /mcp 全部设备工具）。
+            - 吸收上游：Gson 模型防 R8 剥离、冷启动启动路径精简、models.dev 目录缓存落盘 + 后台解析、
+              运行日志改为有界环形缓冲（流式读取 + 字节预算，避免日志文件无限增长）。
 
             安装后如遇异常，请反馈具体操作路径。
           files: apk-out/*.apk

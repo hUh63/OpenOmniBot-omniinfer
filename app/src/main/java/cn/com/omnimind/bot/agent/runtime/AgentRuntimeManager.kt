@@ -3618,7 +3618,8 @@ internal fun enqueuePendingAgentEvent(
     // 都堆在这里；一轮长回答就是几万条 delta，无上限会一路涨到 OOM。
     // 丢最旧的：终态事件永远在队尾，所以任务结束/失败不会被丢，UI 不会永久 processing。
     while (pendingEvents.size >= MAX_PENDING_AGENT_EVENTS) {
-        pendingEvents.removeFirstOrNull() ?: break
+        // java.util.ArrayDeque：取值用 pollFirst（Kotlin 的 removeFirstOrNull 不适用）。
+        if (pendingEvents.pollFirst() == null) break
     }
     pendingEvents.addLast(event)
 }
