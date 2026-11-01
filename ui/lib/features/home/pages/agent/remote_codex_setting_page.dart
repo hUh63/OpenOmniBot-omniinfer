@@ -31,6 +31,8 @@ class _RemoteCodexSettingPageState extends State<RemoteCodexSettingPage> {
   Timer? _saveDebounce;
   bool _loading = true;
   bool _saving = false;
+  /// 保存进行中到达的编辑：等本次落盘结束后必须再跑一轮，否则最后一次输入永久丢失。
+  bool _pendingSave = false;
   bool _testing = false;
   bool _syncing = false;
   bool _enabled = false;
@@ -154,7 +156,14 @@ class _RemoteCodexSettingPageState extends State<RemoteCodexSettingPage> {
   }
 
   Future<bool> _save() async {
-    if (_saving || !_complete) return false;
+    if (!_complete) return false;
+    if (_saving) {
+      // 防抖 timer 在「上一次保存还在飞」时到期，原来直接在 guard 处 return：
+      // 既不等待也不重排，`_handleEdited` 又只按签名差异建 timer → 最后一次编辑
+      // 永远不落盘（UI 停在「即将自动保存…」，没有任何错误提示）。
+      _pendingSave = true;
+      return false;
+    }
     final signature = _signature;
     if (signature == _lastSavedSignature) return true;
     setState(() {
@@ -196,7 +205,15 @@ class _RemoteCodexSettingPageState extends State<RemoteCodexSettingPage> {
       });
       return false;
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) {
+        setState(() => _saving = false);
+        // 保存过程中又有编辑（或本次落盘的是旧签名内容）→ 补一轮，保证最终一致。
+        if (_pendingSave || (_complete && _signature != _lastSavedSignature)) {
+          _pendingSave = false;
+          _saveDebounce?.cancel();
+          _saveDebounce = Timer(_autoSaveDelay, () => unawaited(_save()));
+        }
+      }
     }
   }
 

@@ -239,6 +239,9 @@ class _LocalModelsPageState extends State<LocalModelsPage>
     var tick = 0;
     _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
+      // 页面被其它路由盖住（本页仍在栈内、不会 dispose）时，别继续每 3 秒走一次
+      // MethodChannel 读配置。ModalRoute 为 null（无 Navigator）时按可见处理。
+      if (ModalRoute.of(context)?.isCurrent == false) return;
       tick++;
       switch (_LocalModelsTab.values[_tabController.index]) {
         case _LocalModelsTab.service:

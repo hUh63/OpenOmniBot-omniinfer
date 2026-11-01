@@ -59,19 +59,40 @@ class SpecialPermissionChannel {
             val result = OnceResult(rawResult, "[SpecialPermissionChannel]")
                 when (call.method) {
                     "getNotificationAccessSettings", "openNotificationAccessSettings", "setNotificationAppAllowed", "setAllNotificationAppsAllowed" -> {
-                        try {
-                            when (call.method) {
-                                "setAllNotificationAppsAllowed" -> NotificationAccess.setAllAllowed(appContext,
-                                    requireNotNull(call.argument<Boolean>("allowed")))
-                                "openNotificationAccessSettings" -> NotificationAccess.openSettings(appContext)
-                                "setNotificationAppAllowed" -> NotificationAccess.setAllowed(appContext,
-                                    requireNotNull(call.argument<String>("applicationId")),
-                                    requireNotNull(call.argument<Boolean>("allowed")))
+                        // getInstalledApplications(0) + 逐条 getApplicationLabel 是数百次
+                        // Binder 调用与资源加载（工程声明了 QUERY_ALL_PACKAGES），在
+                        // MethodChannel 的平台主线程上跑会明显掉帧、极端情况直接 ANR；
+                        // setAllowed 里的 commit() 也是同步写盘。统一挪到后台线程，
+                        // 结果再 post 回主线程（OnceResult 保证只回一次）。
+                        Thread {
+                            val outcome = runCatching {
+                                when (call.method) {
+                                    "setAllNotificationAppsAllowed" -> NotificationAccess.setAllAllowed(
+                                        appContext,
+                                        requireNotNull(call.argument<Boolean>("allowed"))
+                                    )
+                                    "openNotificationAccessSettings" -> NotificationAccess.openSettings(appContext)
+                                    "setNotificationAppAllowed" -> NotificationAccess.setAllowed(
+                                        appContext,
+                                        requireNotNull(call.argument<String>("applicationId")),
+                                        requireNotNull(call.argument<Boolean>("allowed"))
+                                    )
+                                    else -> Unit
+                                }
+                                NotificationAccess.settings(appContext)
                             }
-                            result.success(NotificationAccess.settings(appContext))
-                        } catch (e: Exception) {
-                            result.error("NOTIFICATION_ACCESS_ERROR", e.message, null)
-                        }
+                            Handler(Looper.getMainLooper()).post {
+                                outcome.fold(
+                                    onSuccess = { payload -> result.success(payload) },
+                                    onFailure = { error ->
+                                        result.error("NOTIFICATION_ACCESS_ERROR", error.message, null)
+                                    }
+                                )
+                            }
+                        }.apply {
+                            name = "notification-access"
+                            isDaemon = true
+                        }.start()
                     }
                     "isIgnoringBatteryOptimizations" -> specialPermissionManager!!.isIgnoringBatteryOptimizations(
                         result

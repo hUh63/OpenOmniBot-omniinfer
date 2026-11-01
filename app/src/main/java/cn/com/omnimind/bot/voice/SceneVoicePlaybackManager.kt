@@ -36,6 +36,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -273,6 +274,11 @@ class SceneVoicePlaybackManager(
             cache.clear()
             replayableKeysByMessageId.clear()
         }
+        // FlutterEngine 重建会 new 一个新的 manager：旧 scope 没有父作用域，不 cancel
+        // 就永久存活，连带 OkHttp 的 Dispatcher 线程池 / ConnectionPool 一起累积。
+        scope.cancel()
+        runCatching { platformHttpClient.dispatcher.executorService.shutdown() }
+        runCatching { platformHttpClient.connectionPool.evictAll() }
     }
 
     private fun buildQueueItem(
@@ -815,10 +821,22 @@ class SceneVoicePlaybackManager(
         ).coerceAtLeast(4096)
         val track = createAudioTrack(minBufferSize)
         currentAudioTrack = track
+        if (currentStopRequested) return
         emitState(messageId, "playing", canReplay = true)
-        track.play()
-        track.write(bytes, 0, bytes.size)
+        // 主线程的 stop() 会把这个 AudioTrack 直接 release 掉，此时 play()/write()
+        // 会抛 IllegalStateException 一路冒到 processLoop 的 catch → 用户主动「停止」
+        // 被当成播放失败（红色错误态，且覆盖掉 stop 发出的 idle）。playWavFile 早就
+        // 这么处理了，这里补齐。
+        val written = runCatching {
+            track.play()
+            track.write(bytes, 0, bytes.size)
+        }
+        if (written.isFailure) {
+            if (currentStopRequested) return
+            throw written.exceptionOrNull() ?: IllegalStateException("voice playback failed")
+        }
         waitForPcmPlayback(bytes.size)
+        if (currentStopRequested) return
         emitState(messageId, "completed", canReplay = true)
     }
 

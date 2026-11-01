@@ -111,6 +111,13 @@ class _AuthorizePageState extends State<AuthorizePage>
         _isLoading = false;
       });
       await _startAutomaticRequiredAuthorization();
+    } finally {
+      // catch 分支里还会再 await 一次 checkPermissions：它若抛异常，_isLoading 会
+      // 永远停在 true，didChangeAppLifecycleState（!_isLoading）与 _checkPermissions
+      // 的守卫会把之后所有重检挡掉 —— 页面永久 loading，只能杀进程。
+      if (mounted && _isLoading) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 

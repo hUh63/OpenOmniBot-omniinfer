@@ -1416,6 +1416,10 @@ internal class LocalAcpRuntime(
         if (sessions.remove(sessionId, session)) {
             sessionCwds.remove(sessionId)
             sessionPermissionBehaviors.remove(sessionId)
+            // 事件序号表原来只在整条 transport disconnect 时才 clear：同一个
+            // Harness 连接下反复新建/关闭会话会一直累积死条目，而且 session id
+            // 被复用时旧序号还会参与 seq 连续性判断。
+            sessionEventSequences.remove(sessionId)
         }
     }
 
@@ -1462,6 +1466,7 @@ internal class LocalAcpRuntime(
         sessions.remove(sessionId)
         sessionCwds.remove(sessionId)
         sessionPermissionBehaviors.remove(sessionId)
+        sessionEventSequences.remove(sessionId)
         pendingHandoffConversationIds.remove(sessionId)
         profileStore.unbindSession(sessionId)
         val conversationId = bindingRepository.detachThread(sessionId) ?: boundConversationId

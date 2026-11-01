@@ -94,6 +94,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       _modeState(_activeMode).isAiResponding = false;
       _isDeepThinking = false;
     });
+    _resubscribeAgentEvents();
   }
 
   void _handleAgentEventStreamDone() {
@@ -102,6 +103,23 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     setState(() {
       _modeState(_activeMode).isAiResponding = false;
       _isDeepThinking = false;
+    });
+    _resubscribeAgentEvents();
+  }
+
+  /// 原生把事件流关掉之后不会自己回来：只复位「正在回复」而不重订，本页后续所有
+  /// 回复都收不到（用户必须退出重进聊天页）。这里退避重订，避免原生抖动时打转。
+  void _resubscribeAgentEvents() {
+    if (!mounted) return;
+    _agentEventRetryTimer?.cancel();
+    _agentEventRetryTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      _agentEventSubscription?.cancel();
+      _agentEventSubscription = AgentRuntimeService.events.listen(
+        _handleAgentRuntimeEvent,
+        onError: _handleAgentEventStreamFailure,
+        onDone: _handleAgentEventStreamDone,
+      );
     });
   }
 
@@ -819,6 +837,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _openClawUserIdController.dispose();
     this._stopRemoteCodexSessionSync();
     _agentEventSubscription?.cancel();
+    _agentEventRetryTimer?.cancel();
     _omniLinkEventSubscription?.cancel();
     super.dispose();
   }

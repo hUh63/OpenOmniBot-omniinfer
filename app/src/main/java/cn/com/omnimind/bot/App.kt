@@ -131,9 +131,10 @@ class App : BaseApplication() {
         cn.com.omnimind.baselib.llm.ModelSceneRegistry.init(this)
         // 升级后首次启动时 ensureRuntimeDirectories() 会迁移旧工作区（copyRecursively 整棵
         // 目录树）并复制内置资源，原本同步跑在 onCreate 主线程 —— 文件多时白屏甚至 ANR。
-        // 移到后台线程；下面恢复插件前必须等 seed 完成（两条路径会写同一个 skills 目录），
-        // 所以最多等 2 秒，真正的大迁移留在后台继续。
-        val workspaceSeed = CompletableDeferred<Unit>()
+        // 移到后台线程；恢复插件必须排在 seed 之后（两条路径会写同一个 skills 目录），
+        // 但主线程不能 runBlocking 等：大迁移必然超过 2s —— 既把启动钉死成 2s 白屏，
+        // 超时后 initializeOfficialPlugins 还会和仍在跑的 seeder 并发写 skills 目录，
+        // 正是这里想避免的竞态。改成 seeder 线程末尾串起来，主线程零阻塞。
         val workspaceSeedThread = Thread {
             runCatching {
                 val workspaceManager = AgentWorkspaceManager(this)
@@ -142,18 +143,19 @@ class App : BaseApplication() {
             }.onFailure { error ->
                 OmniLog.w("AppStartup", "Workspace seed failed: ${error.message}")
             }
-            workspaceSeed.complete(Unit)
+            // Seed built-in skills before restoring enabled runtime-bundle plugins.
+            // Both paths materialize files under the same skills directory; starting
+            // plugin recovery first can race the seeder and leave the plugin disabled.
+            if (AgentRuntimeFeatureFlags.ENABLE_PLUGIN_RUNTIME) {
+                runCatching { initializeOfficialPlugins() }
+                    .onFailure { error ->
+                        OmniLog.w("AppStartup", "Official plugin restore failed: ${error.message}")
+                    }
+            }
         }
         workspaceSeedThread.name = "workspace-seed"
         workspaceSeedThread.isDaemon = true
         workspaceSeedThread.start()
-        runBlocking { withTimeoutOrNull(2_000L) { workspaceSeed.await() } }
-        // Seed built-in skills before restoring enabled runtime-bundle plugins.
-        // Both paths materialize files under the same skills directory; starting
-        // plugin recovery first can race the seeder and leave the plugin disabled.
-        if (AgentRuntimeFeatureFlags.ENABLE_PLUGIN_RUNTIME) {
-            initializeOfficialPlugins()
-        }
         runCatching {
             WorkspaceMemoryRollupScheduler(this).ensureScheduledIfEnabled()
         }

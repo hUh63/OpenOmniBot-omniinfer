@@ -29,9 +29,12 @@ final eventBusProvider = Provider<EventBus>((ref) {
 /// 兼容入口：订阅并消费事件，避免上层初始化链路变更。
 final eventListenerProvider = Provider<void>((ref) {
   final eventBus = ref.read(eventBusProvider);
-  eventBus.events.listen((event) {
+  // EventBus 是进程级单例、broadcast controller 从不关闭：订阅必须随 Provider
+  // 一起释放，否则每次 rebuild/invalidate 都会多挂一个永不解绑的监听。
+  final subscription = eventBus.events.listen((event) {
     // OSS 版本暂不处理扩展事件，保留占位监听避免未消费广播。
     // ignore: avoid_print
     print("eventBus listen: $event");
   });
+  ref.onDispose(subscription.cancel);
 });

@@ -372,17 +372,31 @@ private class XiaowanStdioMcpConnection(
                 reader?.useLines { output ->
                     output.forEach { line -> lines.send(line) }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                // 子进程退出、close() 先 cancel 再 destroy、管道被关都会在这里抛
+                // IOException("Stream closed")。这个 scope 没有 CoroutineExceptionHandler，
+                // 异常逃逸会走线程默认处理器 → 进程被杀：一个可选的第三方 MCP 挂掉
+                // 不该把整个 App 带走。
+                Log.w(TAG, "stdio server=$serverName stdout closed: ${error.message}")
             } finally {
                 lines.close()
             }
         }
         stderrJob = scope.launch(Dispatchers.IO) {
-            started.errorStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
-                lines.forEach { line ->
-                    if (line.isNotBlank()) {
-                        Log.d(TAG, "stdio server=$serverName: ${line.take(500)}")
+            try {
+                started.errorStream.bufferedReader(StandardCharsets.UTF_8).useLines { errorLines ->
+                    errorLines.forEach { line ->
+                        if (line.isNotBlank()) {
+                            Log.d(TAG, "stdio server=$serverName: ${line.take(500)}")
+                        }
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                Log.w(TAG, "stdio server=$serverName stderr closed: ${error.message}")
             }
         }
 

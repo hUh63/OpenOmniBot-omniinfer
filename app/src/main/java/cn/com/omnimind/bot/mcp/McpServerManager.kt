@@ -770,8 +770,11 @@ private object TokenVault {
             mmkv.encode(key, encoded)
         } catch (e: Exception) {
             OmniLog.e("TokenVault", "encryptAndStore failed: ${e.message}")
-            // 降级：加密失败时仍存储明文（保底可用）
-            mmkv.encode(key, plainText)
+            // 绝不降级写明文：这枚 token 能调用 /mcp 的全部设备工具，明文常驻
+            // MMKV 等于绕过 AES-GCM（root / 备份 / 调试都能直接读走）。
+            // 加密不可用时什么都不存：本次会话仍用内存里的 token，
+            // 重启后 ensureToken() 会重新生成一枚（客户端需重新填写）。
+            runCatching { mmkv.remove(key) }
         }
     }
 
@@ -793,8 +796,13 @@ private object TokenVault {
             return String(decrypted, Charsets.UTF_8)
         } catch (e: Exception) {
             OmniLog.e("TokenVault", "decryptFrom failed: ${e.message}")
-            // 降级：如果存储的就是明文（首次加密失败的场景），直接返回
-            if (stored.length in 32..128 && stored.all { it.isLetterOrDigit() || it in "_-=" }) {
+            // 旧版加密失败时会写明文。这里不再让明文长期留在存储里：
+            // 认出来就立刻尝试重新加密写回（失败时 encryptAndStore 会删掉该键），
+            // 本次仍把明文当作可用 token 返回，避免用户被锁在门外。
+            val looksLikePlainToken = stored.length in 32..128 &&
+                stored.all { it.isLetterOrDigit() || it in "_-=" }
+            if (looksLikePlainToken) {
+                runCatching { encryptAndStore(mmkv, key, stored) }
                 return stored
             }
             return null

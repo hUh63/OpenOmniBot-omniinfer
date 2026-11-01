@@ -581,7 +581,11 @@ class AgentRuntimeManager private constructor(
             invalidateLocalProbeCache()
             val runtime = resolveRuntime()
             if (runtime.kind == AgentRuntimeKind.REMOTE && session?.isRecovering == true) {
-                session?.awaitRecovery()
+                // 恢复过程 = 最多 6 次退避（合计 30.5s）+ 每次 openConnection 15s +
+                // 逐条 session/resume 30s，而这段等待发生在 sessionMutex 内：不给上限
+                // 会把 connect/disconnect/切 Provider 全部串行卡住，前端表现为「无响应」。
+                // 超时就继续往下走（后续会按需重建连接），不再把锁一直占住。
+                withTimeoutOrNull(RECOVERY_WAIT_TIMEOUT_MS) { session?.awaitRecovery() }
                 if (session?.isRunning == true) return status()
             }
             val localDistributionId = if (runtime.kind == AgentRuntimeKind.LOCAL) {
@@ -644,10 +648,25 @@ class AgentRuntimeManager private constructor(
                 restoreSessions = { restored ->
                     for ((sessionId, params) in remoteSessionResumeParams.toMap()) {
                         if (remoteSessionResumeParams[sessionId] != params) continue
-                        val response = restored.sendRequest("session/resume",
-                            params + ("replayFrom" to mapOf("type" to "start")),
-                            timeoutMs = 30_000L)
-                        check(response["error"] == null) { "ACP session recovery failed for $sessionId" }
+                        // 逐条隔离：某条 sessionId 在 bridge 侧已不存在 / cwd 变了 /
+                        // 超时，都只该丢掉这一条。原来用 check() 抛异常，会被外层
+                        // 当作「本次重连失败」，按 0.5/1/2/4/8/15s 退避重试 6 次仍命中
+                        // 同一条坏记录 —— 所有会话都恢复不了，表现像「bridge 一连就断」。
+                        val result = runCatching {
+                            restored.sendRequest(
+                                "session/resume",
+                                params + ("replayFrom" to mapOf("type" to "start")),
+                                timeoutMs = 30_000L
+                            )
+                        }
+                        val error = result.getOrNull()?.get("error") ?: result.exceptionOrNull()
+                        if (error != null) {
+                            remoteSessionResumeParams.remove(sessionId)
+                            Log.w(
+                                LOG_TAG,
+                                "ACP session recovery failed for $sessionId: ${error.toString().take(200)}"
+                            )
+                        }
                     }
                 },
             )
@@ -2682,7 +2701,11 @@ class AgentRuntimeManager private constructor(
     }
 
     private suspend fun ensureConnectedSession(): RemoteCodexAppServerSession {
-        session?.takeIf { it.isRecovering }?.awaitRecovery()
+        // 恢复可能持续一分钟以上（退避 + initialize + 逐条 resume），prompt 请求
+        // 不能无限期挂在这里；超时就交给 connect() 按需重建。
+        withTimeoutOrNull(RECOVERY_WAIT_TIMEOUT_MS) {
+            session?.takeIf { it.isRecovering }?.awaitRecovery()
+        }
         val runtime = resolveRuntime()
         val localDistributionId = if (runtime.kind == AgentRuntimeKind.LOCAL) {
             TerminalDistribution.selected().id
@@ -3591,6 +3614,12 @@ internal fun enqueuePendingAgentEvent(
     pendingEvents: ArrayDeque<Map<String, Any?>>,
     event: Map<String, Any?>,
 ) {
+    // listener 解绑期间（FlutterView 已销毁、App 在后台继续跑 Agent）所有 ACP 事件
+    // 都堆在这里；一轮长回答就是几万条 delta，无上限会一路涨到 OOM。
+    // 丢最旧的：终态事件永远在队尾，所以任务结束/失败不会被丢，UI 不会永久 processing。
+    while (pendingEvents.size >= MAX_PENDING_AGENT_EVENTS) {
+        pendingEvents.removeFirstOrNull() ?: break
+    }
     pendingEvents.addLast(event)
 }
 
@@ -3652,6 +3681,10 @@ private const val REMOTE_TURN_SCOPE = "remote:codex"
 /** 非当前选中的 Agent 运行时，空闲多久之后回收其进程。 */
 private const val IDLE_AGENT_RUNTIME_MS = 15 * 60 * 1_000L
 private const val LOG_TAG = "AgentRuntimeManager"
+/** 锁内等待远端恢复的上限，超时后不再占着 sessionMutex。 */
+private const val RECOVERY_WAIT_TIMEOUT_MS = 20_000L
+/** 无 listener 期间缓冲的 ACP 事件上限（一轮长回答就是几万条 delta）。 */
+private const val MAX_PENDING_AGENT_EVENTS = 512
 internal const val AGENT_PROVIDER_MODEL_LOOKUP_TIMEOUT_MS = 3_000L
 
 /**

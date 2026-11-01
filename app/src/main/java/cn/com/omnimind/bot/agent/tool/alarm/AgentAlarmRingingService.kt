@@ -32,6 +32,13 @@ class AgentAlarmRingingService : Service() {
         private const val EXTRA_ALARM_TITLE = "extra_alarm_title"
         private const val EXTRA_ALARM_MESSAGE = "extra_alarm_message"
 
+        /**
+         * 自动静音上限。铃声 isLooping + 振动 repeat=0，而 service 只在用户点通知 /
+         * 关闭提醒 / 进程被杀时才销毁：用户不在旁边时就是无限响铃 + 满占空比振动。
+         * 系统时钟 App 都有类似上限，这里到点只静音、通知保留。
+         */
+        private const val AUTO_SILENCE_MS = 5 * 60 * 1000L
+
         fun start(
             context: Context,
             alarmId: String,
@@ -58,6 +65,12 @@ class AgentAlarmRingingService : Service() {
 
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
+    private val autoSilenceHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val autoSilenceRunnable = Runnable {
+        // 只静音，不撤通知：用户回来仍能看到这条提醒并手动处理。
+        stopAlarmAudio()
+        stopVibrationLoop()
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -83,6 +96,8 @@ class AgentAlarmRingingService : Service() {
         )
         startAlarmAudio()
         startVibrationLoop()
+        autoSilenceHandler.removeCallbacks(autoSilenceRunnable)
+        autoSilenceHandler.postDelayed(autoSilenceRunnable, AUTO_SILENCE_MS)
 
         // 不能用 START_STICKY：sticky 重启时系统以 intent == null 调用，上面的分支会直接
         // stopSelf()，铃声与通知一起消失；而记录在起服务前已被写成 state=ringing，
@@ -91,6 +106,7 @@ class AgentAlarmRingingService : Service() {
     }
 
     override fun onDestroy() {
+        autoSilenceHandler.removeCallbacks(autoSilenceRunnable)
         stopAlarmAudio()
         stopVibrationLoop()
         super.onDestroy()

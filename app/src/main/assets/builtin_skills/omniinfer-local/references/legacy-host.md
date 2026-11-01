@@ -72,7 +72,7 @@ GUI 工具的 success 或自然语言“安装成功”不是独立安装证据�
 
 当前部分 App 版本会把 workspace APK 识别成 `application/octet-stream`，系统“打开文件”列表因此没有软件包安装器。不要把这一入口当成已验证的安装路径，也不要选择无关 App；使用上面的 APK MIME 下载入口。浏览器安装路径仍须在当前设备实际验证，不能用 HTTP fixtures 代替。
 
-如果设备已经具备可用的 Shizuku 高级动作权限，也可以通过 tools_search 找到真实的 android_privileged_action，使用其 shell.exec：
+如果设备已经具备可用的 Shizuku / Root 高级动作权限，也可以直接调用内置的 android_privileged_action（无需再检索工具），使用其 shell.exec：
 
 1. 确认 Android curl 可用，用 `--noproxy 127.0.0.1` 和有限超时将该 loopback URL 下载到 `/data/local/tmp/omniinfer-phone-<本次唯一标记>.apk`。
 2. 核对文件 SHA-256 与构建接口一致，再执行 `pm install -r` 该 APK，检查实际 Success。

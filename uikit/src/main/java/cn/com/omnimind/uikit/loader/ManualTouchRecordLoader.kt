@@ -167,9 +167,18 @@ object ManualTouchRecordLoader {
         displayHeight = 0
         syntheticReplayInFlight = false
         syntheticReplaySuppressUntilMs = 0L
-        if (view != null && manager != null && view.isAttachedToWindow) {
-            runCatching { manager.removeView(view) }
-                .onFailure { OmniLog.w(TAG, "hide failed: ${it.message}") }
+        // 不能用 view.isAttachedToWindow 作为「是否已经 addView」的判断：
+        // addView 只是把 View 交给 WindowManager，要等下一次 traversal 才 attach。
+        // 在 show() 之后立刻 hide()（用户秒点取消 / 同一 IPC 里 prepareForManualAction）
+        // 会跳过 removeView，而句柄已在上面置空 → 一层透明全屏、吞掉所有触摸的
+        // 「幽灵浮层」永久留在屏幕上，只能杀进程。
+        if (view != null && manager != null) {
+            runCatching { manager.removeViewImmediate(view) }
+                .onFailure { error ->
+                    if (error !is IllegalStateException) {
+                        OmniLog.w(TAG, "hide failed: ${error.message}")
+                    }
+                }
         }
     }
 

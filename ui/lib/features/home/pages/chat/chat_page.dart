@@ -271,6 +271,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   StreamSubscription<Map<String, dynamic>>?
   _browserSessionSnapshotChangedSubscription;
   StreamSubscription<Map<String, dynamic>>? _agentEventSubscription;
+  /// 原生关闭事件流后的重订定时器（见 _resubscribeAgentEvents）。
+  Timer? _agentEventRetryTimer;
   StreamSubscription<Map<String, dynamic>>? _omniLinkEventSubscription;
   final Set<String> _pendingManualAgentRetryTaskIds = <String>{};
   bool _pendingAgentInputResponseInFlight = false;
