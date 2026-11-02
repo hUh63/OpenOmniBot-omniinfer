@@ -93,6 +93,9 @@ internal object AcpAgentCatalog {
             terminalPackageId = string("terminalPackageId"),
             managedInstallScriptPath = string("managedInstallScriptPath"),
             managedInstallCommand = installCommand,
+            managedUninstallStrategy = string("managedUninstallStrategy")?.let {
+                ManagedAgentUninstallStrategy.fromId(it)
+            },
             preparationRevision = string("preparationRevision"),
             embedded = get("embedded")?.asBoolean ?: false,
             declaredCapabilities = getAsJsonObject("declaredCapabilities")?.let {

@@ -149,6 +149,30 @@ const _agentUserErrors = <String, ({String zh, String en})>{
     zh: '已有助手正在安装，请等待完成后再试。',
     en: 'Another assistant is being installed. Try again when it finishes.',
   ),
+  'packageBusy': (
+    zh: '助手正在安装或卸载，请等待完成后再试。',
+    en: 'An assistant is being installed or uninstalled. Try again when it finishes.',
+  ),
+  'uninstallFailed': (
+    zh: '卸载未完成，请重试。',
+    en: 'Uninstall did not finish. Try again.',
+  ),
+  'uninstallExternalInstallation': (
+    zh: '检测到其他安装或无法安全移除的文件，请在终端中检查该助手的安装位置。',
+    en: 'Another installation or files that could not be safely removed remain. Check the assistant\'s installation in the terminal.',
+  ),
+  'uninstallInvalidRequest': (
+    zh: '卸载请求无效，请刷新助手列表后重试。',
+    en: 'The uninstall request is invalid. Refresh the assistant list and try again.',
+  ),
+  'uninstallDistributionChanged': (
+    zh: '终端环境已切换，请刷新助手列表后重试。',
+    en: 'The terminal environment changed. Refresh the assistant list and try again.',
+  ),
+  'uninstallTerminalUnavailable': (
+    zh: '终端环境不可用，请恢复终端环境后重试卸载。',
+    en: 'The terminal environment is unavailable. Restore it before trying to uninstall again.',
+  ),
   'incompatible': (
     zh: '当前模型连接不适用于这个助手，请更换模型连接或助手。',
     en: 'This model connection is incompatible with the assistant. Choose another connection or assistant.',
@@ -248,6 +272,21 @@ String formatAgentRuntimeErrorForUser(
     return english
         ? 'Installation failed.${detail.isEmpty ? '' : ' Details: $detail'}'
         : '安装失败${detail.isEmpty ? '' : '：$detail'}';
+  }
+  // 包维护（安装/卸载）的错误属于宿主，不是模型请求：先按结构化 failureKind 判定，
+  // 再去看 timeout / command not found 这类宽泛诊断。
+  final packageError = switch (failureKind) {
+    'agent_uninstall_failed' => 'uninstallFailed',
+    'agent_uninstall_external_installation' => 'uninstallExternalInstallation',
+    'agent_uninstall_invalid_request' => 'uninstallInvalidRequest',
+    'agent_uninstall_distribution_changed' => 'uninstallDistributionChanged',
+    'agent_uninstall_terminal_unavailable' => 'uninstallTerminalUnavailable',
+    'agent_package_operation_in_progress' => 'packageBusy',
+    _ => null,
+  };
+  if (packageError != null) return text(packageError);
+  if (raw.contains('agent package operation is already running')) {
+    return text('packageBusy');
   }
   if (failureKind == 'provider_service_unavailable')
     return text('serviceUnavailable');
@@ -616,6 +655,7 @@ class AcpAgentProfile {
     this.capabilities = const <String, dynamic>{},
     this.discoveryCommand,
     this.managedAdapter = false,
+    this.uninstallable = false,
   });
 
   final String id;
@@ -636,6 +676,9 @@ class AcpAgentProfile {
   final Map<String, dynamic> capabilities;
   final String? discoveryCommand;
   final bool managedAdapter;
+
+  /// 官方托管运行时声明了卸载策略（agents.json 的 managedUninstallStrategy）。
+  final bool uninstallable;
 
   factory AcpAgentProfile.fromMap(Map<dynamic, dynamic> map) {
     final rawArguments = map['arguments'];
@@ -1096,6 +1139,31 @@ class AgentRuntimeService {
       ),
     );
     return task;
+  }
+
+  /// 卸载官方托管的第三方 Agent（保留用户数据）。只删磁盘上的包，
+  /// 会话与 turn 仍归既有 ACP 运行时；并发由 native 的 preparation gate 串行化。
+  static Future<Map<String, dynamic>> uninstallAgent(
+    String agentId, {
+    String? distributionId,
+  }) {
+    final normalizedId = agentId.trim();
+    final normalizedDistribution = distributionId?.trim() ?? '';
+    if (normalizedId.isEmpty) {
+      return Future.error(
+        ArgumentError('Uninstall requires an agent id.'),
+      );
+    }
+    if (_agentPreparationTasks[normalizedId] != null) {
+      return Future.error(
+        StateError('Agent package operation is already running for $normalizedId.'),
+      );
+    }
+    return _invokeMap('agent/uninstall', {
+      'agentId': normalizedId,
+      if (normalizedDistribution.isNotEmpty)
+        'distributionId': normalizedDistribution,
+    });
   }
 
   static void _finishAgentPreparation(

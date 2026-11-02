@@ -216,6 +216,68 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     unawaited(_runAgentAction(agent, prepare: true));
   }
 
+  /// 卸载官方托管的助手：只删磁盘上的程序，配置 / 登录信息 / 历史都保留。
+  Future<void> _uninstall(AcpAgentProfile agent) async {
+    if (_busyAgentId == agent.id) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        key: ValueKey('agent-uninstall-confirm-${agent.id}'),
+        title: Text(_text('卸载 ${agent.name}？', 'Uninstall ${agent.name}?')),
+        content: Text(
+          _text(
+            '卸载当前终端环境中的程序，保留配置、登录信息和历史记录。',
+            'Uninstall the program from the current terminal environment. Keep configuration, sign-in information, and history.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            key: Key('agent-uninstall-cancel-${agent.id}'),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(_text('取消', 'Cancel')),
+          ),
+          TextButton(
+            key: Key('agent-uninstall-confirm-action-${agent.id}'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(_text('卸载', 'Uninstall')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busyAgentId = agent.id);
+    try {
+      final result = await AgentRuntimeService.uninstallAgent(agent.id);
+      if (!mounted) return;
+      await _load(refresh: true);
+      if (!mounted) return;
+      final ok = result['ok'] != false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok
+                ? _text(
+                    '${agent.name} 已卸载，配置与历史已保留。',
+                    '${agent.name} was uninstalled. Configuration and history were kept.',
+                  )
+                : _text('卸载未完成，请重试。', 'Uninstall did not finish. Try again.'),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            formatAgentRuntimeErrorForUser(error, english: _english),
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busyAgentId = null);
+    }
+  }
+
   Future<void> _runAgentAction(
     AcpAgentProfile agent, {
     required bool prepare,
@@ -661,6 +723,8 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
         : _text('重新检测', 'Check again');
     final action = agent.managedAdapter ? _prepare : _test;
     final capabilitySubtitle = _capabilitySubtitle(agent);
+    final canUninstall =
+        agent.uninstallable && agent.installed == true && agent.enabled;
     return _FlatTile(
       tileKey: Key('agent-config-${agent.id}'),
       leading: AgentBrandIcon(
@@ -695,6 +759,9 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       onAction: canTest ? () => action(agent) : null,
       navigationLabel: _text('配置', 'Configure'),
       navigationKey: Key('agent-navigation-${agent.id}'),
+      uninstallLabel: canUninstall ? _text('卸载', 'Uninstall') : null,
+      uninstallKey: Key('agent-uninstall-${agent.id}'),
+      onUninstall: canUninstall && !busy ? () => _uninstall(agent) : null,
       busy: busy,
       onTap: preparing
           ? () {}
@@ -889,6 +956,9 @@ class _FlatTile extends StatelessWidget {
     this.navigationLabel,
     this.navigationKey,
     this.busy = false,
+    this.uninstallLabel,
+    this.uninstallKey,
+    this.onUninstall,
   });
 
   final Widget leading;
@@ -906,6 +976,10 @@ class _FlatTile extends StatelessWidget {
   final String? navigationLabel;
   final Key? navigationKey;
   final bool busy;
+  /// 仅官方托管运行时提供：删除磁盘上的包，保留配置与历史。
+  final String? uninstallLabel;
+  final Key? uninstallKey;
+  final VoidCallback? onUninstall;
 
   @override
   Widget build(BuildContext context) {
@@ -1093,6 +1167,27 @@ class _FlatTile extends StatelessWidget {
                         LucideIcons.chevronRight,
                         size: 18,
                         color: palette.textTertiary,
+                      ),
+                    if (onUninstall != null && uninstallLabel != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: InkWell(
+                          key: uninstallKey,
+                          onTap: onUninstall,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(4, 3, 0, 3),
+                            child: Text(
+                              uninstallLabel!,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                                color: Theme.of(context).colorScheme.error,
+                                fontFamily: 'PingFang SC',
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                   ],
                 ),

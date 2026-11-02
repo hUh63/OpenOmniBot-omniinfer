@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import java.util.UUID
 
@@ -55,7 +56,8 @@ internal data class AcpAgentProfile(
                 negotiated = health.capabilities,
             ),
             "discoveryCommand" to runtime?.discoveryCommand,
-            "managedAdapter" to (runtime?.managedAdapterPackage != null)
+            "managedAdapter" to (runtime?.managedAdapterPackage != null),
+            "uninstallable" to (builtIn && runtime?.managedUninstallStrategy != null),
         )
     }
 
@@ -115,6 +117,8 @@ internal data class AcpOfficialRuntime(
     val terminalPackageId: String? = null,
     val managedInstallScriptPath: String? = null,
     val managedInstallCommand: String? = null,
+    /** 官方托管运行时在 agents.json 里声明的卸载策略；null 表示不支持托管卸载。 */
+    val managedUninstallStrategy: ManagedAgentUninstallStrategy? = null,
     val preparationRevision: String? = null,
     val embedded: Boolean = false,
     /**
@@ -439,6 +443,29 @@ internal class AcpAgentProfileStore(context: Context) {
         if (current.remove(agentId) != null) {
             preferences.edit().putString(KEY_HEALTH, gson.toJson(current)).apply()
         }
+    }
+
+    // 包版本清单按「终端环境 + Agent」维度独立存储：握手/可用性刷新不能把上一次
+    // 更新检查的结果冲掉。
+    fun packageVersion(distributionId: String, agentId: String): ManagedAgentVersion? = runCatching {
+        val source = preferences.getString("package_version:$distributionId:$agentId", null)
+            ?: return null
+        val value = JsonParser.parseString(source).asJsonObject
+        fun string(key: String) = value.get(key)?.takeUnless { it.isJsonNull }?.asString
+        ManagedAgentVersion(
+            installedVersion = string("installedVersion"),
+            latestVersion = string("latestVersion"),
+            targetVersion = string("targetVersion"),
+            checkedAt = value.get("checkedAt")?.takeUnless { it.isJsonNull }?.asLong,
+            error = string("error"),
+            pinned = value.get("pinned")?.asBoolean == true,
+        )
+    }.getOrNull()
+
+    fun savePackageVersion(distributionId: String, agentId: String, version: ManagedAgentVersion) {
+        preferences.edit().putString(
+            "package_version:$distributionId:$agentId", gson.toJson(version.toPayload()),
+        ).apply()
     }
 
     /**

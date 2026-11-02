@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Log
 import com.ai.assistance.operit.terminal.TerminalManager
 import com.ai.assistance.operit.terminal.setup.buildAlpinePackageInstallCommand
+import com.rk.terminal.runtime.EmbeddedRuntimeInstaller
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
@@ -225,6 +226,43 @@ class AgentRuntimeManager private constructor(
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val remoteConfigStore = CodexRemoteBridgeConfigStore(appContext)
     private val acpAgentProfileStore = AcpAgentProfileStore(appContext)
+    /** 只做「包版本清单」：探测已装版本 / 查 npm dist-tags，不参与 ACP 会话。 */
+    private val managedAgentUpdates = ManagedAgentUpdates(
+        probe = { profiles, distributionId ->
+            check(
+                TerminalDistribution.selected().id == distributionId &&
+                    EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)
+            ) { "Prepare the terminal environment before checking installed Agent versions" }
+            val result = TerminalManager.getInstance(appContext).executeHiddenCommand(
+                command = managedAgentVersionProbeCommand(profiles),
+                executorKey = "acp-agent-version-probe-$distributionId",
+                timeoutMs = 15_000L,
+                distribution = TerminalDistribution.fromId(distributionId),
+            )
+            check(result.isOk && result.exitCode == 0) { "Agent version probe failed" }
+            parseManagedAgentVersionProbe(result.output)
+        },
+        read = acpAgentProfileStore::packageVersion,
+        save = acpAgentProfileStore::savePackageVersion,
+    )
+    /** 只做包维护（卸载）：会话、turn、连接仍全部由既有 ACP 运行时拥有。 */
+    private val managedAgentUninstaller = ManagedAgentUninstaller(
+        gate = managedAcpPreparationGate,
+        profiles = acpAgentProfileStore::list,
+        currentDistribution = { TerminalDistribution.selected().id },
+        disconnect = { profile ->
+            if (!EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)) {
+                throw ManagedAgentUninstallException(
+                    "agent_uninstall_terminal_unavailable", "The terminal environment is unavailable.",
+                )
+            }
+            localRuntimeFor(profile.id).disconnect()
+            acpAgentProfileStore.clearHealth(profile.id)
+            invalidateLocalProbeCache()
+        },
+        execute = ::executeManagedAgentUninstall,
+        refresh = ::refreshManagedAgentAfterUninstall,
+    )
     private val scheduledTaskScheduler by lazy {
         WorkspaceScheduledTaskScheduler(appContext)
     }
@@ -839,6 +877,9 @@ class AgentRuntimeManager private constructor(
             return rollbackAgentConfig(canonicalArgs)
         }
         if (method.startsWith("agent/")) {
+            if (method == "agent/uninstall") {
+                return uninstallManagedAgent(canonicalArgs, TerminalDistribution.selected().id)
+            }
             val requestedAgentId = canonicalArgs.stringValue("agentId")
                 ?: canonicalArgs.mapValue("agent").stringValue("id")
                 ?: acpAgentProfileStore.selected().id
@@ -2487,6 +2528,118 @@ class AgentRuntimeManager private constructor(
                 preparationRevision = runtime.preparationRevision,
             ),
         )
+    }
+
+    /**
+     * 托管卸载：只动磁盘上的包，不碰 ACP 会话模型。失败时也返回最新 profile 快照，
+     * 让设置页可以直接用它刷新列表（而不是等下一次全量 refresh）。
+     */
+    private suspend fun uninstallManagedAgent(args: Map<String, Any?>, distributionId: String): Any? {
+        val agentId = args.stringValue("agentId").orEmpty().trim()
+        val payload = try {
+            val outcome = managedAgentUninstaller.uninstall(
+                agentId = agentId,
+                // 调用方可以省略（Flutter 侧没有终端环境概念），默认用当前选中的环境。
+                distributionId = args.stringValue("distributionId")?.takeIf { it.isNotBlank() } ?: distributionId,
+            )
+            linkedMapOf<String, Any?>(
+                "ok" to outcome.ok,
+                "agent" to outcome.profile.toPayload(
+                    selected = outcome.profile.id == acpAgentProfileStore.selected().id,
+                    health = if (TerminalDistribution.selected().id == distributionId) {
+                        acpAgentProfileStore.health(outcome.profile.id)
+                    } else {
+                        managedAgentHealthAfterUninstall(outcome.report)
+                    },
+                ),
+                "error" to outcome.error,
+                "failureKind" to outcome.failureKind,
+            )
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            linkedMapOf<String, Any?>(
+                "ok" to false,
+                "error" to (error.message ?: "Managed uninstall failed."),
+                "failureKind" to when (error) {
+                    is ManagedAgentUninstallException -> error.failureKind
+                    is ManagedAcpPreparationInProgressException -> "agent_package_operation_in_progress"
+                    else -> "agent_uninstall_failed"
+                },
+            ).apply {
+                acpAgentProfileStore.list().firstOrNull { it.id == agentId }?.let { profile ->
+                    put(
+                        "agent",
+                        profile.toPayload(
+                            selected = profile.id == acpAgentProfileStore.selected().id,
+                            health = acpAgentProfileStore.health(profile.id),
+                        ),
+                    )
+                }
+            }
+        }
+        payload["distributionId"] = distributionId
+        return withAgentPackageVersions(payload, distributionId)
+    }
+
+    private suspend fun executeManagedAgentUninstall(
+        profile: AcpAgentProfile,
+        distributionId: String,
+        probe: Boolean,
+    ): ManagedAgentUninstallReport {
+        // 设置里换了终端环境后，连「恢复探测」也不能在旧环境跑。
+        if (TerminalDistribution.selected().id != distributionId) {
+            throw ManagedAgentUninstallException(
+                "agent_uninstall_distribution_changed", "Terminal environment changed. Refresh Agent settings.",
+            )
+        }
+        if (!EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)) {
+            throw ManagedAgentUninstallException(
+                "agent_uninstall_terminal_unavailable", "The terminal environment is unavailable.",
+            )
+        }
+        val strategy = requireNotNull(profile.officialRuntime?.managedUninstallStrategy)
+        val source = appContext.assets.open("acp/uninstall-agent.cjs").bufferedReader().use { it.readText() }
+        val result = TerminalManager.getInstance(appContext).executeHiddenCommand(
+            command = managedAgentUninstallCommand(source, strategy, probe),
+            executorKey = "acp-adapter-uninstall-${profile.id}-${if (probe) "probe" else "remove"}",
+            timeoutMs = if (probe) 15_000L else MANAGED_ACP_INSTALL_TIMEOUT_MS,
+            distribution = TerminalDistribution.fromId(distributionId),
+        )
+        // 脚本即使部分失败（exit 1）也会打印最终磁盘状态；没有这一行就不能认定卸载成功。
+        return parseManagedAgentUninstallReport(result.output)
+    }
+
+    private suspend fun refreshManagedAgentAfterUninstall(
+        profile: AcpAgentProfile,
+        distributionId: String,
+        report: ManagedAgentUninstallReport?,
+    ) {
+        invalidateLocalProbeCache()
+        acpAgentProfileStore.savePackageVersion(
+            distributionId, profile.id,
+            managedAgentVersionAfterUninstall(acpAgentProfileStore.packageVersion(distributionId, profile.id), report),
+        )
+        if (TerminalDistribution.selected().id != distributionId) return
+        acpAgentProfileStore.saveHealth(profile.id, managedAgentHealthAfterUninstall(report))
+        if (report != null && !report.removed) {
+            managedAgentUpdates.check(listOf(profile), distributionId, remote = false)
+        }
+    }
+
+    /** 给 agent 相关 payload 补上「当前终端环境下的包版本」，设置页不用再单独查一次。 */
+    private fun withAgentPackageVersions(payload: Any?, distributionId: String): Any? {
+        if (payload !is Map<*, *>) return payload
+        val result = payload.entries.associate { it.key.toString() to it.value }.toMutableMap()
+        if (result.containsKey("agents")) result["distributionId"] = distributionId
+        fun enrich(value: Any?): Any? {
+            if (value !is Map<*, *>) return value
+            val id = value["id"] as? String ?: return value
+            return value + mapOf("packageVersion" to acpAgentProfileStore.packageVersion(distributionId, id)?.toPayload())
+        }
+        (result["agents"] as? List<*>)?.let { result["agents"] = it.map(::enrich) }
+        result["agent"]?.let { result["agent"] = enrich(it) }
+        result["catalog"]?.let { result["catalog"] = withAgentPackageVersions(it, distributionId) }
+        return result
     }
 
     private suspend fun areManagedNpmPackagesInstalled(

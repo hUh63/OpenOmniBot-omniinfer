@@ -30,6 +30,7 @@
         "configAdapterId": "claude-code",
         "usesSharedProvider": true,
         "terminalPackageId": "claude_code",
+        "managedUninstallStrategy": "claude-code",
         "preparationRevision": "claude-agent-acp-0.74.0"
       }
     },
@@ -49,6 +50,7 @@
         "configAdapterId": "codex",
         "usesSharedProvider": true,
         "terminalPackageId": "codex",
+        "managedUninstallStrategy": "codex",
         "managedInstallCommandAsset": "acp/install-codex.sh",
         "preparationRevision": "codex-acp-1.10.0-message-completion-1-title-model-1"
       }
@@ -67,6 +69,7 @@
         "configAdapterId": "open-code",
         "usesSharedProvider": true,
         "terminalPackageId": "opencode",
+        "managedUninstallStrategy": "opencode",
         "managedInstallCommandAsset": "acp/install/opencode.sh",
         "preparationRevision": "opencode-rootfs-libc-v2"
       }
@@ -85,6 +88,7 @@
         "configAdapterId": "deepseek-harness",
         "usesSharedProvider": true,
         "terminalPackageId": "deepseek_harness",
+        "managedUninstallStrategy": "deepseek-harness",
         "managedInstallScriptPath": "/root/.dsh/omnibot-acp/install-dsh-runtime.sh",
         "managedInstallCommandAsset": "acp/install/deepseek-harness.sh",
         "managedAdapterHealthCommand": "export DSH_HOME=/root/.dsh/omnibot-acp; export PATH=/root/.npm-global/bin:$PATH; command -v dsh >/dev/null 2>&1 && command -v dsh-acp-android >/dev/null 2>&1 && bash --noprofile --norc -c ':' >/dev/null 2>&1 && test -f \"$DSH_HOME/profiles/acp/package.json\" && test -f \"$DSH_HOME/profiles/acp/cordis.patch.yml\" && node -e \"const fs=require('fs'); const profile=JSON.parse(fs.readFileSync(process.env.DSH_HOME + '/profiles/acp/package.json','utf8')); const bundles=profile?.dsh?.profile?.bundles; if (!Array.isArray(bundles) || !bundles.includes('@deepseek-ai/dsh-acp-app')) process.exit(1)\" >/dev/null 2>&1 && test -f /root/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-acp-app/cordis.patch.yml && node -e \"require('/root/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty')\" >/dev/null 2>&1",
@@ -127,6 +131,7 @@
         "configAdapterId": "kimi-code",
         "usesSharedProvider": true,
         "terminalPackageId": "kimi",
+        "managedUninstallStrategy": "kimi-code",
         "managedInstallCommand": "npm install -g --no-audit --no-fund --prefix /root/.npm-global --registry=https://registry.npmmirror.com @moonshot-ai/kimi-code@latest || npm install -g --no-audit --no-fund --prefix /root/.npm-global @moonshot-ai/kimi-code@latest",
         "preparationRevision": "kimi-code-acp-v1"
       }
