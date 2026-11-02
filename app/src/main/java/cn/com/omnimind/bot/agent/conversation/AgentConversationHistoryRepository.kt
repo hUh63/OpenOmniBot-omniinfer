@@ -1038,7 +1038,6 @@ class AgentConversationHistoryRepository(
         normalized: List<AgentConversationEntry>,
         skippedIds: Set<Long>
     ) {
-        val dao = DatabaseHelper.getDatabase().agentConversationEntryDao()
         normalized.forEachIndexed { index, updated ->
             val before = original[index]
             if (updated == before.entry) return@forEachIndexed
@@ -1046,7 +1045,7 @@ class AgentConversationHistoryRepository(
             if (before.entry.entryType == ENTRY_TYPE_TOOL_EVENT) {
                 // 工具条目只改 header：整行写回会把投影/截断后的 payload 覆盖到库里，
                 // 完整工具记录就找不回来了。
-                dao.updateInterruptedToolHeader(
+                DatabaseHelper.updateAgentConversationEntryInterruptedToolHeader(
                     id = updated.id,
                     expectedUpdatedAt = before.entry.updatedAt,
                     status = updated.status,

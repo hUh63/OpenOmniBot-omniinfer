@@ -775,6 +775,20 @@ object DatabaseHelper {
     suspend fun readAgentConversationEntrySummaryPreview(id: Long): String? =
         getDatabase().agentConversationEntryDao().readSummaryPreview(id)
 
+    /**
+     * 把残留的 running 工具条目改判为 interrupted：只动 status/summary/updatedAt，
+     * 不动 payload（整行 upsert 会把读侧投影写回库里）。
+     */
+    suspend fun updateAgentConversationEntryInterruptedToolHeader(
+        id: Long,
+        expectedUpdatedAt: Long,
+        status: String,
+        summary: String,
+        updatedAt: Long
+    ): Int = getDatabase().agentConversationEntryDao().updateInterruptedToolHeader(
+        id, expectedUpdatedAt, status, summary, updatedAt
+    )
+
     suspend fun getLogicalAgentConversationPageAfterCursor(
         conversationId: Long,
         modes: List<String>,
