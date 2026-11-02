@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import cn.com.omnimind.baselib.database.AgentConversationEntry
 import cn.com.omnimind.baselib.database.AgentConversationEntryHeader
+import cn.com.omnimind.baselib.database.AgentConversationEntrySlice
 import cn.com.omnimind.baselib.database.Conversation
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
@@ -560,15 +561,18 @@ class AgentConversationHistoryRepository(
         var cursorCreatedAt = 0L
         var cursorId = 0L
         while (true) {
-            val page = DatabaseHelper.getLogicalAgentConversationPageAfterCursor(
+            // 片读 + 投影：超长 payload 在 SQL 层就被置空并给出字节数，
+            // 只把「展示需要的那一份」留在内存里。
+            val slices = DatabaseHelper.getLogicalAgentConversationPageAfterCursorSlices(
                 conversationId, storageModes, SAFE_HISTORY_PAGE_SIZE, cursorCreatedAt, cursorId)
-            if (page.isEmpty()) break
-            val displayEntries = if (finalizeInterruptedEntries) normalizeEntriesForDisplay(page) else page
-            messagePayloads += displayEntries.mapNotNull(::entryToMessagePayload)
-            val last = page.last()
+            if (slices.isEmpty()) break
+            val projected = slices.map { projectDisplayEntry(it, conversationId) }
+            val displayEntries = if (finalizeInterruptedEntries) normalizeEntriesForDisplay(projected) else projected
+            messagePayloads += displayEntries.mapNotNull { entryToMessagePayload(it.entry, it.fullPayloadFile) }
+            val last = slices.last().entry
             cursorCreatedAt = last.createdAt
             cursorId = last.id
-            if (page.size < SAFE_HISTORY_PAGE_SIZE) break
+            if (slices.size < SAFE_HISTORY_PAGE_SIZE) break
         }
         ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
     }
@@ -642,25 +646,31 @@ class AgentConversationHistoryRepository(
         offset: Int
     ): Triple<List<Map<String, Any?>>, Boolean, Int> = withContext(Dispatchers.IO) {
         val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
-        // Deduplicate compatibility identities in SQL BEFORE paging. Hydrate only
-        // the visible page plus one lookahead, never the entire large transcript.
-        val pageSize = limit.coerceIn(1, Int.MAX_VALUE - 1)
-        val page = DatabaseHelper.getLogicalAgentConversationPage(
-            conversationId, conversationModeCandidates(effectiveConversationMode), pageSize + 1, offset.coerceAtLeast(0)
-        )
-        val entries = page.take(pageSize)
-        val hasMore = page.size > pageSize
+        val modes = conversationModeCandidates(effectiveConversationMode)
+        val start = offset.coerceAtLeast(0)
+        // 页内双重上限：条数 ≤100 且投影后字节 ≤1MB。投影只保留展示需要的内容，
+        // 超长 payload 落到 artifacts 里由「完整记录」附件按需打开。
+        val page = DatabaseHelper.withTransaction {
+            AgentHistoryDisplayPager.load(
+                limit = limit,
+                offset = start,
+                read = { count, from ->
+                    DatabaseHelper.getLogicalAgentConversationPageSlices(conversationId, modes, count, from)
+                },
+                project = { slice -> projectDisplayEntry(slice, conversationId) },
+            )
+        }
         // Every page is historical UI. A card from an older page must not
         // stay visually running merely because it was not in the first page
         // loaded after process restore.
-        val normalized = normalizeEntriesForDisplay(entries)
-        val messagePayloads = normalized.mapNotNull { entry -> entryToMessagePayload(entry) }
+        val normalized = normalizeEntriesForDisplay(page.entries)
+        val messagePayloads = normalized.mapNotNull { entry -> entryToMessagePayload(entry.entry, entry.fullPayloadFile) }
         val sorted = ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
-        // scanned = 本次真正从 SQL 消费掉的行数（entries.size）。payload 组装会
-        // 丢掉 transport / 空内容条目，`messages.size` 因此可能小于 limit；
-        // 调用方若用 messages.size 推进 offset，被丢掉的那些行会被反复重读，
-        // 极端情况下一页全被丢掉时 offset 原地不动，向上翻历史永远翻不动。
-        Triple(sorted, hasMore, entries.size)
+        // scanned = 本次真正从 SQL 消费掉的行数。payload 组装会丢掉 transport /
+        // 空内容条目，`messages.size` 因此可能小于 limit；调用方若用 messages.size
+        // 推进 offset，被丢掉的那些行会被反复重读，极端情况下一页全被丢掉时 offset
+        // 原地不动，向上翻历史永远翻不动。
+        Triple(sorted, page.hasMore, (page.nextOffset - start).coerceAtLeast(0))
     }
 
     suspend fun clearConversationMessages(
@@ -985,22 +995,26 @@ class AgentConversationHistoryRepository(
             entries = entries,
             skipToolEntryIds = recentRunningIds
         )
-        persistNormalizedEntries(entries, normalized, recentRunningIds)
+        persistNormalizedEntries(entries.map { AgentHistoryDisplayEntry(it) }, normalized, recentRunningIds)
         return normalized
     }
 
     private suspend fun normalizeEntriesForDisplay(
-        entries: List<AgentConversationEntry>
-    ): List<AgentConversationEntry> {
+        entries: List<AgentHistoryDisplayEntry>
+    ): List<AgentHistoryDisplayEntry> {
         if (entries.isEmpty()) return entries
-        val recentRunningIds = recentRunningToolEntryIds(entries)
+        val plain = entries.map { it.entry }
+        val recentRunningIds = recentRunningToolEntryIds(plain)
         val normalized = AgentConversationHistorySupport.normalizeInterruptedEntries(
-            entries = entries,
+            entries = plain,
             finalizeLatestThinkingEntries = true,
             skipToolEntryIds = recentRunningIds
         )
         persistNormalizedEntries(entries, normalized, recentRunningIds)
-        return normalized
+        return entries.mapIndexed { index, display ->
+            val updated = normalized[index]
+            if (updated == display.entry) display else display.copy(entry = updated)
+        }
     }
 
     /**
@@ -1020,38 +1034,115 @@ class AgentConversationHistoryRepository(
     }
 
     private suspend fun persistNormalizedEntries(
-        original: List<AgentConversationEntry>,
+        original: List<AgentHistoryDisplayEntry>,
         normalized: List<AgentConversationEntry>,
         skippedIds: Set<Long>
     ) {
+        val dao = DatabaseHelper.getDatabase().agentConversationEntryDao()
         normalized.forEachIndexed { index, updated ->
-            if (updated == original[index]) return@forEachIndexed
-            if (original[index].id in skippedIds) return@forEachIndexed
-            upsertEntry(updated.copy(updatedAt = System.currentTimeMillis()))
+            val before = original[index]
+            if (updated == before.entry) return@forEachIndexed
+            if (before.entry.id in skippedIds) return@forEachIndexed
+            if (before.entry.entryType == ENTRY_TYPE_TOOL_EVENT) {
+                // 工具条目只改 header：整行写回会把投影/截断后的 payload 覆盖到库里，
+                // 完整工具记录就找不回来了。
+                dao.updateInterruptedToolHeader(
+                    id = updated.id,
+                    expectedUpdatedAt = before.entry.updatedAt,
+                    status = updated.status,
+                    summary = updated.summary,
+                    updatedAt = System.currentTimeMillis(),
+                )
+            } else if (!before.isProjection) {
+                // 投影条目的 payload 只是原文的替身（大记录已落 artifacts），
+                // 写回去等于把用户的历史正文删成预览。
+                upsertEntry(updated.copy(updatedAt = System.currentTimeMillis()))
+            }
         }
     }
 
-    private fun entryToMessagePayload(entry: AgentConversationEntry): Map<String, Any?>? {
-        return when (entry.entryType) {
-            ENTRY_TYPE_TOOL_EVENT -> buildToolCardMessage(entry)
+    private fun entryToMessagePayload(
+        entry: AgentConversationEntry,
+        fullPayloadFile: File? = null
+    ): Map<String, Any?>? {
+        val payload = AgentConversationHistorySupport.readMap(entry.payloadJson)
+        if (fullPayloadFile != null && AgentHistoryDisplayProjection.isOffloadedMessage(payload)) {
+            // 投影里已经写明「该记录过大，请通过附件查看」，附件不能省。
+            return AgentHistoryDisplayProjection.attachCompleteRecord(
+                payload,
+                fullHistoryArtifact(fullPayloadFile, "完整消息记录")
+            )
+        }
+        val message = when (entry.entryType) {
+            ENTRY_TYPE_TOOL_EVENT -> buildToolCardMessage(entry, fullPayloadFile)
             ENTRY_TYPE_USER_MESSAGE,
-            ENTRY_TYPE_ASSISTANT_MESSAGE -> AgentConversationHistorySupport.readMap(entry.payloadJson)
+            ENTRY_TYPE_ASSISTANT_MESSAGE -> payload
             ENTRY_TYPE_UI_CARD -> AgentConversationHistorySupport.buildDisplaySafeUiCardMessage(
                 entry = entry,
-                payload = AgentConversationHistorySupport.readMap(entry.payloadJson)
+                payload = payload
             )
             else -> null
         }
+        // 消息体被投影（原文落 artifacts）时补一个「完整记录」附件，正文里只留预览。
+        return if (message != null && fullPayloadFile != null && entry.entryType != ENTRY_TYPE_TOOL_EVENT) {
+            AgentHistoryDisplayProjection.attachCompleteRecord(
+                message,
+                fullHistoryArtifact(fullPayloadFile, "完整消息记录")
+            )
+        } else {
+            message
+        }
     }
 
-    private fun buildToolCardMessage(entry: AgentConversationEntry): Map<String, Any?> {
+    private fun fullHistoryArtifact(file: File, title: String): Map<String, Any?> =
+        AgentWorkspaceManager(context).buildArtifactForFile(file, "history", title).toPayload()
+
+    /**
+     * 单条条目的展示投影：超长摘要取 2048 字符预览；payload 超过内联上限时
+     * 流式复制到 artifacts 目录，返回 fullPayloadFile 供 UI 打开完整内容。
+     */
+    private suspend fun projectDisplayEntry(
+        slice: AgentConversationEntrySlice,
+        conversationId: Long
+    ): AgentHistoryDisplayEntry {
+        val summary = when {
+            slice.summaryBytes > 32768L ->
+                DatabaseHelper.readAgentConversationEntrySummaryPreview(slice.entry.id).orEmpty()
+            slice.entry.entryType == ENTRY_TYPE_TOOL_EVENT -> slice.entry.summary.take(2048)
+            else -> slice.entry.summary
+        }
+        val entry = slice.entry.copy(summary = summary)
+        val inlineLimit = if (entry.entryType == ENTRY_TYPE_TOOL_EVENT) {
+            AgentHistoryDisplayProjection.INLINE_TOOL_BYTES
+        } else {
+            AgentHistoryDisplayProjection.INLINE_MESSAGE_BYTES
+        }
+        return if (slice.payloadBytes > inlineLimit) {
+            val directory = AgentWorkspaceManager(context).offloadsDirectory("history-$conversationId")
+            AgentHistoryDisplayProjection.offload(entry, directory) { output ->
+                DatabaseHelper.copyAgentConversationEntryText(slice, summary = false, output = output)
+            }
+        } else {
+            AgentHistoryDisplayEntry(entry, isProjection = slice.summaryBytes > 32768L)
+        }
+    }
+
+    private fun buildToolCardMessage(
+        entry: AgentConversationEntry,
+        fullPayloadFile: File? = null
+    ): Map<String, Any?> {
         val payload = AgentConversationHistorySupport.readMap(entry.payloadJson)
         val messageId = entry.entryId
         val cardData = AgentConversationHistorySupport.buildDisplaySafeToolCardData(
             entry = entry,
             payload = payload
         ).toMutableMap()
-        if (entry.payloadJson.length > 8192) {
+        if (fullPayloadFile != null) {
+            // 投影路径：完整记录已经在 artifacts 里，卡片只引用它，正文保持预览。
+            val artifact = fullHistoryArtifact(fullPayloadFile, "完整工具记录")
+            cardData["artifacts"] = (cardData["artifacts"] as? List<*>).orEmpty() + artifact
+            cardData[AgentHistoryDisplayProjection.OFFLOADED_MARKER] = true
+        } else if (entry.payloadJson.length > 8192) {
             val workspace = AgentWorkspaceManager(context)
             val digest = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(entry.payloadJson.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }

@@ -741,6 +741,40 @@ object DatabaseHelper {
     suspend fun getLogicalAgentConversationPage(conversationId: Long, modes: List<String>, limit: Int, offset: Int): List<AgentConversationEntry> =
         getDatabase().agentConversationEntryDao().getLogicalThreadPage(conversationId, modes, limit, offset)
 
+    /**
+     * 未 hydrate 的分页读取：超长 payload/summary 在 SQL 里就被替换成空串并返回字节数，
+     * 调用方可以直接按需流式读完整内容，避免整页的大 payload 撞上 CursorWindow 上限。
+     */
+    suspend fun getLogicalAgentConversationPageSlices(
+        conversationId: Long,
+        modes: List<String>,
+        limit: Int,
+        offset: Int
+    ): List<AgentConversationEntrySlice> =
+        getDatabase().agentConversationEntryDao().getLogicalThreadPageSlices(conversationId, modes, limit, offset)
+
+    suspend fun getLogicalAgentConversationPageAfterCursorSlices(
+        conversationId: Long,
+        modes: List<String>,
+        limit: Int,
+        cursorCreatedAt: Long,
+        cursorId: Long
+    ): List<AgentConversationEntrySlice> =
+        getDatabase().agentConversationEntryDao().getLogicalThreadPageAfterCursorSlices(
+            conversationId, modes, limit, cursorCreatedAt, cursorId
+        )
+
+    suspend fun copyAgentConversationEntryText(
+        slice: AgentConversationEntrySlice,
+        summary: Boolean,
+        output: java.io.OutputStream
+    ) {
+        getDatabase().agentConversationEntryDao().copyEntryTextTo(slice, summary, output)
+    }
+
+    suspend fun readAgentConversationEntrySummaryPreview(id: Long): String? =
+        getDatabase().agentConversationEntryDao().readSummaryPreview(id)
+
     suspend fun getLogicalAgentConversationPageAfterCursor(
         conversationId: Long,
         modes: List<String>,

@@ -459,6 +459,25 @@ interface AgentConversationEntryDao {
     @Query("SELECT substr(CASE WHEN :summary THEN CAST(summary AS BLOB) ELSE CAST(payloadJson AS BLOB) END, :offset, 32768) FROM agent_conversation_entries WHERE id = :id")
     suspend fun readEntryChunk(id: Long, summary: Boolean, offset: Long): ByteArray?
 
+    /** 只取摘要前 2048 字符：超长 summary 在页面投影里被置空，展示需要一小段预览。 */
+    @Query("SELECT substr(summary, 1, 2048) FROM agent_conversation_entries WHERE id = :id")
+    suspend fun readSummaryPreview(id: Long): String?
+
+    /**
+     * 读历史时把残留的 running 工具条目改判为 interrupted。
+     * 只动 status/summary/updatedAt：整行 upsert 会把投影/截断后的 payload 写回去，
+     * 直接毁掉完整的工具记录。expectedUpdatedAt 保证并发写入不被覆盖。
+     */
+    @Query(
+        """UPDATE agent_conversation_entries SET status = :status,
+        summary = CASE WHEN trim(summary) = '' THEN :summary ELSE summary END,
+        updatedAt = :updatedAt WHERE id = :id AND entryType = 'tool_event' AND status = 'running'
+        AND updatedAt = :expectedUpdatedAt"""
+    )
+    suspend fun updateInterruptedToolHeader(
+        id: Long, expectedUpdatedAt: Long, status: String, summary: String, updatedAt: Long,
+    ): Int
+
     suspend fun hydrate(slice: AgentConversationEntrySlice): AgentConversationEntry {
         suspend fun fullText(summary: Boolean, bytes: Long, inline: String): String {
             if (bytes <= 32768) return inline
