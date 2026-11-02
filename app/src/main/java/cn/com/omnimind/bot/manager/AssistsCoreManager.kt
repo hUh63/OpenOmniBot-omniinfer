@@ -3293,7 +3293,10 @@ class AssistsCoreManager(private val context: Context) {
         }
         workJob.launch {
             try {
+                // 兼容两种删消息参数名：本仓 Dart 用 deleteMessageIds，上游 0.7.x
+                // 的 replaceConversationMessages 用 removedMessageIds。
                 val deletedIds = call.argument<List<String>>("deleteMessageIds")
+                    ?: call.argument<List<String>>("removedMessageIds")
                 if (deletedIds != null) {
                     conversationDomainService.deleteMessageIds(conversationId, mode, deletedIds)
                 } else {

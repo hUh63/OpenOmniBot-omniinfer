@@ -687,6 +687,10 @@ class AgentConversationHistoryRepository(
 
     suspend fun deleteConversation(conversationId: Long) = withContext(Dispatchers.IO) {
         DatabaseHelper.deleteAgentConversationEntries(conversationId)
+        // 展示投影落盘的「完整记录」跟着会话一起清：否则删掉的会话会一直占着磁盘。
+        runCatching {
+            AgentWorkspaceManager(context).offloadsDirectory("history-$conversationId").deleteRecursively()
+        }
     }
 
     /**
