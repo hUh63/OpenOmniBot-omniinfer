@@ -90,7 +90,8 @@ class App : BaseApplication() {
 
         MMKV.initialize(this)
         CredentialEndpointSecurity.configureDebugLoopback(BuildConfig.DEBUG)
-        AppSecretStore.initialize(this)
+        // 启动只登记 context，真正打开加密文件推迟到首次读写（避免主线程 IO）。
+        AppSecretStore.prepare(this)
         ModelProviderConfigStore.initialize(this)
         DebugOmniMindProviderBootstrap.install(this)
         LocalModelFeatureInstaller.install(this)
