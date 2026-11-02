@@ -464,6 +464,32 @@ interface AgentConversationEntryDao {
     suspend fun readSummaryPreview(id: Long): String?
 
     /**
+     * 把一条完整正文流式写出：内联部分直接写，超过 32KB 的分段读（substr 1-based 字节）。
+     * 调用方持有读事务时，长度与所有分段共享同一快照。
+     */
+    suspend fun copyEntryTextTo(
+        slice: AgentConversationEntrySlice,
+        summary: Boolean,
+        output: java.io.OutputStream
+    ) {
+        val bytes = if (summary) slice.summaryBytes else slice.payloadBytes
+        val inline = if (summary) slice.entry.summary else slice.entry.payloadJson
+        if (bytes <= 32768L) {
+            output.write(inline.toByteArray(Charsets.UTF_8))
+            output.flush()
+            return
+        }
+        var offset = 1L
+        while (offset <= bytes) {
+            val chunk = readEntryChunk(slice.entry.id, summary, offset) ?: break
+            if (chunk.isEmpty()) break
+            output.write(chunk)
+            offset += chunk.size
+        }
+        output.flush()
+    }
+
+    /**
      * 读历史时把残留的 running 工具条目改判为 interrupted。
      * 只动 status/summary/updatedAt：整行 upsert 会把投影/截断后的 payload 写回去，
      * 直接毁掉完整的工具记录。expectedUpdatedAt 保证并发写入不被覆盖。
