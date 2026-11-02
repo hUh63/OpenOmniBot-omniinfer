@@ -44,6 +44,8 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.9
+  # FlClash 玻璃材质的配色量化（Hct）需要直接依赖；版本与 Flutter SDK 自带的一致。
+  material_color_utilities: ^0.13.0
   http: ^1.6.0
   flutter_riverpod: ^3.4.2
   riverpod_annotation: ^4.0.6
@@ -83,6 +85,9 @@ dev_dependencies:
 
 flutter:
   generate: true
+  # FlClash 液态玻璃的实现着色器（navigation 组件族的运行时依赖）。
+  shaders:
+    - shaders/liquid_glass.frag
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.
