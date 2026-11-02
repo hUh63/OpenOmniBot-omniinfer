@@ -370,7 +370,11 @@ android {
     packaging {
         // 上游 v0.6.3.4 同步：dex 走压缩打包，APK 体积更小（安装时多花一点解压时间）。
         dex {
-            useLegacyPackaging = true
+            // Favor a small APK after Release R8 shrinking. Opt out for a
+            // directly mappable DEX comparison with -POMNIBOT_COMPRESS_DEX=false.
+            useLegacyPackaging = providers.gradleProperty("OMNIBOT_COMPRESS_DEX")
+                .map { it.toBooleanStrict() }
+                .getOrElse(true)
         }
         jniLibs {
             useLegacyPackaging = true

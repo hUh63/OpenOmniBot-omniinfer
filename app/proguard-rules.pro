@@ -5,8 +5,8 @@
 # optimized Android defaults or by dependency consumer rules. Keep this file
 # limited to reflection that is owned by this application.
 
-# 上游 v0.6.3.4 同步：保留可读的类名/成员名。R8 的代码优化、无用代码剔除和资源压缩
-# 仍全部开启，只是不再改名——开源 App 的崩溃堆栈、日志与线上排查要靠这些名字。
+# Keep readable class/member names for this open-source app. Code optimization,
+# dead-code elimination and resource shrinking remain enabled.
 -dontobfuscate
 
 # Runtime metadata used by Gson, Kotlin, and reflective generic type lookup.
@@ -127,9 +127,3 @@
 # Ktor's IntelliJ debugger detector probes these JVM-only management APIs.
 -dontwarn java.lang.management.ManagementFactory
 -dontwarn java.lang.management.RuntimeMXBean
-
-# PDFBox-Android 2.0.27.0 deliberately makes JPEG 2000 decoding optional.
-# JPXFilter checks Class.forName before using this class and reports a missing
-# image reader. Our attachment reader extracts the text layer, not JPX pixels.
-# https://github.com/TomRoush/PdfBox-Android#reading-jpx-images
--dontwarn com.gemalto.jp2.JP2Decoder
