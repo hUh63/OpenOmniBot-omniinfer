@@ -862,8 +862,8 @@ class _ChatAppBarModeShortcutMenuContent extends StatelessWidget {
       key: const ValueKey('chat-app-bar-mode-menu-capsule'),
       borderRadius: BorderRadius.circular(width / 2),
       // 40px 宽、20px 顶部圆角时，top: 0 的 1px 高光会被圆弧裁成
-      // 顶部中央的一颗亮点；新版 OmniGlassPanel 不再画顶部局部高光，这里无需开关。
-      surfaceColor: palette.surfaceElevated,
+      // 顶部中央的一颗亮点；新版 OmniGlassPanel 不再画顶部局部高光、底色也由
+      // 玻璃表面自身决定，这里只保留圆角与内容。
       child: Material(
         color: Colors.transparent,
         child: Column(
