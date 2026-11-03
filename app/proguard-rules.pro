@@ -123,7 +123,9 @@
 
 # Logback is an optional JVM logging backend and is not packaged on Android.
 -dontwarn ch.qos.logback.**
-
+# PdfBox's JPEG 2000 filter reaches into this optional decoder at runtime. The
+# release build does not package it, so a missing class must not fail R8.
+-dontwarn com.gemalto.jp2.**
 # Ktor's IntelliJ debugger detector probes these JVM-only management APIs.
 -dontwarn java.lang.management.ManagementFactory
 -dontwarn java.lang.management.RuntimeMXBean
