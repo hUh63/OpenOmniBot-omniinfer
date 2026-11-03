@@ -102,19 +102,6 @@
         android:theme="@style/Theme.OmnibotApp">
         <!-- 启动页 Activity -->
         <activity android:name=".localmodel.LocalModelActivity" android:exported="false" />
-        <activity
-            android:name=".agent.personal.PersonalContextAccessActivity"
-            android:exported="false"
-            android:theme="@style/Theme.OmnibotApp" />
-        <service
-            android:name=".agent.personal.PersonalNotificationListener"
-            android:label="@string/personal_context_notification_access"
-            android:exported="true"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
         <service android:name="com.omniinfer.server.OmniInferService"
             android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
