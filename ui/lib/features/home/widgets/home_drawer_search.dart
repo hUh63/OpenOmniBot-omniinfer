@@ -9,13 +9,16 @@ extension _HomeDrawerSearch on HomeDrawerState {
 
   List<_ConversationSearchResult> get _visibleConversationResults {
     if (_isSearchActive) {
-      return _searchResults;
+      return _searchResults
+          .where((result) => _matchesHomeFilter(result.conversation))
+          .toList(growable: false);
     }
     final reservedThreadKeys = _promotedConversationThreadKeys;
     return _allConversations
         .where(
           (conversation) =>
               !conversation.isArchived &&
+              _matchesHomeFilter(conversation) &&
               !conversation.isPinned &&
               !reservedThreadKeys.contains(conversation.threadKey),
         )
@@ -50,6 +53,7 @@ extension _HomeDrawerSearch on HomeDrawerState {
         .where(
           (conversation) =>
               !conversation.isArchived &&
+              _matchesHomeFilter(conversation) &&
               conversation.isPinned &&
               !reservedThreadKeys.contains(conversation.threadKey),
         )
@@ -220,7 +224,17 @@ extension _HomeDrawerSearch on HomeDrawerState {
   }
 
   Future<void> _loadConversations() async {
+    if (_isBatchConversationActionRunning) {
+      _refreshConversationsAfterBatch = true;
+      return;
+    }
     final generation = ++_conversationLoadGeneration;
+    // Preserve every history invalidation's generation, but collapse reads
+    // queued while this UI is inactive or its tab is still sliding.
+    if (!await waitForPageReady() ||
+        generation != _conversationLoadGeneration) {
+      return;
+    }
     debugPrint('[HomeDrawer] Loading conversations...');
     setState(() {
       isLoadingConversations =
@@ -229,24 +243,6 @@ extension _HomeDrawerSearch on HomeDrawerState {
     });
 
     try {
-      // 首屏先拿最近一页：会话很多的账号不必等全量传输 + 解析完才出列表。
-      // 随后仍会拉全量（快照缓存、日程分组、图片预览都依赖完整列表），
-      // 所以这里是「先出图、后补齐」，不改变任何最终语义。
-      if (isLoadingConversations) {
-        try {
-          final firstPage = await ConversationService
-              .getSidebarConversationsPage(limit: 40);
-          if (!mounted || generation != _conversationLoadGeneration) return;
-          if (firstPage.isNotEmpty) {
-            setState(() {
-              _allConversations = firstPage;
-              isLoadingConversations = false;
-            });
-          }
-        } catch (e) {
-          debugPrint('[HomeDrawer] First page load failed: $e');
-        }
-      }
       final loadedConversations =
           await ConversationService.getSidebarConversations();
       final loadedScheduledTasks =
@@ -254,7 +250,10 @@ extension _HomeDrawerSearch on HomeDrawerState {
       debugPrint(
         '[HomeDrawer] Loaded ${loadedConversations.length} conversations',
       );
-      if (!mounted || generation != _conversationLoadGeneration) return;
+      if (!await waitForPageReady() ||
+          generation != _conversationLoadGeneration) {
+        return;
+      }
       final visibleThreadKeys = loadedConversations
           .map((conversation) => conversation.threadKey)
           .toSet();
@@ -265,6 +264,7 @@ extension _HomeDrawerSearch on HomeDrawerState {
       if (!mounted || generation != _conversationLoadGeneration) return;
       setState(() {
         _allConversations = loadedConversations;
+        _reconcileConversationSelection();
         _scheduledTasks = loadedScheduledTasks;
         isLoadingConversations = false;
       });
@@ -273,9 +273,6 @@ extension _HomeDrawerSearch on HomeDrawerState {
       _refreshConversationImagePreviewsInBackground(
         loadedConversations
             .where((conversation) => !conversation.isArchived)
-            // 只预热最近十几条：其余行首次可见时按需加载。此前对全部未归档
-            // 会话逐条拉完整消息，会话越多抽屉越卡。
-            .take(HomeDrawerState._imagePreviewWarmupCount)
             .toList(growable: false),
         generation: generation,
       );
@@ -284,7 +281,10 @@ extension _HomeDrawerSearch on HomeDrawerState {
       }
     } catch (e) {
       debugPrint('[HomeDrawer] Failed to load conversations: $e');
-      if (!mounted || generation != _conversationLoadGeneration) return;
+      if (!await waitForPageReady() ||
+          generation != _conversationLoadGeneration) {
+        return;
+      }
       setState(() {
         isLoadingConversations = false;
       });
@@ -363,45 +363,24 @@ extension _HomeDrawerSearch on HomeDrawerState {
       });
     }
 
-    // 搜索交给后端 SQL（标题 / 摘要 / 上下文摘要 / 最后一条消息）。
-    // 原实现在 Dart 侧遍历全部会话、对每条不命中的会话再去拉「全部消息」建索引，
-    // 代价是 O(会话数 × 全部消息)，输入一次可能要跑很久。
-    final List<ConversationModel> matched;
-    try {
-      matched = await ConversationService.searchConversations(
-        trimmedQuery,
-        limit: 80,
-      );
-    } catch (error) {
-      // 没有 try/catch 时异常会让 _isSearching 永远停在 true（抽屉一直显示
-      // 搜索中），并且残留上一次的关键字结果，只有清空输入才能恢复。
-      debugPrint('[HomeDrawer] search failed: $error');
+    final snapshot = List<ConversationModel>.from(_allConversations);
+    final results = <_ConversationSearchResult>[];
+
+    for (final conversation in snapshot) {
       if (!mounted || generation != _searchGeneration) {
         return;
       }
-      setState(() {
-        _searchResults = <_ConversationSearchResult>[];
-        _isSearching = false;
-      });
-      return;
+      final result = await _matchConversationAgainstQuery(
+        conversation,
+        queryTokens,
+      );
+      if (!mounted || generation != _searchGeneration) {
+        return;
+      }
+      if (result != null) {
+        results.add(result);
+      }
     }
-    if (!mounted || generation != _searchGeneration) {
-      return;
-    }
-
-    final results = <_ConversationSearchResult>[
-      for (final conversation in matched)
-        _ConversationSearchResult(
-          conversation: conversation,
-          matchedPreview:
-              _resolveMatchedPreview(
-                candidates: _buildConversationMetadataCandidates(conversation),
-                conversation: conversation,
-                queryTokens: queryTokens,
-              ) ??
-              _fallbackSearchPreview(conversation),
-        ),
-    ];
 
     if (!mounted || generation != _searchGeneration) {
       return;
@@ -576,23 +555,6 @@ extension _HomeDrawerSearch on HomeDrawerState {
       return false;
     }
     return queryTokens.every(searchableText.contains);
-  }
-
-  /// 正文命中（SQL 直接匹配消息内容）时，元数据里可能没有可展示的命中片段，
-  /// 用最后一条消息开头补一段，避免「搜到了但看不出为什么匹配」。
-  String? _fallbackSearchPreview(ConversationModel conversation) {
-    final raw = (conversation.lastMessage ?? conversation.summary ?? '').trim();
-    if (raw.isEmpty) {
-      return null;
-    }
-    final normalized = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (normalized.isEmpty) {
-      return null;
-    }
-    const maxLength = 80;
-    return normalized.length <= maxLength
-        ? normalized
-        : '${normalized.substring(0, maxLength)}…';
   }
 
   String? _resolveMatchedPreview({

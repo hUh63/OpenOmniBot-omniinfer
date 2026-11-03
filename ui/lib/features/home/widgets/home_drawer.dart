@@ -2,18 +2,21 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show setEquals, visibleForTesting;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
-import 'package:ui/features/home/pages/agent/agent_sessions_page.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
+import 'package:ui/features/home/widgets/conversation_context_menu.dart';
 import 'package:ui/features/home/widgets/conversation_slidable.dart';
 import 'package:ui/features/home/widgets/home_drawer_search_field.dart';
-import 'package:ui/features/home/widgets/drawer_conversation_row.dart';
+import 'package:ui/features/home/widgets/home_search_header.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/chat_message_model.dart';
@@ -22,6 +25,8 @@ import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/models/scheduled_task.dart';
 import 'package:ui/services/agent_web_action_presenter.dart';
 import 'package:ui/services/agent_runtime_service.dart';
+import 'package:ui/services/agent_web_status_service.dart';
+import 'package:ui/services/app_update_service.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
@@ -34,13 +39,21 @@ import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/cache_util.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
+import 'package:ui/widgets/app_update_dialog.dart';
+import 'package:ui/widgets/flclash/popup.dart';
+import 'package:ui/widgets/glass_popup.dart';
+import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 part 'home_drawer_actions.dart';
 part 'home_drawer_conversation_list.dart';
 part 'home_drawer_header_footer.dart';
+part 'home_drawer_home.dart';
 part 'home_drawer_image_previews.dart';
 part 'home_drawer_models.dart';
 part 'home_drawer_search.dart';
+part 'home_drawer_selection.dart';
 
 const String _kDrawerMemoryIconSvg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
@@ -104,45 +117,46 @@ class HomeDrawer extends ConsumerStatefulWidget {
     this.memoryCount,
     this.newConversationMode = ConversationMode.agent,
     this.embedded = false,
-    this.homePage = false,
-    this.active = true,
     this.closeOnNavigate = true,
     this.onThreadTargetSelected,
     this.onSearchFocusChanged,
     this.searchFieldKey,
+    this.deferInitialLoad = false,
+    this.homePage = false,
+    this.active = true,
   });
 
   final int? memoryCount;
   final ConversationMode newConversationMode;
   final bool embedded;
-  /// true 表示它自己就是首页内容（MainNavigationPage 的 home tab），而不是盖在
-  /// 聊天页上的抽屉：不包 Drawer、不跟随导航关闭。
-  final bool homePage;
-  /// tab 当前是否可见；keep-alive 下用来避免后台重复刷新。
-  final bool active;
   final bool closeOnNavigate;
   final ValueChanged<ConversationThreadTarget>? onThreadTargetSelected;
   final ValueChanged<bool>? onSearchFocusChanged;
   final GlobalKey? searchFieldKey;
 
+  /// A Scaffold drawer is unmounted whenever it is closed, so this state is
+  /// created again on every open, on the first frame of the slide. When true
+  /// it renders the in-memory snapshot and leaves the refresh to the host's
+  /// [HomeDrawerState.reloadAfterSettle], instead of loading mid-animation.
+  final bool deferInitialLoad;
+
+  /// Presents the existing conversation owner as the app's full-screen home.
+  /// Search, history mutations and running-session status remain shared.
+  final bool homePage;
+
+  /// Kept-alive home tabs refresh their catalog when selected again.
+  final bool active;
+
   @override
   ConsumerState<HomeDrawer> createState() => HomeDrawerState();
 }
 
-class HomeDrawerState extends ConsumerState<HomeDrawer> {
-  bool _showComputerSessions = false;
-  bool _hasOpenedComputerSessions = false;
-  static const double _conversationActionIconSize = 18;
-  /// 抽屉打开时最多预热多少条会话的图片预览（其余按需、行可见时才加载）。
-  static const int _imagePreviewWarmupCount = 16;
+class HomeDrawerState extends ConsumerState<HomeDrawer>
+    with FlClashPageLoadMixin {
   static const Duration _searchDebounceDuration = Duration(milliseconds: 220);
   static const Duration _sectionToggleDuration = Duration(milliseconds: 260);
   static const Duration _imagePreviewStripTransitionDuration = Duration(
     milliseconds: 180,
-  );
-  static const BorderRadius _drawerTrailingActionRadius = BorderRadius.only(
-    topRight: Radius.circular(4),
-    bottomRight: Radius.circular(4),
   );
   static bool _hasConversationSnapshotCache = false;
   static List<ConversationModel> _conversationSnapshotCache =
@@ -167,14 +181,13 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       <String, String>{};
   final Map<String, Set<String>> _conversationImagePreviewFailures =
       <String, Set<String>>{};
-  /// 每条会话上次真正去读消息取缩略图的时间。签名随 updatedAt / messageCount
-  /// 变化，流式输出期间会一直变；没有这个节流，可见行会被反复要求重读整段消息。
-  final Map<String, DateTime> _conversationImagePreviewLoadedAt =
-      <String, DateTime>{};
-  /// 同一条会话两次缩略图重算的最小间隔。
-  static const Duration _imagePreviewReloadInterval = Duration(seconds: 12);
   final Map<String, bool> _expandedConversationSections = <String, bool>{};
   final Set<String> _busyConversationKeys = <String>{};
+  final Set<String> _selectedConversationKeys = <String>{};
+  bool _isSelectingConversations = false;
+  bool _isBatchConversationActionRunning = false;
+  bool _refreshConversationsAfterBatch = false;
+  String? _selectionFeedback;
   final TextEditingController _titleEditingController = TextEditingController();
   final FocusNode _titleEditingFocusNode = FocusNode();
   List<ConversationModel> _allConversations = <ConversationModel>[];
@@ -182,10 +195,18 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       <_ConversationSearchResult>[];
   bool isLoadingConversations = true;
   bool _isSearching = false;
+  bool _homeSearchVisible = false;
+  final _homeMenuRevision = ValueNotifier<int>(0);
+  _HomeConversationFilter _homeFilter = _HomeConversationFilter.xiaowan;
+  AcpAgentCatalog? _homeAgentCatalog;
+  bool _homeRouteWasCurrent = false;
+  AppLifecycleListener? _homeAppLifecycleListener;
+  int _homeCatalogRequest = 0;
   int _conversationLoadGeneration = 0;
   int _searchGeneration = 0;
   Timer? _searchDebounceTimer;
   String? _editingThreadKey;
+  String? _activeContextMenuThreadKey;
   List<ScheduledTask> _scheduledTasks = <ScheduledTask>[];
   // 分组结果缓存：_allConversations/_scheduledTasks 只会被整体替换（不会原地
   // 修改），因此按列表 identity 判断是否需要重算，避免每次 build 重复
@@ -203,11 +224,20 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       ChatConversationRuntimeCoordinator.instance;
   List<OmniPluginActionItem> _webQuickActions = const <OmniPluginActionItem>[];
   String? _busyWebQuickActionKey;
+  Map<String, AgentWebStatus> _webQuickActionStatuses =
+      const <String, AgentWebStatus>{};
 
   @override
   void initState() {
     super.initState();
+    if (widget.homePage) {
+      unawaited(AppUpdateService.initialize());
+      _homeAppLifecycleListener = AppLifecycleListener(
+        onResume: () => unawaited(AppUpdateService.refreshIfNeeded()),
+      );
+    }
     _runtimeCoordinator.ensureInitialized();
+    _activeConversationIds = _runtimeCoordinator.activeAgentConversationIds;
     _runtimeCoordinator.addListener(_handleRuntimeCoordinatorChanged);
     _searchController.addListener(_handleSearchQueryChanged);
     _searchFocusNode.addListener(_handleSearchFocusChanged);
@@ -216,7 +246,26 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _restoreDrawerSnapshotCache();
     _conversationListChangedSubscription = AssistsMessageService
         .conversationListChangedStream
-        .listen((_) {
+        .listen((event) {
+          if (event['reason'] == 'na_history_owner_changed') {
+            setState(() {
+              _selectedConversationKeys.removeAll(
+                _allConversations
+                    .where((row) => row.agentId == 'na-cloud')
+                    .map((row) => row.threadKey),
+              );
+              _allConversations = _allConversations
+                  .where((row) => row.agentId != 'na-cloud')
+                  .toList();
+              _searchGeneration++;
+              _searchResults = _searchResults
+                  .where((result) => result.conversation.agentId != 'na-cloud')
+                  .toList();
+              _conversationSearchCache.clear();
+              _reconcileConversationSelection();
+            });
+            _syncConversationSnapshotCache();
+          }
           unawaited(_loadConversations());
         });
     _sidebarPolicyChangedSubscription = ConversationService
@@ -227,18 +276,44 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _scheduledTasksChangedSubscription = ScheduledTaskStorageService
         .scheduledTasksChangedStream
         .listen(_handleScheduledTasksChanged);
-    AgentRuntimeService.remoteModeEnabled.addListener(_handleRemoteModeChanged);
-    unawaited(_readRemoteMode());
+    // Without a snapshot there is nothing to show; load at once. The host's
+    // open callback runs before this state exists (Scaffold builds the drawer
+    // on the next frame), so the deferred refresh is scheduled here.
+    if (widget.deferInitialLoad &&
+        HomeDrawerState._hasConversationSnapshotCache) {
+      isLoadingConversations = false;
+      reloadAfterSettle();
+      return;
+    }
     _loadConversations();
     unawaited(_loadWebQuickActions());
   }
 
   @override
+  void didUpdateWidget(covariant HomeDrawer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.homePage && widget.active && !oldWidget.active) {
+      unawaited(_loadHomeAgentCatalog());
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!widget.homePage) return;
+    final isCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    if (isCurrent && !_homeRouteWasCurrent) {
+      unawaited(_loadHomeAgentCatalog());
+    }
+    _homeRouteWasCurrent = isCurrent;
+  }
+
+  @override
   void dispose() {
-    AgentRuntimeService.remoteModeEnabled.removeListener(
-      _handleRemoteModeChanged,
-    );
+    _homeMenuRevision.dispose();
+    _homeAppLifecycleListener?.dispose();
     _searchDebounceTimer?.cancel();
+    _settledReloadTimer?.cancel();
     _conversationListChangedSubscription?.cancel();
     _sidebarPolicyChangedSubscription?.cancel();
     _scheduledTasksChangedSubscription?.cancel();
@@ -259,29 +334,19 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     super.dispose();
   }
 
-  Future<void> _readRemoteMode() async {
-    try {
-      await AgentRuntimeService.readRemoteBridgeConfig();
-    } catch (error) {
-      debugPrint('[HomeDrawer] remote mode unavailable: $error');
-    }
-  }
-
-  void _handleRemoteModeChanged() {
-    if (!mounted) return;
-    setState(() {
-      if (!AgentRuntimeService.remoteModeEnabled.value) {
-        _showComputerSessions = false;
-        _hasOpenedComputerSessions = false;
-      }
-    });
-  }
+  /// Conversation ids that show the running dot, as of the last rebuild.
+  Set<int> _activeConversationIds = const <int>{};
 
   void _handleRuntimeCoordinatorChanged() {
     if (!mounted) return;
-    // Runtime state is already canonical; rebuilding is enough. Do not reload
-    // the conversation list or derive a second event state in the drawer.
-    setState(() {});
+    // The coordinator notifies on every streamed snapshot of every runtime
+    // (dozens per second while a reply streams). The drawer reads only which
+    // conversations are running, so rebuild when that set changes; an
+    // unconditional setState rebuilt the whole list per token, including
+    // during the drawer's open and close animations.
+    final active = _runtimeCoordinator.activeAgentConversationIds;
+    if (setEquals(active, _activeConversationIds)) return;
+    setState(() => _activeConversationIds = active);
   }
 
   void _handleScheduledTasksChanged(List<ScheduledTask> tasks) {
@@ -297,16 +362,41 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
   }
 
   void reloadConversations() {
-    AgentRuntimeService.remoteModeEnabled.addListener(_handleRemoteModeChanged);
-    unawaited(_readRemoteMode());
     _loadConversations();
     unawaited(_loadWebQuickActions());
   }
 
-  Future<void> _loadWebQuickActions() async {
+  /// Settle time of the Material drawer (`_kBaseSettleDuration`, 246 ms) with
+  /// a margin, so a refresh never lands inside the open animation.
+  static const Duration drawerSettleDelay = Duration(milliseconds: 320);
+  Timer? _settledReloadTimer;
+
+  /// Refreshes once the open animation has finished. The list already shows
+  /// the in-memory snapshot, so nothing is lost by waiting; refreshing during
+  /// the slide rebuilt every visible row mid-animation and started the
+  /// image-preview history reads, which dropped frames on every open.
+  void reloadAfterSettle() {
+    _settledReloadTimer?.cancel();
+    _settledReloadTimer = Timer(drawerSettleDelay, () {
+      if (mounted) reloadConversations();
+    });
+  }
+
+  /// A drawer closed before it settled must not refresh during its close.
+  void cancelSettledReload() {
+    _settledReloadTimer?.cancel();
+    _settledReloadTimer = null;
+  }
+
+  Future<void> _loadWebQuickActions() =>
+      runPageLoad(#homePluginActions, _readWebQuickActions, revalidate: true);
+
+  Future<void> _readWebQuickActions() async {
     try {
       final actions = await OmniPluginService.listActions();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !pageLoadIsCurrent(#homePluginActions)) {
+        return;
+      }
       final quickActions =
           actions
               .where(
@@ -328,12 +418,42 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
                   : left.displayName.compareTo(right.displayName);
             });
       setState(() => _webQuickActions = quickActions);
+      _homeMenuRevision.value++;
+      unawaited(_refreshWebQuickActionStatuses());
     } catch (error) {
       debugPrint('[HomeDrawer] failed to load Web quick actions: $error');
-      if (mounted && _webQuickActions.isNotEmpty) {
+      if (await waitForPageReady() &&
+          pageLoadIsCurrent(#homePluginActions) &&
+          _webQuickActions.isNotEmpty) {
         setState(() => _webQuickActions = const <OmniPluginActionItem>[]);
+        _homeMenuRevision.value++;
       }
     }
+  }
+
+  /// Probes the managed Web processes behind the quick launch chips so a
+  /// running service is visibly marked and offers a stop affordance.
+  Future<void> _refreshWebQuickActionStatuses() => runPageLoad(
+    #homeWebStatus,
+    _readWebQuickActionStatuses,
+    revalidate: true,
+  );
+
+  Future<void> _readWebQuickActionStatuses() async {
+    final actions = _webQuickActions
+        .where(AgentWebStatusService.supportsLifecycle)
+        .toList(growable: false);
+    if (actions.isEmpty) {
+      if (mounted && _webQuickActionStatuses.isNotEmpty) {
+        setState(
+          () => _webQuickActionStatuses = const <String, AgentWebStatus>{},
+        );
+      }
+      return;
+    }
+    final statuses = await AgentWebStatusService.queryAll(actions);
+    if (!await waitForPageReady() || !pageLoadIsCurrent(#homeWebStatus)) return;
+    setState(() => _webQuickActionStatuses = statuses);
   }
 
   Future<void> _invokeWebQuickAction(OmniPluginActionItem action) async {
@@ -344,6 +464,22 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _maybeCloseDrawer();
     try {
       await AgentWebActionPresenter.invoke(action, english: english);
+      await _refreshWebQuickActionStatuses();
+    } finally {
+      if (mounted && _busyWebQuickActionKey == key) {
+        setState(() => _busyWebQuickActionKey = null);
+      }
+    }
+  }
+
+  Future<void> _stopWebQuickAction(OmniPluginActionItem action) async {
+    if (_busyWebQuickActionKey != null) return;
+    final key = '${action.pluginId}/${action.id}';
+    final english = Localizations.localeOf(context).languageCode == 'en';
+    setState(() => _busyWebQuickActionKey = key);
+    try {
+      await AgentWebActionPresenter.stop(action, english: english);
+      await _refreshWebQuickActionStatuses();
     } finally {
       if (mounted && _busyWebQuickActionKey == key) {
         setState(() => _busyWebQuickActionKey = null);
@@ -355,8 +491,19 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _searchFocusNode.unfocus();
   }
 
+  /// Rebuilds of this drawer, for the frame-budget tests.
+  @visibleForTesting
+  static int debugBuildCount = 0;
+
   @override
   Widget build(BuildContext context) {
+    assert(() {
+      debugBuildCount++;
+      return true;
+    }());
+    if (widget.homePage) {
+      return _buildHomePage();
+    }
     final backgroundColor = _drawerBackgroundColor;
     final content = ColoredBox(
       color: backgroundColor,
@@ -365,82 +512,7 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const SizedBox(height: 16),
-            if (AgentRuntimeService.remoteModeEnabled.value)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: SizedBox(
-                  height: 36,
-                  child: Row(
-                    children: [
-                      for (final computer in [false, true])
-                        Flexible(
-                          child: TextButton(
-                            style: TextButton.styleFrom(
-                              foregroundColor: _showComputerSessions == computer
-                                  ? _drawerTextColor
-                                  : _drawerSecondaryTextColor,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                              ),
-                              minimumSize: const Size(48, 36),
-                              textStyle: TextStyle(
-                                fontSize: 14,
-                                fontWeight: _showComputerSessions == computer
-                                    ? FontWeight.w600
-                                    : FontWeight.w400,
-                              ),
-                            ),
-                            onPressed: () => setState(() {
-                              _showComputerSessions = computer;
-                              if (computer) _hasOpenedComputerSessions = true;
-                            }),
-                            child: Text(
-                              Localizations.localeOf(context).languageCode ==
-                                      'en'
-                                  ? (computer ? 'Computer' : 'This phone')
-                                  : (computer ? '电脑' : '本机'),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ),
-                      const Spacer(),
-                      if (_showComputerSessions)
-                        IconButton(
-                          tooltip:
-                              Localizations.localeOf(context).languageCode ==
-                                  'en'
-                              ? 'Connect computer'
-                              : '连接电脑',
-                          icon: Icon(
-                            Icons.add,
-                            size: 20,
-                            color: _drawerSecondaryTextColor,
-                          ),
-                          onPressed: () =>
-                              _navigateTo('/home/remote_codex_setting'),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            Expanded(
-              child: IndexedStack(
-                index: _showComputerSessions ? 1 : 0,
-                children: [
-                  _buildConversationSection(),
-                  if (_hasOpenedComputerSessions)
-                    AgentSessionsPage(
-                      embedded: true,
-                      remoteOnly: true,
-                      onSessionSelected: _openThreadTarget,
-                    )
-                  else
-                    const SizedBox.shrink(),
-                ],
-              ),
-            ),
-            if (_webQuickActions.isNotEmpty) _buildWebQuickLaunchBar(),
+            Expanded(child: _buildConversationSection()),
             _buildFooterShortcutBar(),
             // Aligns this row's bottom edge with the chat composer's bottom
             // edge (both sit this far above the shared SafeArea bottom).
