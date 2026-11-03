@@ -1,5 +1,8 @@
 package cn.com.omnimind.bot.mcp
 
+import android.os.Build
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
+import cn.com.omnimind.bot.App
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.runtime.withMcpRequestTimeout
 import com.google.gson.Gson
@@ -449,6 +452,9 @@ object RemoteMcpClient {
         onCancelled: (suspend () -> Unit)? = null,
         consume: suspend (Response) -> T,
     ): T {
+        if (Build.VERSION.SDK_INT >= 37) {
+            LocalNetworkPermission.requireForEndpoint(App.instance, request.url.toString())
+        }
         val call = client.newCall(request)
         try {
             return coroutineScope {

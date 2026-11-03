@@ -1,6 +1,9 @@
 package cn.com.omnimind.bot.agent.runtime
 
 import android.content.Context
+import android.os.Build
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
+import cn.com.omnimind.bot.App
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -126,6 +129,9 @@ internal suspend fun fetchAgentProviderModels(
         if (forceRefresh) PlatformAiProvisioner.refreshAndGetModels()
         else PlatformAiProvisioner.ensureReadyAndGetModels()
     } else {
+        if (Build.VERSION.SDK_INT >= 37) {
+            LocalNetworkPermission.requireForEndpoint(App.instance, profile.baseUrl)
+        }
         HttpController.fetchProviderModels(
             apiBase = profile.baseUrl,
             apiKey = profile.apiKey,
@@ -2004,6 +2010,7 @@ class AgentRuntimeManager private constructor(
                 "cwd" to remoteConfig.cwd
             )
         }
+            LocalNetworkPermission.requestForEndpoint(context, remoteConfig.bridgeUrl)
         val probe = probeCodexRemoteBridge(remoteConfig)
         return linkedMapOf(
             "ok" to probe.ready,
@@ -3524,6 +3531,11 @@ class AgentRuntimeManager private constructor(
         ).joinToString("|")
 
     private suspend fun probeRemoteCodex(config: CodexRemoteBridgeConfig): AgentRuntimeProbe {
+        try {
+            LocalNetworkPermission.requireForEndpoint(context, config.bridgeUrl)
+        } catch (error: SecurityException) {
+            return AgentRuntimeProbe(false, null, error.message)
+        }
         val probe = probeCodexRemoteBridge(config)
         return AgentRuntimeProbe(
             ready = probe.ready,

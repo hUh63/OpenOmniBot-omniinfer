@@ -223,7 +223,7 @@ android {
     defaultConfig {
         applicationId = "cn.com.omnimind.bot"
         minSdk = 29
-        targetSdk = 36
+        targetSdk = 37
         // Keep the Android version code monotonic so the APK
         // can be installed as an update over the previously tested build.
         versionCode = 27

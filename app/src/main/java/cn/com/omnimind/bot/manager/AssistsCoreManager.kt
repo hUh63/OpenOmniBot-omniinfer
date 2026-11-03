@@ -1,5 +1,7 @@
 package cn.com.omnimind.bot.manager
 
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
+
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -1664,6 +1666,7 @@ class AssistsCoreManager(private val context: Context) {
                 val apiBase = if (baseUrlArg.isNotEmpty()) baseUrlArg else profile.baseUrl
                 val apiKey = if (useProvidedApiKey) apiKeyArg else profile.apiKey
                 val customHeaders = if (useProvidedCustomHeaders) customHeadersArg else profile.customHeaders
+                LocalNetworkPermission.requestForEndpoint(context, apiBase)
                 val models = HttpController.fetchProviderModels(
                     apiBase = apiBase,
                     apiKey = apiKey,

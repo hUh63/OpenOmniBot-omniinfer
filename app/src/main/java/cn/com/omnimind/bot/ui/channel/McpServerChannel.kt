@@ -3,6 +3,7 @@ package cn.com.omnimind.bot.ui.channel
 import android.content.Context
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.mcp.McpServerManager
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CancellationException
@@ -47,6 +48,8 @@ class McpServerChannel {
                         "setEnabled" -> {
                             val enable = call.argument<Boolean>("enable") ?: false
                             val port = call.argument<Int>("port")
+                            // Android 17 起监听局域网需要 ACCESS_LOCAL_NETWORK，开启前先申请。
+                            if (enable) LocalNetworkPermission.requestForServer(context)
                             val state = McpServerManager.setEnabled(context, enable, port)
                             respondSuccess(result, state.toMap())
                         }

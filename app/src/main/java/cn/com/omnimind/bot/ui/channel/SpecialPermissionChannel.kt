@@ -169,6 +169,12 @@ class SpecialPermissionChannel {
                         .isNotificationPermissionGranted(result)
                     "requestNotificationPermission" -> specialPermissionManager!!
                         .requestNotificationPermission(result)
+                    "isLocalNetworkPermissionGranted" -> specialPermissionManager!!
+                        .isLocalNetworkPermissionGranted(result)
+                    "getLocalNetworkPermissionStatus" -> specialPermissionManager!!
+                        .getLocalNetworkPermissionStatus(result)
+                    "requestLocalNetworkPermission" -> specialPermissionManager!!
+                        .requestLocalNetworkPermission(result)
                     "isWorkspaceStorageAccessGranted" -> specialPermissionManager!!
                         .isWorkspaceStorageAccessGranted(result)
                     "openWorkspaceStorageSettings" -> specialPermissionManager!!
