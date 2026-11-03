@@ -1,4 +1,4 @@
-import 'package:ui/widgets/predictive_back_route.dart';
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_switch/flutter_switch.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -194,7 +194,7 @@ class MyPageState extends State<MyPage> {
                   onTap: () {
                     Navigator.push(
                       context,
-                      PredictiveBackMaterialPageRoute(
+                      OmniPageRoute(
                         builder: (context) => EditProfilePage(
                           initialAvatarIndex: avatarIndex,
                           initialNickname: displayName,

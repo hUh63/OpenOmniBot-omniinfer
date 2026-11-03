@@ -1,3 +1,4 @@
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -290,7 +291,7 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
     if (!mounted) return;
     FocusManager.instance.primaryFocus?.unfocus();
     final tourCompleted = await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
+      OmniPageRoute<bool>(
         builder: (_) => const ChatPage(showFirstUseTour: true),
         settings: const RouteSettings(name: 'first-use-chat-spotlight-tour'),
       ),

@@ -12,9 +12,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
+import top.yukonga.miuix.kmp.nav.core.NavController
+import top.yukonga.miuix.kmp.nav.core.NavDisplay
 import com.rk.settings.Settings
 import com.rk.terminal.ui.activities.terminal.MainActivity
 import com.rk.terminal.ui.routes.MainActivityRoutes
@@ -65,16 +64,15 @@ fun UpdateStatusBar(mainActivityActivity: MainActivity,show: Boolean = true){
 @Composable
 fun MainActivityNavHost(
     modifier: Modifier = Modifier,
-    navController: NavHostController,
+    navController: NavController,
     mainActivity: MainActivity,
 ) {
-    // Navigation Compose owns the back stack, transitions and system back.
-    NavHost(
+    // The native host owns navigation and uses the installed Miuix defaults.
+    NavDisplay(
         navController = navController,
-        startDestination = MainActivityRoutes.MainScreen,
         modifier = modifier.background(MaterialTheme.colorScheme.background),
     ) {
-        composable<MainActivityRoutes.MainScreen> {
+        entry<MainActivityRoutes.MainScreen> {
             if (Rootfs.isDownloaded.value) {
                 val config = LocalConfiguration.current
                 if (Configuration.ORIENTATION_LANDSCAPE == config.orientation) {
@@ -87,11 +85,11 @@ fun MainActivityNavHost(
                 Downloader(mainActivity = mainActivity, navController = navController)
             }
         }
-        composable<MainActivityRoutes.Settings> {
+        entry<MainActivityRoutes.Settings> {
             UpdateStatusBar(mainActivity, show = true)
             Settings(navController = navController, mainActivity = mainActivity)
         }
-        composable<MainActivityRoutes.Customization> {
+        entry<MainActivityRoutes.Customization> {
             UpdateStatusBar(mainActivity, show = true)
             Customization()
         }

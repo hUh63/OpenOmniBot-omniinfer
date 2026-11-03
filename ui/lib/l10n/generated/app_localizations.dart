@@ -410,18 +410,6 @@ abstract class AppLocalizations {
   /// **'开启后，聊天页键盘回车为换行；关闭后，回车直接发送'**
   String get settingsIndependentSendButtonSubtitle;
 
-  /// No description provided for @settingsPredictiveBackTitle.
-  ///
-  /// In zh, this message translates to:
-  /// **'预测性返回手势'**
-  String get settingsPredictiveBackTitle;
-
-  /// No description provided for @settingsPredictiveBackSubtitle.
-  ///
-  /// In zh, this message translates to:
-  /// **'开启后，返回手势可跟随手指预览上一页面或桌面；关闭则保持旧版返回行为'**
-  String get settingsPredictiveBackSubtitle;
-
   /// No description provided for @settingsHabitualHandTitle.
   ///
   /// In zh, this message translates to:

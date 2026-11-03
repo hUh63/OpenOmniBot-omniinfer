@@ -1,27 +1,24 @@
 import 'dart:async';
-import 'notification_access_page.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_switch/flutter_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/mcp_server_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/services/workspace_memory_service.dart';
-import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
-import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/omni_root_toolbar.dart';
+import 'package:ui/widgets/navigation/open_container.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:ui/widgets/settings_detail_sheet.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({
-    super.key,
-    this.embedded = false,
-    this.active = true,
-  });
+  const SettingsPage({super.key, this.embedded = false, this.active = true});
 
   final bool embedded;
   final bool active;
@@ -30,7 +27,7 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
   bool _mcpEnabled = false;
   bool _mcpBusy = false;
   McpServerInfo? _mcpInfo;
@@ -50,10 +47,22 @@ class _SettingsPageState extends State<SettingsPage> {
     _loadWorkspaceMemoryState();
   }
 
-  Future<void> _loadMcpServerState() async {
+  @override
+  void didUpdateWidget(SettingsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) {
+      _loadMcpServerState();
+      _loadWorkspaceMemoryState();
+    }
+  }
+
+  Future<void> _loadMcpServerState() =>
+      runPageLoad(#mcpState, _readMcpServerState, revalidate: true);
+
+  Future<void> _readMcpServerState() async {
     try {
       final info = await McpServerService.getState();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !pageLoadIsCurrent(#mcpState)) return;
       final enabled = info?.enabled == true;
       setState(() {
         _mcpInfo = info;
@@ -69,13 +78,22 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _loadWorkspaceMemoryState() async {
+  Future<void> _loadWorkspaceMemoryState() => runPageLoad(
+    #workspaceMemoryState,
+    _readWorkspaceMemoryState,
+    revalidate: true,
+  );
+
+  Future<void> _readWorkspaceMemoryState() async {
     try {
       final results = await Future.wait([
         WorkspaceMemoryService.getEmbeddingConfig(),
         WorkspaceMemoryService.getRollupStatus(),
       ]);
-      if (!mounted) return;
+      if (!await waitForPageReady() ||
+          !pageLoadIsCurrent(#workspaceMemoryState)) {
+        return;
+      }
       final config = results[0] as WorkspaceMemoryEmbeddingConfig;
       setState(() {
         _workspaceMemoryConfigured = config.configured;
@@ -158,15 +176,35 @@ class _SettingsPageState extends State<SettingsPage> {
       builder: (sheetContext) {
         final sheetPalette = sheetContext.omniPalette;
         final labelStyle = TextStyle(
-          fontSize: 13,
+          fontSize: 12,
           fontWeight: FontWeight.w500,
-          color: sheetPalette.textSecondary,
+          color: sheetPalette.textTertiary,
         );
         final valueStyle = TextStyle(
           fontSize: 13,
           color: sheetPalette.textPrimary,
+          height: 1.4,
         );
         final actionStyle = settingsDetailSheetActionStyle(sheetContext);
+
+        Widget buildInfoBox(String label, String value) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: sheetPalette.surfaceSecondary,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: labelStyle),
+                const SizedBox(height: 4),
+                SelectableText(value, style: valueStyle),
+              ],
+            ),
+          );
+        }
 
         return SettingsDetailSheet(
           key: const ValueKey('local-service-sheet'),
@@ -175,13 +213,11 @@ class _SettingsPageState extends State<SettingsPage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(l10n.settingsMcpAddress, style: labelStyle),
-              SelectableText(info.endpoint, style: valueStyle),
+              buildInfoBox(l10n.settingsMcpAddress, info.endpoint),
               const SizedBox(height: 8),
-              Text(l10n.settingsMcpToken, style: labelStyle),
-              SelectableText(
+              buildInfoBox(
+                l10n.settingsMcpToken,
                 info.token.isEmpty ? l10n.settingsNotGenerated : info.token,
-                style: valueStyle,
               ),
             ],
           ),
@@ -245,20 +281,26 @@ class _SettingsPageState extends State<SettingsPage> {
 
     return Scaffold(
       backgroundColor: palette.pageBackground,
-      appBar: CommonAppBar(title: context.l10n.settingsTitle, primary: true),
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: ListView.separated(
-          padding: edgeToEdgeScrollPadding(
-            context,
-            const EdgeInsets.fromLTRB(18, 10, 18, 28),
+      appBar: OmniRootToolbar(
+        title: context.l10n.settingsTitle,
+        primary: true,
+        showBackButton: !widget.embedded,
+      ),
+      body: OmniContentWidth(
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: ListView.separated(
+            padding: edgeToEdgeScrollPadding(
+              context,
+              const EdgeInsets.fromLTRB(22, 10, 22, 32),
+            ),
+            itemCount: sections.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 26),
+            itemBuilder: (context, index) {
+              return _buildSettingsSection(sections[index]);
+            },
           ),
-          itemCount: sections.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 24),
-          itemBuilder: (context, index) {
-            return _buildSettingsSection(sections[index]);
-          },
         ),
       ),
     );
@@ -269,6 +311,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return [
       _SettingSection(
         label: isEnglish ? 'Account' : '账号',
+        isAccount: true,
         items: [
           _SettingItem(
             icon: LucideIcons.userRoundCog,
@@ -276,9 +319,7 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: isEnglish
                 ? 'Sign in, view platform quota'
                 : '注册登录、查看平台额度',
-            onTap: () {
-              GoRouterManager.push('/my/account');
-            },
+            route: '/my/account',
           ),
         ],
       ),
@@ -289,28 +330,23 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: LucideIcons.box,
             title: context.l10n.settingsModelProviderTitle,
             subtitle: context.l10n.settingsModelProviderSubtitle,
-            onTap: () {
-              GoRouterManager.push('/home/model_provider_setting');
-            },
+            route: '/home/model_provider_setting',
           ),
           _SettingItem(
             icon: LucideIcons.fileBox,
             title: context.l10n.settingsSceneModelTitle,
             subtitle: context.l10n.settingsSceneModelSubtitle,
-            onTap: () {
-              GoRouterManager.push('/home/scene_model_setting');
-            },
+            route: '/home/scene_model_setting',
           ),
           _SettingItem(
             icon: LucideIcons.database,
             title: context.l10n.settingsWorkspaceMemoryTitle,
             subtitle: workspaceMemorySubtitle,
-            onTap: () async {
-              await GoRouterManager.pushForResult(
-                '/home/workspace_memory_setting',
-              );
-              _loadWorkspaceMemoryState();
-            },
+            trailingText: _workspaceMemoryConfigured
+                ? (isEnglish ? 'Configured' : '已配置')
+                : null,
+            route: '/home/workspace_memory_setting',
+            onReturned: _loadWorkspaceMemoryState,
           ),
         ],
       ),
@@ -318,37 +354,24 @@ class _SettingsPageState extends State<SettingsPage> {
         label: context.l10n.settingsSectionServiceEnvironment,
         items: [
           _SettingItem(
-            icon: LucideIcons.bot,
-            title: context.trLegacy('Agent 模式'),
-            subtitle: context.trLegacy('管理 ACP Agent、可用状态与统一模型绑定'),
-            onTap: () {
-              GoRouterManager.push('/home/agent_mode_setting');
-            },
-          ),
-          _SettingItem(
-            icon: LucideIcons.messageCircle,
-            title: isEnglish ? 'iMessage channel' : 'iMessage 渠道',
+            icon: LucideIcons.wrench,
+            title: isEnglish ? 'Tools' : '工具',
             subtitle: isEnglish
-                ? 'Telegram / WeChat channel service'
-                : 'Telegram / 微信渠道服务',
-            onTap: () {
-              GoRouterManager.push('/home/imessage_setting');
-            },
+                ? 'Explore tools available to agents'
+                : '查看 Agent 可调用的工具',
+            route: '/home/tools',
           ),
           _SettingItem(
             icon: LucideIcons.squareTerminal,
-            iconColor: AppColors.buttonPrimary,
             title: context.l10n.settingsAlpineTitle,
             subtitle: context.l10n.settingsAlpineSubtitle,
-            onTap: () {
-              GoRouterManager.push('/home/termux_setting');
-            },
+            route: '/home/termux_setting',
           ),
           _SettingItem(
             icon: LucideIcons.monitorSmartphone,
             title: context.l10n.settingsLocalServiceTitle,
             subtitle: context.l10n.settingsLocalServiceSubtitle,
-            trailing: _buildSwitchTrailing(
+            trailing: OmniSettingsSwitch(
               value: _mcpEnabled,
               enabled: !_mcpBusy,
               onToggle: (val) async {
@@ -361,9 +384,7 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: LucideIcons.hammer,
             title: context.l10n.settingsMcpToolsTitle,
             subtitle: context.l10n.settingsMcpToolsSubtitle,
-            onTap: () {
-              GoRouterManager.push('/home/mcp_tools');
-            },
+            route: '/home/mcp_tools',
           ),
         ],
       ),
@@ -374,17 +395,13 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: LucideIcons.palette,
             title: context.l10n.settingsAppearanceTitle,
             subtitle: context.l10n.settingsAppearanceSubtitle,
-            onTap: () {
-              GoRouterManager.push('/home/background_setting');
-            },
+            route: '/home/background_setting',
           ),
           _SettingItem(
             icon: LucideIcons.settings2,
             title: context.trLegacy('杂项'),
             subtitle: context.trLegacy('首页、后台隐藏、闹钟、振动与打开方式'),
-            onTap: () {
-              GoRouterManager.push('/home/experience_misc_setting');
-            },
+            route: '/home/experience_misc_setting',
           ),
         ],
       ),
@@ -395,42 +412,18 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: LucideIcons.shieldCheck,
             title: context.l10n.authorizePageTitle,
             subtitle: context.trLegacy('查看并配置悬浮窗、后台运行、Shizuku 等权限'),
-            onTap: () {
-              GoRouterManager.push('/home/authorize_setting');
-            },
-          ),
-          _SettingItem(
-            icon: LucideIcons.shieldCheck,
-            title: isEnglish ? 'Companion permissions' : '陪伴权限授权',
-            subtitle: isEnglish
-                ? 'Manage authorized apps for the companion'
-                : '管理陪伴可操作的应用授权',
-            onTap: () {
-              GoRouterManager.push('/home/companion_setting');
-            },
-          ),
-          _SettingItem(
-            icon: LucideIcons.bell,
-            title: context.trLegacy('通知访问'),
-            subtitle: context.trLegacy('选择允许小万读取通知的应用'),
-            onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
-              builder: (_) => const NotificationAccessPage(),
-            )),
+            route: '/home/authorize_setting',
           ),
           _SettingItem(
             icon: LucideIcons.hardDrive,
             title: context.l10n.storageUsageTitle,
             subtitle: context.l10n.storageUsageSubtitle,
-            onTap: () {
-              GoRouterManager.push('/home/storage_usage');
-            },
+            route: '/home/storage_usage',
           ),
           _SettingItem(
             icon: LucideIcons.info,
             title: context.l10n.settingsAboutTitle,
-            onTap: () {
-              GoRouterManager.push('/my/about');
-            },
+            route: '/my/about',
           ),
         ],
       ),
@@ -438,152 +431,58 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _buildSettingsSection(_SettingSection section) {
-    final palette = context.omniPalette;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return OmniSettingsGroup(
+      title: section.isAccount ? null : section.label,
+      translateTitle: false,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
-          child: Text(
-            context.trLegacy(section.label),
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.6,
-              color: palette.textTertiary,
-              fontFamily: 'PingFang SC',
-            ),
-          ),
-        ),
-        Column(
-          children: List.generate(section.items.length, (index) {
-            final isLast = index == section.items.length - 1;
-            return Column(
-              children: [
-                _buildSettingTile(section.items[index], isLast: isLast),
-                if (!isLast)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 30),
-                    child: Divider(
-                      height: 1,
-                      thickness: 1,
-                      color: palette.borderSubtle.withValues(
-                        alpha: context.isDarkTheme ? 0.5 : 0.78,
-                      ),
-                    ),
-                  ),
-              ],
-            );
-          }),
-        ),
+        for (final item in section.items) _buildSettingsItem(item, section),
       ],
     );
   }
 
-  Widget _buildSettingTile(_SettingItem item, {required bool isLast}) {
-    final palette = context.omniPalette;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: item.onTap,
-        borderRadius: BorderRadius.circular(14),
-        splashColor: palette.accentPrimary.withValues(alpha: 0.08),
-        highlightColor: Colors.transparent,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(4, 14, 2, isLast ? 14 : 13),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              _buildLeadingIcon(item),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      context.trLegacy(item.title),
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: palette.textPrimary,
-                        height: 1.5,
-                        fontFamily: 'PingFang SC',
-                      ),
-                    ),
-                    if (item.subtitle != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        context.trLegacy(item.subtitle!),
-                        style: TextStyle(
-                          color: palette.textSecondary,
-                          fontSize: 11,
-                          fontFamily: 'PingFang SC',
-                          fontWeight: FontWeight.w400,
-                          height: 1.55,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (item.trailing != null)
-                item.trailing!
-              else if (item.onTap != null)
-                Padding(
-                  padding: const EdgeInsets.only(left: 12),
-                  child: Icon(
-                    LucideIcons.chevronRight,
-                    size: 18,
-                    color: palette.textTertiary,
-                  ),
-                ),
-            ],
-          ),
+  Widget _buildSettingsItem(_SettingItem item, _SettingSection section) {
+    Widget buildTile(VoidCallback? onTap) => Semantics(
+      hint: item.subtitle,
+      child: OmniSettingsTile(
+        icon: item.icon,
+        title: item.title,
+        trailingText: item.trailingText,
+        trailing: item.trailing,
+        onTap: onTap,
+        translateText: false,
+        padding: EdgeInsets.symmetric(
+          horizontal: 18,
+          vertical: section.isAccount ? 22 : 16,
         ),
       ),
     );
-  }
-
-  Widget _buildLeadingIcon(_SettingItem item) {
-    final palette = context.omniPalette;
-    final iconColor = item.iconColor ?? palette.textPrimary;
-    return SizedBox(
-      width: 18,
-      height: 18,
-      child: item.icon != null
-          ? Icon(item.icon, size: 18, color: iconColor)
-          : const SizedBox.shrink(),
-    );
-  }
-
-  Widget _buildSwitchTrailing({
-    required bool value,
-    required ValueChanged<bool> onToggle,
-    bool enabled = true,
-  }) {
-    final palette = context.omniPalette;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: enabled ? () => onToggle(!value) : null,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 12),
-        child: AbsorbPointer(
-          child: Opacity(
-            opacity: enabled ? 1 : 0.5,
-            child: FlutterSwitch(
-              width: 32,
-              height: 18.67,
-              toggleSize: 11.3,
-              padding: 3,
-              activeColor: palette.accentPrimary,
-              inactiveColor: palette.borderStrong,
-              borderRadius: 28.75,
-              value: value,
-              onToggle: onToggle,
-            ),
-          ),
-        ),
+    final route = item.route;
+    if (route == null) return buildTile(item.onTap);
+    // Carry the row surface and group corners into the destination; the
+    // parent OmniSettingsGroup stays behind. Keep the container defaults:
+    // the expanding rectangle has page color, with the shaped row inside it.
+    final index = section.items.indexOf(item);
+    final rowShape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(
+        top: index == 0 ? const Radius.circular(22) : Radius.zero,
+        bottom: index == section.items.length - 1
+            ? const Radius.circular(22)
+            : Radius.zero,
       ),
+    );
+    return OmniOpenContainer(
+      key: ValueKey('settings-open-$route'),
+      closedBuilder: (rowContext, open) => Material(
+        color: rowContext.omniPalette.surfacePrimary,
+        shape: rowShape,
+        clipBehavior: Clip.antiAlias,
+        child: buildTile(open),
+      ),
+      onOpen: (source) => GoRouterManager.pushForResult<Object?>(
+        route,
+        extra: {omniContainerExtraKey: source},
+      ),
+      onClosed: (_) => item.onReturned?.call(),
     );
   }
 }
@@ -591,24 +490,33 @@ class _SettingsPageState extends State<SettingsPage> {
 class _SettingSection {
   final String label;
   final List<_SettingItem> items;
+  final bool isAccount;
 
-  const _SettingSection({required this.label, required this.items});
+  const _SettingSection({
+    required this.label,
+    required this.items,
+    this.isAccount = false,
+  });
 }
 
 class _SettingItem {
   final IconData? icon;
-  final Color? iconColor;
   final String title;
   final String? subtitle;
+  final String? trailingText;
   final Widget? trailing;
   final VoidCallback? onTap;
+  final String? route;
+  final VoidCallback? onReturned;
 
   const _SettingItem({
     this.icon,
-    this.iconColor,
     required this.title,
     this.subtitle,
+    this.trailingText,
     this.trailing,
     this.onTap,
+    this.route,
+    this.onReturned,
   });
 }

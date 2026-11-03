@@ -9,7 +9,7 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 
-import '../navigation/route_activation.dart';
+import 'package:ui/widgets/navigation/route_activation.dart';
 
 /// The tab animation is the single owner of this UI scheduling boundary.
 /// No timer estimates its duration, and unrequested tabs are never warmed.

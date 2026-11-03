@@ -1,16 +1,20 @@
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 import 'dart:typed_data';
+
 import 'package:dotted_border/dotted_border.dart';
 import 'package:flutter/material.dart';
 import 'package:ui/features/home/pages/omnibot_workspace/omnibot_artifact_preview_page.dart';
+import 'package:ui/features/home/pages/agent/codex_remote_file_preview_page.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/chat_link_preview.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/widgets/image_preview_overlay.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
 import '../../../../../models/chat_message_model.dart';
 import '../../../../../services/app_background_service.dart';
 import '../../../../../services/voice_playback_coordinator.dart';
@@ -18,7 +22,10 @@ import '../../../../../services/voice_playback_channel_service.dart';
 import '../../../../../theme/theme_context.dart';
 import '../../../../../widgets/streaming_text.dart';
 import 'thinking_dots_indicator.dart';
+import 'na_attachment_preview.dart';
+import 'history_payload_attachments.dart';
 import 'cards/card_widget_factory.dart';
+
 import 'package:flutter_svg/flutter_svg.dart';
 
 export 'package:ui/widgets/streaming_text.dart'
@@ -118,9 +125,7 @@ class MessageBubble extends StatelessWidget {
     if (!_usesThemeDrivenText()) {
       return visualProfile.userBubbleColor;
     }
-    return context.isDarkTheme
-        ? context.omniPalette.surfaceSecondary
-        : visualProfile.userBubbleColor;
+    return context.omniPalette.surfaceElevated;
   }
 
   Color _resolvedAttachmentSurfaceColor(BuildContext context) {
@@ -202,7 +207,13 @@ class MessageBubble extends StatelessWidget {
         return _buildTextMessage(context, isUserMessage);
 
       case 2: // 卡片消息
-        return _buildCardMessage(context);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildCardMessage(context),
+            HistoryPayloadAttachments(message: message),
+          ],
+        );
 
       default:
         return _buildTextMessage(context, isUserMessage);
@@ -219,7 +230,7 @@ class MessageBubble extends StatelessWidget {
       // 用户消息：整块气泡长按触发快捷操作。
       return LayoutBuilder(
         builder: (context, constraints) {
-          final fallbackMaxWidth = MediaQuery.of(context).size.width * 0.75;
+          final fallbackMaxWidth = MediaQuery.sizeOf(context).width * 0.75;
           final availableWidth = constraints.maxWidth.isFinite
               ? constraints.maxWidth
               : fallbackMaxWidth;
@@ -232,11 +243,11 @@ class MessageBubble extends StatelessWidget {
             child: Container(
               key: ValueKey('user-message-bubble-${message.id}'),
               constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: ShapeDecoration(
                 color: _resolvedUserBubbleColor(context),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(16),
                 ),
               ),
               child: Column(
@@ -322,9 +333,6 @@ class MessageBubble extends StatelessWidget {
   ) {
     // Collect all image sources for multi-image preview
     final imageAttachments = attachments.where(_isImageAttachment).toList();
-    final imageIndexByItem = <Map<String, dynamic>, int>{
-      for (var i = 0; i < imageAttachments.length; i++) imageAttachments[i]: i,
-    };
     final imageSources = imageAttachments
         .map(_resolveImageSource)
         .whereType<ImagePreviewSource>()
@@ -338,11 +346,34 @@ class MessageBubble extends StatelessWidget {
       spacing: 8,
       runSpacing: 8,
       children: attachments.map((item) {
+        if (item['historyPayloadOffloaded'] == true) {
+          return HistoryPayloadAttachment(attachment: item);
+        }
+        if (item['source'] == 'na-cloud') {
+          return GestureDetector(
+            onTap: item['deleted'] == true
+                ? null
+                : () {
+                    Navigator.of(context).push(
+                      OmniPageRoute<void>(
+                        builder: (_) => CodexRemoteFilePreviewPage(
+                          agentId: 'na-cloud',
+                          sessionId: item['sessionId'] as String?,
+                          path: item['path'] as String,
+                          title: item['name'] as String?,
+                          remoteCwd: '/workspace',
+                        ),
+                      ),
+                    );
+                  },
+            child: NaAttachmentPreview(
+              attachment: item,
+              child: _buildFileAttachmentChip(context, item),
+            ),
+          );
+        }
         if (_isImageAttachment(item)) {
-          // 逐项 indexOf 是线性查找 → 整个 Wrap 变成 O(n²)。Map 的 == 是
-          // 同一性比较，这里元素就是 imageAttachments 里的同一实例，可直接查表。
-          final imageIndex = imageIndexByItem[item];
-          if (imageIndex == null) return _buildFileAttachmentChip(context, item);
+          final imageIndex = imageAttachments.indexOf(item);
           return _buildImageAttachmentTile(
             context,
             item,
@@ -481,7 +512,11 @@ class MessageBubble extends StatelessWidget {
     Map<String, dynamic> item,
   ) {
     final displayName = _resolveAttachmentDisplayName(item);
-    final sizeText = _formatAttachmentSize(item['size']);
+    final sizeText = item['deleted'] == true
+        ? (Localizations.localeOf(context).languageCode == 'en'
+              ? 'Deleted'
+              : '已删除')
+        : _formatAttachmentSize(item['size']);
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 220, minHeight: 40),
@@ -966,19 +1001,17 @@ class MessageBubble extends StatelessWidget {
       style: TextStyle(
         color: _resolvedUserPrimaryTextColor(context),
         fontSize: _chatTextSize,
-        fontFamily: 'PingFang SC',
         fontWeight: FontWeight.w400,
         height: 1.43,
         letterSpacing: 0.33,
       ),
       textAlign: TextAlign.left,
     );
-    if (onEditTap == null) {
+    if (onEditTap == null || message.isHistoryPayloadOffloaded) {
       return textWidget;
     }
-    final underlineColor = _resolvedUserPrimaryTextColor(
-      context,
-    ).withValues(alpha: 0.52);
+    final underlineColor = _resolvedUserPrimaryTextColor(context)
+        .withValues(alpha: 0.52);
     return Semantics(
       button: true,
       label: context.trLegacy('编辑消息'),
@@ -1116,9 +1149,8 @@ class MessageBubble extends StatelessWidget {
             '${speed.toStringAsFixed(1)} tok/s',
             style: TextStyle(
               fontSize: 11,
-              color: _resolvedAiSecondaryTextColor(
-                context,
-              ).withValues(alpha: 0.6),
+              color: _resolvedAiSecondaryTextColor(context)
+                  .withValues(alpha: 0.6),
               fontWeight: FontWeight.w400,
             ),
           ),
@@ -1270,7 +1302,10 @@ class MessageBubble extends StatelessWidget {
         .toString()
         .trim();
     final retryable = message.content?['agentRetryable'] == true;
-    final showRetryButton = retryable && onRetryAgentMessage != null;
+    final showRetryButton =
+        retryable &&
+        !message.isHistoryPayloadOffloaded &&
+        onRetryAgentMessage != null;
     final showErrorText = errorText.isNotEmpty && errorText != text.trim();
     if (!showErrorText && !showRetryButton) {
       return null;
@@ -1323,9 +1358,8 @@ class MessageBubble extends StatelessWidget {
     final durationMs = _readIntValue(usage['durationMs']);
     final hasUsage = input != null || output != null || cache != null;
     if (!hasUsage && endedAt == null) return null;
-    final textColor = _resolvedAiSecondaryTextColor(
-      context,
-    ).withValues(alpha: 0.72);
+    final textColor = _resolvedAiSecondaryTextColor(context)
+        .withValues(alpha: 0.72);
     final ended = endedAt == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(endedAt).toLocal();

@@ -185,13 +185,6 @@ class AppLocalizationsEn extends AppLocalizations {
       'When enabled, Enter creates a new line; when disabled, Enter sends the message directly';
 
   @override
-  String get settingsPredictiveBackTitle => 'Predictive Back Gesture';
-
-  @override
-  String get settingsPredictiveBackSubtitle =>
-      'When enabled, the back gesture follows your finger to preview the previous page or home screen; when disabled, the legacy back behavior is kept';
-
-  @override
   String get settingsHabitualHandTitle => 'Dominant Hand';
 
   @override

@@ -1,10 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart' show MaterialPage;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:ui/features/home/pages/chat/chat_page.dart';
+import 'package:ui/features/home/pages/main_navigation_page.dart';
 
+import 'conversation_route_target.dart';
 import 'go_router_config.dart';
 
 import 'package:flutter/foundation.dart';
@@ -14,7 +16,8 @@ import 'logging_observer.dart';
 import 'package:ui/services/method_channel_service.dart';
 import 'package:ui/constants/storage_keys.dart';
 import 'package:ui/services/storage_service.dart';
-import 'package:ui/widgets/predictive_back_route.dart';
+import 'package:ui/widgets/navigation/page_route.dart';
+import 'package:ui/widgets/navigation/open_container.dart';
 
 class RouteOptions {
   final bool noAnim;
@@ -33,8 +36,8 @@ class RouteOptions {
 
 /// GoRouter路由管理器
 class GoRouterManager {
-  // 首页是 MainNavigationPage（会话/助手/轨迹/设置四 tab）；聊天页改为 push 打开。
   static const String homeRoute = '/home/home';
+  static const String chatRoute = '/home/chat';
   static final GlobalKey<NavigatorState> _rootNavigatorKey =
       GlobalKey<NavigatorState>();
   static final GlobalKey<NavigatorState> _shellNavigatorKey =
@@ -86,10 +89,10 @@ class GoRouterManager {
     return (options: options, data: map.isEmpty ? null : map);
   }
 
-  static Page<dynamic> _buildPage({
+  static Page<dynamic> buildPage({
     required LocalKey key,
     required Widget child,
-    required RouteOptions options,
+    RouteOptions options = const RouteOptions(),
     String? name,
   }) {
     if (options.noAnim) {
@@ -104,37 +107,8 @@ class GoRouterManager {
         },
       );
     } else {
-      return PredictiveBackPage(
-        key: key,
-        child: child,
-        name: name,
-        fallbackBuilder: (context, animation, secondaryAnimation, child) =>
-            FadeTransition(opacity: animation, child: child),
-      );
+      return OmniPage(key: key, name: name, child: child);
     }
-  }
-
-  /// Overlay-style stack transition:
-  /// the incoming page stays above the previous page and covers it while
-  /// sliding in, and slides out above it on pop.
-  static Page<dynamic> buildActivitySlidePage({
-    required LocalKey key,
-    required Widget child,
-    String? name,
-  }) {
-    return PredictiveBackPage(
-      key: key,
-      child: child,
-      name: name,
-      fallbackDuration: const Duration(milliseconds: 300),
-      fallbackBuilder: (context, animation, secondaryAnimation, child) =>
-          CupertinoPageTransition(
-            primaryRouteAnimation: animation,
-            secondaryRouteAnimation: secondaryAnimation,
-            linearTransition: false,
-            child: child,
-          ),
-    );
   }
 
   static GoRoute _wrapRoute(GoRoute route) {
@@ -147,17 +121,39 @@ class GoRouterManager {
           .toList(),
       pageBuilder: (context, state) {
         final parsed = _parseExtra(state.extra);
+        final source = parsed.data is Map
+            ? (parsed.data as Map)[omniContainerExtraKey]
+            : null;
 
         Widget child;
         if (route.builder != null) {
           child = route.builder!(context, state);
         } else if (route.pageBuilder != null) {
-          return route.pageBuilder!(context, state);
+          final page = route.pageBuilder!(context, state);
+          if (source is! OmniContainerSource) return page;
+          // Preserve each destination's existing route builder. The source
+          // supplies presentation geometry, never a second navigation stack.
+          final content = switch (page) {
+            OmniPage page => page.child,
+            CustomTransitionPage page => page.child,
+            MaterialPage page => page.child,
+            CupertinoPage page => page.child,
+            _ => null,
+          };
+          if (content == null) return page;
+          child = content;
         } else {
           child = const SizedBox.shrink();
         }
 
-        return _buildPage(
+        if (source is OmniContainerSource && !parsed.options.noAnim) {
+          return source.createPage(
+            key: state.pageKey,
+            name: route.name,
+            child: child,
+          );
+        }
+        return buildPage(
           key: state.pageKey,
           child: child,
           options: parsed.options,
@@ -229,8 +225,8 @@ class GoRouterManager {
             final parsed = _parseExtra(state.extra);
             final child = _isSubEngine
                 ? const SizedBox.shrink()
-                : const ChatPage();
-            return _buildPage(
+                : const MainNavigationPage();
+            return buildPage(
               key: state.pageKey,
               child: child,
               options: parsed.options,
@@ -284,8 +280,9 @@ class GoRouterManager {
     print('[GoRouterManager] go 调用堆栈: ${StackTrace.current}');
     final context = _rootNavigatorKey.currentContext;
     if (context != null) {
-      final finalRoute = _normalizeHomeRoute(
+      final finalRoute = resolveHomeRoute(
         _buildRouteWithQueryParams(route, queryParams),
+        extra: extra,
       );
       final wrappedExtra = _wrapExtra(extra, options ?? const RouteOptions());
       GoRouter.of(context).go(finalRoute, extra: wrappedExtra);
@@ -304,8 +301,9 @@ class GoRouterManager {
     print('[GoRouterManager] clearAndNavigateTo 调用堆栈: ${StackTrace.current}');
     final context = _rootNavigatorKey.currentContext;
     if (context != null) {
-      final finalRoute = _normalizeHomeRoute(
+      final finalRoute = resolveHomeRoute(
         _buildRouteWithQueryParams(route, queryParams),
+        extra: extra,
       );
       final wrappedExtra = _wrapExtra(extra, options ?? const RouteOptions());
       GoRouter.of(context).go(finalRoute, extra: wrappedExtra);
@@ -324,12 +322,13 @@ class GoRouterManager {
     );
     print('[GoRouterManager] push context: $context');
     if (context != null) {
-      final finalRoute = _normalizeHomeRoute(
+      final finalRoute = resolveHomeRoute(
         _buildRouteWithQueryParams(route, queryParams),
+        extra: extra,
       );
       final wrappedExtra = _wrapExtra(extra, options ?? const RouteOptions());
-      if (_isHomeChatRoute(finalRoute)) {
-        GoRouter.of(context).go(finalRoute, extra: wrappedExtra);
+      if (Uri.parse(finalRoute).path == chatRoute) {
+        _pushChatDestination(GoRouter.of(context), finalRoute, wrappedExtra);
         return;
       }
       GoRouter.of(context).push(finalRoute, extra: wrappedExtra);
@@ -349,10 +348,18 @@ class GoRouterManager {
     );
     print('[GoRouterManager] push context: $context');
     if (context != null) {
-      final finalRoute = _normalizeHomeRoute(
+      final finalRoute = resolveHomeRoute(
         _buildRouteWithQueryParams(route, queryParams),
+        extra: extra,
       );
       final wrappedExtra = _wrapExtra(extra, options ?? const RouteOptions());
+      if (Uri.parse(finalRoute).path == chatRoute) {
+        return _pushChatDestination<T>(
+          GoRouter.of(context),
+          finalRoute,
+          wrappedExtra,
+        );
+      }
       return GoRouter.of(context).push<T>(finalRoute, extra: wrappedExtra);
     }
     return null;
@@ -378,8 +385,9 @@ class GoRouterManager {
       '[GoRouterManager] pushReplacement route: $route, extra: $extra, queryParams: $queryParams, options: $options',
     );
     if (context != null) {
-      final finalRoute = _normalizeHomeRoute(
+      final finalRoute = resolveHomeRoute(
         _buildRouteWithQueryParams(route, queryParams),
+        extra: extra,
       );
       final wrappedExtra = _wrapExtra(extra, options ?? const RouteOptions());
       GoRouter.of(context).pushReplacement(finalRoute, extra: wrappedExtra);
@@ -393,18 +401,38 @@ class GoRouterManager {
     return canPop;
   }
 
-  static String _normalizeHomeRoute(String route) {
+  /// Keeps old home links carrying a thread target compatible without
+  /// redirecting ordinary launches away from the conversation list.
+  static String resolveHomeRoute(String route, {Object? extra}) {
     final uri = Uri.parse(route);
-    if (uri.path == homeRoute) {
-      return uri.replace(path: homeRoute).toString();
+    if (uri.path == homeRoute &&
+        parseConversationRouteTarget(uri, extra) != null) {
+      return uri.replace(path: chatRoute).toString();
     }
     return route;
   }
 
-  static bool _isHomeChatRoute(String route) {
-    final normalized = _normalizeHomeRoute(route);
-    final uri = Uri.parse(normalized);
-    return uri.path == homeRoute;
+  static Future<T?> _pushChatDestination<T>(
+    GoRouter router,
+    String route,
+    Object? extra,
+  ) {
+    final matches = router.routerDelegate.currentConfiguration.matches;
+    final hasChat = matches.any(
+      (match) =>
+          match.route is GoRoute && (match.route as GoRoute).path == chatRoute,
+    );
+    if (!hasChat) {
+      return router.push<T>(route, extra: extra);
+    }
+
+    // A chat can be covered by settings, history or an Agent session picker.
+    // Return to that existing owner, then update its target through
+    // ChatPage.didUpdateWidget instead of stacking a second chat owner.
+    _rootNavigatorKey.currentState?.popUntil(
+      (route) => route.settings.name == 'home/chat' || route.isFirst,
+    );
+    return router.replace<T>(route, extra: extra);
   }
 
   /// 重置回到首页并跳转到指定路由
@@ -421,12 +449,14 @@ class GoRouterManager {
     );
     if (context == null) return;
 
-    final finalRoute = _normalizeHomeRoute(
+    final finalRoute = resolveHomeRoute(
       _buildRouteWithQueryParams(route, queryParams),
+      extra: extra,
     );
 
-    // 如果目标是聊天主页（包含 query 参数场景），直接替换到目标路由，不再 push
-    if (_isHomeChatRoute(finalRoute)) {
+    // The list is the root; explicit chat/native destinations retain a
+    // separate page above it so back returns to the same conversation list.
+    if (Uri.parse(finalRoute).path == homeRoute) {
       print(
         '[GoRouterManager] resetToHomeAndPush: target is home, only clearAndNavigateTo',
       );

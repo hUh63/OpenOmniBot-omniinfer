@@ -169,13 +169,6 @@ class AppLocalizationsZh extends AppLocalizations {
       '开启后，聊天页键盘回车为换行；关闭后，回车直接发送';
 
   @override
-  String get settingsPredictiveBackTitle => '预测性返回手势';
-
-  @override
-  String get settingsPredictiveBackSubtitle =>
-      '开启后，返回手势可跟随手指预览上一页面或桌面；关闭则保持旧版返回行为';
-
-  @override
   String get settingsHabitualHandTitle => '惯用手';
 
   @override

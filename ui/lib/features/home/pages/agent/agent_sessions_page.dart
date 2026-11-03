@@ -1,3 +1,4 @@
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -697,7 +698,7 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
         return;
       }
       await Navigator.of(context).push(
-        MaterialPageRoute<void>(
+        OmniPageRoute<void>(
           builder: (_) => _AgentSessionWorkspacePage(
             title: session.cwdLabel.isNotEmpty
                 ? session.cwdLabel

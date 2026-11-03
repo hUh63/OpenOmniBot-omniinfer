@@ -1,3 +1,4 @@
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -206,7 +207,7 @@ class CodexRemoteWorkspaceBrowserState
     bool startInEditMode = false,
   }) async {
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
+      OmniPageRoute<void>(
         builder: (_) => CodexRemoteFilePreviewPage(
           path: entry.path,
           title: entry.name,

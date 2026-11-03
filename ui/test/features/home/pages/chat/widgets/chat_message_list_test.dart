@@ -1,17 +1,22 @@
 import 'package:dotted_border/dotted_border.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ui/services/agent_event_reducer.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/deep_thinking_card.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/widgets/chat_empty_greeting.dart';
 import 'package:ui/features/home/pages/chat/widgets/chat_widgets.dart';
+import 'package:ui/features/home/pages/chat/widgets/agent_run_details_sheet.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 import 'package:ui/widgets/agent_avatar.dart';
 import 'package:ui/widgets/streaming_text.dart';
+import 'package:ui/services/storage_service.dart';
+import 'package:ui/widgets/navigation/page_route.dart';
 
 void main() {
   testWidgets('Claude Code ACP answers survive completion and history reload', (tester) async {
@@ -252,7 +257,7 @@ void main() {
         closeTo(controller.position.maxScrollExtent, 1),
       );
 
-      await tester.drag(find.byType(ListView), const Offset(0, 36));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 36));
       await tester.pumpAndSettle();
 
       final movedOffset = controller.offset;
@@ -737,7 +742,7 @@ void main() {
       // layout/programmatic correction can put the list exactly back on the
       // latest edge without changing that flag; preview resolution must still
       // recognize that the footer is currently anchored there.
-      await tester.drag(find.byType(ListView), const Offset(0, 36));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 36));
       await tester.pumpAndSettle();
       expect(controller.offset, lessThan(controller.position.maxScrollExtent));
       controller.jumpTo(controller.position.maxScrollExtent);
@@ -858,10 +863,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Collapsed state is unified across all agent modes: the header reads
-    // "已处理" rather than the per-tool count summary, regardless of how
-    // many tool calls happened inside. The count summary only resurfaces
-    // when the user expands the run.
+    // The completed transcript keeps its answer and opens history in a sheet.
     expect(find.text('已处理'), findsOneWidget);
     expect(find.text('已运行 1 条命令'), findsNothing);
     expect(find.textContaining('最终回答', findRichText: true), findsOneWidget);
@@ -873,20 +875,23 @@ void main() {
     expect(find.text('详细思考过程'), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('agent-run-summary-task-1')));
-    await tester.pump();
-    // The process fold's key carries the first process message id, so two
-    // folds in one turn (prose between two tool batches) stay distinct.
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
     expect(
       find.byKey(const ValueKey('agent-run-process-task-1-task-1-thinking')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('agent-run-details-row-task-1-tool')),
       findsOneWidget,
     );
-    expect(find.byType(DeepThinkingCard), findsOneWidget);
-    await tester.pump(const Duration(milliseconds: 120));
-    await tester.pumpAndSettle();
-
-    expect(find.text('运行 git status'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('agent-run-details-row-task-1-thinking')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('最终回答', findRichText: true), findsOneWidget);
     expect(find.text('详细思考过程'), findsNothing);
-    expect(find.byType(DeepThinkingCard), findsOneWidget);
+    expect(find.byType(DeepThinkingCard), findsNothing);
     expect(find.byType(AgentAvatarCircle), findsOneWidget);
     expect(find.byType(AgentAvatarButton), findsNothing);
   });
@@ -966,32 +971,39 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('agent-run-summary-task-fold')));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('第一段过程正文', findRichText: true), findsOneWidget);
-    expect(find.textContaining('第二段过程正文', findRichText: true), findsOneWidget);
-    expect(find.text('读取项目状态'), findsOneWidget);
+    final firstRow = find.byKey(
+      const ValueKey('agent-run-details-row-task-fold-text-first'),
+    );
+    final toolRow = find.byKey(
+      const ValueKey('agent-run-details-row-task-fold-tool'),
+    );
+    final secondRow = find.byKey(
+      const ValueKey('agent-run-details-row-task-fold-text-second'),
+    );
+    expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+    expect(firstRow, findsOneWidget);
+    expect(toolRow, findsOneWidget);
+    expect(secondRow, findsOneWidget);
     expect(find.text('最后整理思路'), findsNothing);
     expect(find.textContaining('最终结论', findRichText: true), findsOneWidget);
     expect(
-      tester.getTopLeft(find.textContaining('第一段过程正文', findRichText: true)).dy,
-      lessThan(tester.getTopLeft(find.text('读取项目状态')).dy),
+      tester.getTopLeft(firstRow).dy,
+      lessThan(tester.getTopLeft(toolRow).dy),
     );
     expect(
-      tester.getTopLeft(find.text('读取项目状态')).dy,
-      lessThan(
-        tester
-            .getTopLeft(find.textContaining('第二段过程正文', findRichText: true))
-            .dy,
-      ),
+      tester.getTopLeft(toolRow).dy,
+      lessThan(tester.getTopLeft(secondRow).dy),
     );
+    await tester.tap(firstRow);
+    await tester.pumpAndSettle();
     expect(
-      tester.getTopLeft(find.textContaining('第二段过程正文', findRichText: true)).dy,
-      lessThan(
-        tester.getTopLeft(find.textContaining('最终结论', findRichText: true)).dy,
-      ),
+      find.textContaining('第一段过程正文', findRichText: true),
+      findsOneWidget,
     );
+    expect(find.textContaining('第二段过程正文', findRichText: true), findsNothing);
   });
 
-  testWidgets('text-only Xiaowan history can reopen its folded prose', (
+  testWidgets('text-only Xiaowan history opens prose details outside chat', (
     tester,
   ) async {
     final controller = ScrollController();
@@ -1023,8 +1035,21 @@ void main() {
     await tester.tap(summary);
     await tester.pumpAndSettle();
 
+    expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('agent-run-details-row-task-fold-text-first')),
+    );
+    await tester.pumpAndSettle();
     expect(find.textContaining('第一段过程正文', findRichText: true), findsOneWidget);
+    expect(find.textContaining('第二段过程正文', findRichText: true), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('agent-run-details-back')));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('agent-run-details-row-task-fold-text-second')),
+    );
+    await tester.pumpAndSettle();
     expect(find.textContaining('第二段过程正文', findRichText: true), findsOneWidget);
+    expect(find.textContaining('第一段过程正文', findRichText: true), findsNothing);
     expect(find.textContaining('最终结论', findRichText: true), findsOneWidget);
   });
 
@@ -1234,34 +1259,28 @@ void main() {
     expect(brandIcon.agentId, 'claude-code-acp');
     expect(find.byKey(const ValueKey('agent-run-avatar-task-1')), findsNothing);
 
-    // Expanded: header still says "已处理 …" — and any inner tool-group
-    // capsule (when consecutive tool cards group together) ALSO says
-    // "已处理" instead of the previous count summary. So we expect AT
-    // LEAST one widget with "已处理" (could be the outer header alone,
-    // or outer + inner capsule depending on the messages).
     await tester.tap(find.byKey(const ValueKey('agent-run-summary-task-1')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('已处理'), findsWidgets);
+    expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+    final firstTool = find.byKey(
+      const ValueKey('agent-run-details-row-task-1-tool-search-1'),
+    );
+    final secondTool = find.byKey(
+      const ValueKey('agent-run-details-row-task-1-tool-search-2'),
+    );
+    expect(firstTool, findsOneWidget);
+    expect(secondTool, findsOneWidget);
     expect(find.textContaining('已探索'), findsNothing);
-    final acpToolGroupToggle = find.byKey(
-      const ValueKey(
-        'agent-tool-call-group-toggle-task-1-task-1-tool-search-2-task-1-tool-search-1',
-      ),
-    );
-    expect(acpToolGroupToggle, findsOneWidget);
-
-    await tester.tap(acpToolGroupToggle);
+    await tester.ensureVisible(firstTool);
+    await tester.tap(firstTool);
     await tester.pumpAndSettle();
-
     expect(
-      find.byKey(const ValueKey('inline-file-diff-title-toggle')),
-      findsNWidgets(2),
+      find.byKey(const ValueKey('agent-run-details-item-task-1-tool-search-1')),
+      findsOneWidget,
     );
     expect(
-      find.byKey(
-        const ValueKey('agent-tool-summary-capsule-task-1-tool-search-1'),
-      ),
-      findsNothing,
+      find.byKey(const ValueKey('agent-run-acp-avatar-task-1')),
+      findsOneWidget,
     );
   });
 
@@ -1636,7 +1655,7 @@ void main() {
     },
   );
 
-  testWidgets('adjacent Xiaowan tool calls render as independent capsules', (
+  testWidgets('adjacent Xiaowan tool calls remain independent detail rows', (
     tester,
   ) async {
     final controller = ScrollController();
@@ -1660,42 +1679,44 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('agent-run-summary-task-1')));
     await tester.pumpAndSettle();
 
-    // 小万完成后的 turn 仍由外层“已处理”统一折叠，但展开后每次工具调用
-    // 必须保持为独立胶囊，不能套用 ACP 的并行工具合并胶囊。
-    expect(find.text('已运行 1 条命令 · 已读取 1 个文件'), findsNothing);
-    expect(find.textContaining('已处理'), findsOneWidget);
-
-    final toolGroupToggle = find.byKey(
-      const ValueKey(
-        'agent-tool-call-group-toggle-task-1-task-1-tool-1-task-1-tool-2',
-      ),
+    expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+    final firstTool = find.byKey(
+      const ValueKey('agent-run-details-row-task-1-tool-1'),
     );
-    expect(toolGroupToggle, findsNothing);
+    final secondTool = find.byKey(
+      const ValueKey('agent-run-details-row-task-1-tool-2'),
+    );
+    expect(firstTool, findsOneWidget);
+    expect(secondTool, findsOneWidget);
+    expect(
+      tester.getTopLeft(firstTool).dy,
+      lessThan(tester.getTopLeft(secondTool).dy),
+    );
     expect(
       find.byKey(const ValueKey('agent-run-task-1-task-1-tool-1')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('agent-run-task-1-task-1-tool-2')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('inline-file-diff-title-toggle')),
       findsNothing,
     );
     expect(
-      find.byKey(const ValueKey('agent-tool-summary-capsule-task-1-tool-1')),
-      findsOneWidget,
+      find.byKey(const ValueKey('agent-run-task-1-task-1-tool-2')),
+      findsNothing,
     );
+    await tester.tap(firstTool);
+    await tester.pumpAndSettle();
     expect(
-      find.byKey(const ValueKey('agent-tool-summary-capsule-task-1-tool-2')),
+      find.byKey(const ValueKey('agent-run-details-item-task-1-tool-1')),
       findsOneWidget,
     );
-    expect(find.text('运行 git status'), findsOneWidget);
-    expect(find.text('读取 README.md'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-run-details-back')));
+    await tester.pumpAndSettle();
+    await tester.tap(secondTool);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('agent-run-details-item-task-1-tool-2')),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('reopening run keeps thinking folded until requested', (
+  testWidgets('reopening run returns to timeline without selected detail', (
     tester,
   ) async {
     final controller = ScrollController();
@@ -1723,55 +1744,42 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('详细思考过程'), findsNothing);
-    final thinkingToggle = find.descendant(
-      of: find.byType(DeepThinkingCard),
-      matching: find.byType(InkWell),
+    final thinkingRow = find.byKey(
+      const ValueKey('agent-run-details-row-task-1-thinking'),
     );
-    expect(thinkingToggle, findsOneWidget);
-
-    await tester.tap(thinkingToggle);
+    expect(thinkingRow, findsOneWidget);
+    await tester.tap(thinkingRow);
     await tester.pumpAndSettle();
-    expect(find.text('详细思考过程'), findsOneWidget);
+    expect(find.textContaining('详细思考过程', findRichText: true), findsOneWidget);
+
+    await _tapOutsideAgentRunSheet(tester);
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentRunDetailsSheet), findsNothing);
+    expect(find.textContaining('详细思考过程', findRichText: true), findsNothing);
 
     await tester.tap(summaryToggle);
     await tester.pumpAndSettle();
-    expect(find.text('详细思考过程'), findsNothing);
-
-    await tester.tap(summaryToggle);
-    await tester.pumpAndSettle();
-    expect(find.byType(DeepThinkingCard), findsOneWidget);
-    expect(find.text('详细思考过程'), findsNothing);
+    expect(thinkingRow, findsOneWidget);
+    expect(find.byKey(const ValueKey('agent-run-details-back')), findsNothing);
+    expect(find.textContaining('详细思考过程', findRichText: true), findsNothing);
   });
 
-  testWidgets('agent run expansion can be controlled by the parent page', (
+  testWidgets('opening run details keeps process rows outside the transcript', (
     tester,
   ) async {
     final controller = ScrollController();
     final messages = _buildCompletedAgentRunMessages();
-    Set<String> expandedTaskIds = <String>{};
-    late StateSetter setState;
 
     await tester.pumpWidget(
       _buildLocalizedApp(
-        child: StatefulBuilder(
-          builder: (context, stateSetter) {
-            setState = stateSetter;
-            return SizedBox(
-              width: 400,
-              height: 520,
-              child: ChatMessageList(
-                messages: messages,
-                scrollController: controller,
-                expandedAgentRunTaskIds: expandedTaskIds,
-                onExpandedAgentRunTaskIdsChanged: (nextTaskIds) {
-                  setState(() {
-                    expandedTaskIds = nextTaskIds;
-                  });
-                },
-                onBeforeTaskExecute: () async {},
-              ),
-            );
-          },
+        child: SizedBox(
+          width: 400,
+          height: 520,
+          child: ChatMessageList(
+            messages: messages,
+            scrollController: controller,
+            onBeforeTaskExecute: () async {},
+          ),
         ),
       ),
     );
@@ -1784,51 +1792,41 @@ void main() {
 
     await tester.tap(summaryToggle);
     await tester.pumpAndSettle();
-    expect(expandedTaskIds, const {'task-1'});
-    expect(find.text('运行 git status'), findsOneWidget);
+    expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('agent-run-process-task-1-task-1-thinking')),
+      findsNothing,
+    );
 
-    await tester.tap(summaryToggle);
+    await _tapOutsideAgentRunSheet(tester);
     await tester.pumpAndSettle();
-    expect(expandedTaskIds, isEmpty);
+    expect(find.byType(AgentRunDetailsSheet), findsNothing);
     expect(find.text('运行 git status'), findsNothing);
   });
 
   testWidgets(
-    'cancelled agent run auto-collapses trace and shows cancel body',
+    'cancelled agent run keeps trace folded and shows cancel body',
     (tester) async {
       final controller = ScrollController();
       final messages = ObservableChatMessageList()
         ..replaceAllMessages(_buildCompletedAgentRunMessages());
-      Set<String> expandedTaskIds = <String>{'task-1'};
-      late StateSetter setState;
 
       await tester.pumpWidget(
         _buildLocalizedApp(
-          child: StatefulBuilder(
-            builder: (context, stateSetter) {
-              setState = stateSetter;
-              return SizedBox(
-                width: 400,
-                height: 520,
-                child: ChatMessageList(
-                  messages: messages,
-                  scrollController: controller,
-                  expandedAgentRunTaskIds: expandedTaskIds,
-                  onExpandedAgentRunTaskIdsChanged: (nextTaskIds) {
-                    setState(() {
-                      expandedTaskIds = nextTaskIds;
-                    });
-                  },
-                  onBeforeTaskExecute: () async {},
-                ),
-              );
-            },
+          child: SizedBox(
+            width: 400,
+            height: 520,
+            child: ChatMessageList(
+              messages: messages,
+              scrollController: controller,
+              onBeforeTaskExecute: () async {},
+            ),
           ),
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('运行 git status'), findsOneWidget);
+      expect(find.text('运行 git status'), findsNothing);
 
       messages.insert(
         0,
@@ -1852,42 +1850,27 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(expandedTaskIds, isEmpty);
       expect(find.textContaining('任务已取消', findRichText: true), findsOneWidget);
       expect(find.text('运行 git status'), findsNothing);
     },
   );
 
   testWidgets(
-    'expanding latest agent run keeps the summary row anchored while inset grows',
+    'opening run details preserves the main transcript extent and anchor',
     (tester) async {
       final controller = ScrollController();
       final messages = _buildCompletedAgentRunMessages();
-      Set<String> expandedTaskIds = <String>{};
-      late StateSetter setState;
 
       await tester.pumpWidget(
         _buildLocalizedApp(
-          child: StatefulBuilder(
-            builder: (context, stateSetter) {
-              setState = stateSetter;
-              return SizedBox(
-                width: 400,
-                height: 220,
-                child: ChatMessageList(
-                  messages: messages,
-                  scrollController: controller,
-                  expandedAgentRunTaskIds: expandedTaskIds,
-                  onExpandedAgentRunTaskIdsChanged: (nextTaskIds) {
-                    setState(() {
-                      expandedTaskIds = nextTaskIds;
-                    });
-                  },
-                  bottomOverlayInset: expandedTaskIds.isEmpty ? 0 : 96,
-                  onBeforeTaskExecute: () async {},
-                ),
-              );
-            },
+          child: SizedBox(
+            width: 400,
+            height: 220,
+            child: ChatMessageList(
+              messages: messages,
+              scrollController: controller,
+              onBeforeTaskExecute: () async {},
+            ),
           ),
         ),
       );
@@ -1903,19 +1886,183 @@ void main() {
       );
       final initialTop = tester.getTopLeft(summaryToggle).dy;
       final initialOffset = controller.offset;
+      final initialExtent = controller.position.maxScrollExtent;
+      final originalListState = tester.state(find.byType(ChatMessageList));
 
       await tester.tap(summaryToggle);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 120));
+      expect(tester.getTopLeft(summaryToggle).dy, closeTo(initialTop, 0.1));
+      expect(controller.offset, closeTo(initialOffset, 0.1));
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+      expect(controller.position.maxScrollExtent, closeTo(initialExtent, 0.1));
+      expect(tester.state(find.byType(ChatMessageList)), same(originalListState));
 
-      final midAnimationTop = tester.getTopLeft(summaryToggle).dy;
-      expect(midAnimationTop, closeTo(initialTop, 4));
-      expect(controller.offset, closeTo(initialOffset, 4));
-      expect(
-        controller.offset,
-        lessThan(controller.position.maxScrollExtent - 24),
+      await tester.tap(
+        find.byKey(const ValueKey('agent-run-details-row-task-1-tool')),
       );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('agent-run-details-item-task-1-tool')),
+        findsOneWidget,
+      );
+      await _tapOutsideAgentRunSheet(tester);
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentRunDetailsSheet), findsNothing);
+      expect(controller.offset, closeTo(initialOffset, 0.1));
+      expect(tester.getTopLeft(summaryToggle).dy, closeTo(initialTop, 0.1));
+      expect(controller.position.maxScrollExtent, closeTo(initialExtent, 0.1));
     },
+  );
+
+  testWidgets(
+    'replacing the source turn removes only its open details route',
+    (tester) async {
+      final controller = ScrollController();
+      var messages = _buildCompletedAgentRunMessages();
+      late StateSetter updateMessages;
+      await tester.pumpWidget(
+        _buildLocalizedApp(
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              updateMessages = setState;
+              return ChatMessageList(
+                messages: messages,
+                scrollController: controller,
+                onBeforeTaskExecute: () async {},
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final listState = tester.state(find.byType(ChatMessageList));
+      await tester.tap(
+        find.byKey(const ValueKey('agent-run-summary-task-1')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('agent-run-details-row-task-1-tool')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('agent-run-details-item-task-1-tool')),
+        findsOneWidget,
+      );
+
+      // Native conversation changes can replace the rows while the shared
+      // ChatPage stays mounted. Only the old row's presentation route closes.
+      updateMessages(() => messages = _buildDshMultiStepAgentRunMessages());
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentRunDetailsSheet), findsNothing);
+      expect(
+        find.byKey(const ValueKey('agent-run-summary-dsh-turn-1')),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('检查完成，这是最终回答。', findRichText: true),
+        findsOneWidget,
+      );
+      expect(tester.state(find.byType(ChatMessageList)), same(listState));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      controller.dispose();
+    },
+  );
+
+  testWidgets(
+    'system and predictive back navigate sheet details before leaving chat',
+    (tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      await StorageService.init();
+      final navigator = GlobalKey<NavigatorState>();
+      final controller = ScrollController();
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: navigator,
+          locale: const Locale('zh'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: const Scaffold(body: Text('Home route')),
+        ),
+      );
+      final chatRoute = OmniPageRoute<void>(
+        builder: (_) => Scaffold(
+          body: ChatMessageList(
+            messages: _buildCompletedAgentRunMessages(),
+            scrollController: controller,
+            onBeforeTaskExecute: () async {},
+          ),
+        ),
+      );
+      final closedChat = navigator.currentState!.push<void>(chatRoute);
+      await tester.pumpAndSettle();
+      final listState = tester.state(find.byType(ChatMessageList));
+      final initialOffset = controller.offset;
+      await tester.tap(
+        find.byKey(const ValueKey('agent-run-summary-task-1')),
+      );
+      await tester.pumpAndSettle();
+      final toolRow = find.byKey(
+        const ValueKey('agent-run-details-row-task-1-tool'),
+      );
+      final toolDetail = find.byKey(
+        const ValueKey('agent-run-details-item-task-1-tool'),
+      );
+      await tester.tap(toolRow);
+      await tester.pumpAndSettle();
+      expect(toolDetail, findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(toolDetail, findsNothing);
+      expect(toolRow, findsOneWidget);
+      expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+
+      await tester.tap(toolRow);
+      await tester.pumpAndSettle();
+      await _sendTestBackGesture(tester, 'startBackGesture', progress: 0);
+      await _sendTestBackGesture(tester, 'updateBackGestureProgress', progress: .5);
+      await tester.pump();
+      expect(chatRoute.animation!.value, 1);
+      expect(chatRoute.popGestureInProgress, isFalse);
+      await _sendTestBackGesture(tester, 'cancelBackGesture');
+      await tester.pumpAndSettle();
+      expect(toolDetail, findsOneWidget);
+
+      await _sendTestBackGesture(tester, 'startBackGesture', progress: 0);
+      await _sendTestBackGesture(tester, 'updateBackGestureProgress', progress: .5);
+      await _sendTestBackGesture(tester, 'commitBackGesture');
+      await tester.pumpAndSettle();
+      expect(toolDetail, findsNothing);
+      expect(toolRow, findsOneWidget);
+      expect(chatRoute.animation!.value, 1);
+
+      await _sendTestBackGesture(tester, 'startBackGesture', progress: 0);
+      await _sendTestBackGesture(tester, 'updateBackGestureProgress', progress: .5);
+      await _sendTestBackGesture(tester, 'commitBackGesture');
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentRunDetailsSheet), findsNothing);
+      expect(tester.state(find.byType(ChatMessageList)), same(listState));
+      expect(controller.offset, closeTo(initialOffset, .1));
+      expect(chatRoute.isCurrent, isTrue);
+      expect(chatRoute.animation!.value, 1);
+
+      // Once the modal is gone, system back targets chat and commits its
+      // ordinary page return; progress does not start another animation.
+      await _sendTestBackGesture(tester, 'startBackGesture', progress: 0);
+      await _sendTestBackGesture(tester, 'updateBackGestureProgress', progress: .4);
+      await tester.pump();
+      expect(chatRoute.animation!.value, 1);
+      await _sendTestBackGesture(tester, 'cancelBackGesture');
+      await tester.pumpAndSettle();
+      expect(chatRoute.animation!.value, 1);
+      navigator.currentState!.pop();
+      await tester.pumpAndSettle();
+      await closedChat;
+      controller.dispose();
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
 
   testWidgets(
@@ -2007,7 +2154,7 @@ void main() {
   );
 
   testWidgets(
-    'DSH completion folds the tool between separate step messages instead of leaving it at the bottom',
+    'legacy DSH history folds the tool between separate step messages instead of leaving it at the bottom',
     (tester) async {
       final controller = ScrollController();
       var messages = _buildDshMultiStepAgentRunMessages(
@@ -2138,40 +2285,141 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byType(DeepThinkingCard), findsNWidgets(2));
-      expect(find.text('读取 README.md'), findsOneWidget);
-      expect(find.text('先定位需要读取的文件。'), findsNothing);
-      expect(find.text('根据工具结果继续检查。'), findsNothing);
-
-      final firstThinkingHeader = find.descendant(
-        of: find.byKey(const ValueKey('deep_thinking_dsh-thinking-step-1')),
-        matching: find.byType(InkWell),
+      expect(find.byType(AgentRunDetailsSheet), findsOneWidget);
+      expect(find.byType(DeepThinkingCard), findsNothing);
+      final firstThinking = find.byKey(
+        const ValueKey('agent-run-details-row-dsh-thinking-step-1'),
       );
-      await tester.tap(firstThinkingHeader);
-      await tester.pumpAndSettle();
-
-      expect(find.text('先定位需要读取的文件。'), findsOneWidget);
-      expect(find.text('根据工具结果继续检查。'), findsNothing);
+      final tool = find.byKey(
+        const ValueKey('agent-run-details-row-dsh-tool-readme'),
+      );
+      expect(firstThinking, findsOneWidget);
+      expect(tool, findsOneWidget);
       expect(
-        tester.getTopLeft(find.text('先定位需要读取的文件。')).dy,
-        lessThan(tester.getTopLeft(find.text('读取 README.md')).dy),
+        tester.getTopLeft(firstThinking).dy,
+        lessThan(tester.getTopLeft(tool).dy),
+      );
+      await tester.tap(firstThinking);
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('先定位需要读取的文件。', findRichText: true),
+        findsOneWidget,
       );
       expect(
-        tester.getTopLeft(find.text('读取 README.md')).dy,
-        lessThan(
-          tester
-              .getTopLeft(
-                find.textContaining('检查完成，这是最终回答。', findRichText: true),
-              )
-              .dy,
-        ),
+        find.textContaining('根据工具结果继续检查。', findRichText: true),
+        findsNothing,
       );
-
-      await tester.tap(firstThinkingHeader);
+      expect(
+        find.textContaining('检查完成，这是最终回答。', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('agent-run-details-back')));
       await tester.pumpAndSettle();
-      expect(find.text('先定位需要读取的文件。'), findsNothing);
+      expect(firstThinking, findsOneWidget);
+      expect(find.textContaining('先定位需要读取的文件。', findRichText: true), findsNothing);
     },
   );
+
+  for (final initialOffset in [0.0, 800.0]) {
+    testWidgets(
+      'prepending a page preserves visible pixels with bounded row builds at $initialOffset',
+      (tester) async {
+        final controller = ScrollController();
+        final navigator = ChatMessageListNavigator();
+        var messages = _buildSimpleAssistantMessages(50, prefix: '已有记录');
+        late StateSetter update;
+        await tester.pumpWidget(
+          _buildLocalizedApp(
+            child: StatefulBuilder(
+              builder: (context, setState) {
+                update = setState;
+                return SizedBox(
+                  width: 400,
+                  height: 520,
+                  child: ChatMessageList(
+                    messages: messages,
+                    scrollController: controller,
+                    navigator: navigator,
+                    onBeforeTaskExecute: () async {},
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        controller.jumpTo(initialOffset);
+        await tester.pumpAndSettle();
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, 40));
+        await tester.pumpAndSettle();
+        final visible = find.byWidgetPredicate(
+          (w) =>
+              w.key is ValueKey<String> &&
+              (w.key as ValueKey<String>).value.startsWith(
+                'chat-timeline-entry:assistant-',
+              ),
+        );
+        final anchor = visible
+            .evaluate()
+            .firstWhere((e) {
+              final y = tester.getTopLeft(find.byWidget(e.widget)).dy;
+              return y >= 0 && y < 400;
+            })
+            .widget
+            .key!;
+        final textAnchor = find
+            .descendant(of: find.byKey(anchor), matching: find.byType(RichText))
+            .first;
+        final before = tester.getTopLeft(textAnchor);
+        var rowBuilds = 0;
+        final previousObserver = debugOnRebuildDirtyWidget;
+        debugOnRebuildDirtyWidget = (element, builtOnce) {
+          previousObserver?.call(element, builtOnce);
+          if (element.widget.runtimeType.toString() == '_ChatTimelineListRow') {
+            rowBuilds++;
+          }
+        };
+        try {
+          update(() {
+            messages = [
+              ...messages,
+              ..._buildSimpleAssistantMessages(
+                50,
+                prefix: '新增历史',
+                idPrefix: 'prepended',
+              ),
+            ];
+          });
+          await tester.pumpAndSettle();
+        } finally {
+          debugOnRebuildDirtyWidget = previousObserver;
+        }
+        expect(tester.getTopLeft(textAnchor).dy, closeTo(before.dy, 0.5));
+        expect(
+          rowBuilds,
+          lessThan(15),
+          reason: 'Only viewport rows may rebuild; not the 50 inserted rows',
+        );
+        for (final entryKey in ['prepended-40', 'assistant-0']) {
+          bool? arrived;
+          navigator.animateToEntry(entryKey).then((value) => arrived = value);
+          for (var tick = 0; tick < 120 && arrived == null; tick++) {
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+          expect(
+            arrived,
+            isTrue,
+            reason: 'Navigate across both sides of the origin',
+          );
+          final row = find.byKey(ValueKey('chat-timeline-entry:$entryKey'));
+          expect(tester.getTopLeft(row).dy, inInclusiveRange(0.0, 520.0));
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        controller.dispose();
+      },
+    );
+  }
 
   testWidgets('reaching top auto-loads older messages without jumping to top', (
     tester,
@@ -2219,14 +2467,14 @@ void main() {
     controller.jumpTo(24);
     await tester.pump();
 
-    await tester.drag(find.byType(ListView), const Offset(0, 120));
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, 120));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 16));
     await tester.pumpAndSettle();
 
     expect(loadMoreCalls, 1);
     expect(messages.length, 28);
-    expect(controller.offset, greaterThan(24));
+    expect(controller.position.minScrollExtent, lessThan(0));
     expect(tester.takeException(), isNull);
   });
 }
@@ -2254,6 +2502,34 @@ Widget _buildLocalizedApp({required Widget child}) {
     localizationsDelegates: AppLocalizations.localizationsDelegates,
     supportedLocales: AppLocalizations.supportedLocales,
     home: Scaffold(body: child),
+  );
+}
+
+Future<void> _tapOutsideAgentRunSheet(WidgetTester tester) async {
+  final sheet = find.byKey(const ValueKey('agent-run-details-sheet-task-1'));
+  await tester.tapAt(Offset(20, tester.getTopLeft(sheet).dy - 20));
+}
+
+Future<void> _sendTestBackGesture(
+  WidgetTester tester,
+  String method, {
+  double? progress,
+}) async {
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    'flutter/backgesture',
+    const StandardMethodCodec().encodeMethodCall(
+      MethodCall(
+        method,
+        progress == null
+            ? null
+            : <String, dynamic>{
+                'touchOffset': <double>[progress * 200, 300],
+                'progress': progress,
+                'swipeEdge': 0,
+              },
+      ),
+    ),
+    (ByteData? _) {},
   );
 }
 

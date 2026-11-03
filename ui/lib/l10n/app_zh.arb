@@ -52,8 +52,6 @@
   "settingsVibrationSubtitle": "执行任务时，通过振动进行操作提醒",
   "settingsIndependentSendButtonTitle": "使用独立的发送按钮",
   "settingsIndependentSendButtonSubtitle": "开启后，聊天页键盘回车为换行；关闭后，回车直接发送",
-  "settingsPredictiveBackTitle": "预测性返回手势",
-  "settingsPredictiveBackSubtitle": "开启后，返回手势可跟随手指预览上一页面或桌面；关闭则保持旧版返回行为",
   "settingsHabitualHandTitle": "惯用手",
   "settingsHabitualHandSubtitle": "影响聊天历史记录的侧滑菜单方向",
   "settingsHabitualHandLeft": "左手",

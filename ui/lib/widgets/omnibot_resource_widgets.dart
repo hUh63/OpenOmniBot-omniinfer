@@ -1,3 +1,4 @@
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -490,7 +491,7 @@ class _OmnibotInlineVideoPlayerState extends State<_OmnibotInlineVideoPlayer> {
       return;
     }
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
+      OmniPageRoute<void>(
         builder: (_) => _OmnibotFullscreenVideoPage(
           controller: controller,
           title: widget.metadata.title,

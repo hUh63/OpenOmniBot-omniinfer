@@ -415,9 +415,7 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
     return PopScope(
       // Built-in Agent configuration does not mutate the catalog entry, so it
       // does not need to intercept system back just to return `_changed`.
-      // Keeping the route poppable is also required for Android predictive
-      // back: PredictiveBackGestureWrapper only starts when
-      // ModalRoute.popGestureEnabled is true.
+      // A poppable route also lets the shared pointer gesture return.
       canPop: _agent?.builtIn == true,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _close();

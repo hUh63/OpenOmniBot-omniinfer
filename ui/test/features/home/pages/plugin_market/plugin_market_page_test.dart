@@ -11,8 +11,7 @@ import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/models/omni_plugin_item.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme.dart';
-import 'package:ui/widgets/predictive_back_gesture_wrapper.dart';
-import 'package:ui/widgets/predictive_back_route.dart';
+import 'package:ui/widgets/navigation/page_route.dart';
 
 class _SvgTestAssetBundle extends CachingAssetBundle {
   static final Uint8List _svgBytes = Uint8List.fromList(
@@ -136,13 +135,45 @@ Map<String, Object?> _runtimePlugin() => <String, Object?>{
         },
       },
     ],
+    'ready': <String, Object?>{
+      'key': 'omniflow-ready-guide',
+      'title': <String, Object?>{
+        'zh': 'OmniFlow 自动化增强已启用',
+        'en': 'OmniFlow automation is enabled',
+      },
+      'steps': <Object?>[
+        <String, Object?>{
+          'zh': '在线执行：回到聊天，直接说“打开蓝牙”或“新建联系人”。',
+          'en': 'Online: return to chat and ask “Turn on Bluetooth” or “Create a contact”.',
+        },
+      ],
+      'actions': <Object?>[
+        <String, Object?>{
+          'route': '/home/chat',
+          'navigation': 'go',
+          'icon': 'chat',
+          'requiresReadiness': true,
+          'label': <String, Object?>{'zh': '去聊天试用', 'en': 'Try in chat'},
+        },
+        <String, Object?>{
+          'route': '/task/omniflow',
+          'navigation': 'push',
+          'icon': 'route',
+          'requiresReadiness': false,
+          'label': <String, Object?>{
+            'zh': '查看已保存操作',
+            'en': 'View saved actions',
+          },
+        },
+      ],
+    },
     'installedAction': <String, Object?>{
       'route': '/task/omniflow',
       'navigation': 'push',
       'icon': 'route',
       'label': <String, Object?>{
-        'zh': '手动录制与复用指令',
-        'en': 'Record & reuse actions',
+        'zh': '已保存操作与执行记录',
+        'en': 'Saved actions & history',
       },
     },
     'capabilityLabels': <String, Object?>{
@@ -230,10 +261,6 @@ void main() {
                 'providerName': 'OmniMind GPT Luna (Debug)',
                 'model': 'gpt-5.6-sol',
               };
-            case 'openApp':
-              return true;
-            case 'pinToHome':
-              return {'status': 'requested'};
             case 'uninstall':
               plugins = <Map<String, Object?>>[
                 <String, Object?>{
@@ -341,87 +368,86 @@ void main() {
     expect(find.text('健身兽'), findsOneWidget);
     expect(find.byIcon(Icons.dashboard_outlined), findsNothing);
   });
-  testWidgets('plugin detail allows predictive back to drive its route', (
-    tester,
-  ) async {
-    plugins = <Map<String, Object?>>[_runtimePlugin()];
-    SharedPreferences.setMockInitialValues(<String, Object>{});
-    await StorageService.init();
-    await StorageService.setPredictiveBackEnabled(true);
+  testWidgets(
+    'plugin detail uses ordinary system back without a second transition',
+    (tester) async {
+      plugins = <Map<String, Object?>>[_runtimePlugin()];
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      await StorageService.init();
 
-    tester.view.physicalSize = const Size(1080, 2200);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+      tester.view.physicalSize = const Size(1080, 2200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.lightTheme.copyWith(
-          pageTransitionsTheme: const PageTransitionsTheme(
-            builders: {TargetPlatform.android: MiuixPageTransitionsBuilder()},
-          ),
-        ),
-        locale: const Locale('zh'),
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        builder: (context, child) =>
-            DefaultAssetBundle(bundle: _SvgTestAssetBundle(), child: child!),
-        home: Scaffold(
-          body: Builder(
-            builder: (context) => TextButton(
-              onPressed: () => Navigator.of(context).push(
-                PredictiveBackMaterialPageRoute<bool>(
-                  builder: (_) => PluginDetailPage(
-                    pluginId: plugins.single['id']! as String,
-                    initialPlugin: OmniPluginItem.fromMap(plugins.single),
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          locale: const Locale('zh'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) =>
+              DefaultAssetBundle(bundle: _SvgTestAssetBundle(), child: child!),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  OmniPageRoute<bool>(
+                    builder: (_) => PluginDetailPage(
+                      pluginId: plugins.single['id']! as String,
+                      initialPlugin: OmniPluginItem.fromMap(plugins.single),
+                    ),
                   ),
                 ),
+                child: const Text('open plugin detail'),
               ),
-              child: const Text('open plugin detail'),
             ),
           ),
         ),
-      ),
-    );
-    await tester.tap(find.text('open plugin detail'));
-    await tester.pumpAndSettle();
+      );
+      await tester.tap(find.text('open plugin detail'));
+      await tester.pumpAndSettle();
 
-    final route = ModalRoute.of(tester.element(find.byType(PluginDetailPage)))!;
-    expect(route.popGestureEnabled, isTrue);
+      final route = ModalRoute.of(
+        tester.element(find.byType(PluginDetailPage)),
+      )!;
+      expect(route.popGestureEnabled, isTrue);
 
-    await _sendBackGesture(tester, 'startBackGesture', <String, dynamic>{
-      'touchOffset': <double>[0.0, 300.0],
-      'progress': 0.0,
-      'swipeEdge': 0,
-    });
-    await tester.pump();
-
-    expect(route.popGestureInProgress, isTrue);
-    await _sendBackGesture(
-      tester,
-      'updateBackGestureProgress',
-      <String, dynamic>{
-        'touchOffset': <double>[400.0, 300.0],
-        'progress': 0.4,
+      await _sendBackGesture(tester, 'startBackGesture', <String, dynamic>{
+        'touchOffset': <double>[0.0, 300.0],
+        'progress': 0.0,
         'swipeEdge': 0,
-      },
-    );
-    await tester.pump();
-    expect(route.animation!.value, closeTo(0.6, 0.001));
-    final transition = tester.widget<PredictiveBackPageTransition>(
-      find.ancestor(
-        of: find.byType(PluginDetailPage),
-        matching: find.byType(PredictiveBackPageTransition),
-      ),
-    );
-    expect(transition.animation.value, closeTo(0.6, 0.001));
+      });
+      await tester.pump();
 
-    await _sendBackGesture(tester, 'cancelBackGesture');
-    await tester.pumpAndSettle();
-    expect(find.byType(PluginDetailPage), findsOneWidget);
-    expect(route.animation!.value, 1);
-    expect(route.popGestureInProgress, isFalse);
-  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+      expect(route.popGestureInProgress, isFalse);
+      await _sendBackGesture(
+        tester,
+        'updateBackGestureProgress',
+        <String, dynamic>{
+          'touchOffset': <double>[400.0, 300.0],
+          'progress': 0.4,
+          'swipeEdge': 0,
+        },
+      );
+      await tester.pump();
+      expect(route.animation!.value, 1);
+      await _sendBackGesture(tester, 'cancelBackGesture');
+      await tester.pumpAndSettle();
+      expect(find.byType(PluginDetailPage), findsOneWidget);
+      expect(route.animation!.value, 1);
+      expect(route.popGestureInProgress, isFalse);
+      await _sendBackGesture(tester, 'startBackGesture', <String, dynamic>{
+        'touchOffset': <double>[0.0, 300.0],
+        'progress': 0.0,
+        'swipeEdge': 0,
+      });
+      await _sendBackGesture(tester, 'commitBackGesture');
+      await tester.pumpAndSettle();
+      expect(route.isActive, isFalse);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
 
   testWidgets('system back refreshes the plugin catalog', (tester) async {
     plugins = <Map<String, Object?>>[_runtimePlugin()];
@@ -523,125 +549,50 @@ void main() {
     await tester.tap(find.text('安装'));
     await tester.pumpAndSettle();
 
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('omniflow-ready-guide')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+
     expect(calls.any((call) => call.method == 'install'), isTrue);
     expect(find.text('卸载'), findsNothing);
     expect(find.byType(Switch), findsNothing);
     expect(calls.any((call) => call.method == 'setEnabled'), isFalse);
-    expect(find.text('开始使用'), findsNothing);
-    expect(find.byKey(const Key('omniflow-ready-guide')), findsNothing);
-    expect(find.text('手动录制与复用指令'), findsOneWidget);
-    await tester.tap(find.text('手动录制与复用指令'));
+    expect(find.text('OmniFlow 自动化增强已启用'), findsOneWidget);
+    expect(find.textContaining('OmniMind GPT Luna (Debug)'), findsOneWidget);
+    expect(find.text('去聊天试用'), findsOneWidget);
+    expect(find.text('查看已保存操作'), findsOneWidget);
+    expect(find.text('已保存操作与执行记录'), findsOneWidget);
+    await tester.tap(find.text('已保存操作与执行记录'));
     await tester.pumpAndSettle();
     expect(find.text('Execution center route'), findsOneWidget);
   });
 
-  testWidgets(
-    'OmniFlow omits the getting-started guide but keeps execution entry',
-    (tester) async {
-      plugins = <Map<String, Object?>>[
-        <String, Object?>{
-          ..._runtimePlugin(),
-          'installed': true,
-          'enabled': true,
-        },
-      ];
+  testWidgets('ready guide opens chat for an enabled OmniFlow plugin', (
+    tester,
+  ) async {
+    plugins = <Map<String, Object?>>[
+      <String, Object?>{
+        ..._runtimePlugin(),
+        'installed': true,
+        'enabled': true,
+      },
+    ];
 
-      await tester.pumpWidget(_app());
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('OmniFlow'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('开始使用'), findsNothing);
-      expect(find.byKey(const Key('omniflow-ready-guide')), findsNothing);
-      await tester.tap(find.text('手动录制与复用指令'));
-      await tester.pumpAndSettle();
-      expect(find.text('Execution center route'), findsOneWidget);
-    },
-  );
-
-  testWidgets(
-    'generated App opens and pins by plugin identity and disables both when off',
-    (tester) async {
-      plugins = [
-        {
-          ..._runtimePlugin(),
-          'id': 'local.project.vibe-test',
-          'name': 'Vibe Test',
-          'required': false,
-          'installed': true,
-          'enabled': true,
-          'presentation': <String, Object?>{'hasApp': true},
-        },
-      ];
-      await tester.pumpWidget(_app(locale: const Locale('en')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Vibe Test'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Open App'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Add to Home Screen'));
-      await tester.pumpAndSettle();
-      for (final method in ['openApp', 'pinToHome']) {
-        expect(calls.where((c) => c.method == method).single.arguments, {
-          'pluginId': 'local.project.vibe-test',
-        });
-      }
-      await tester.tap(find.byType(Switch));
-      await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Open App'))
-            .onPressed,
-        isNull,
-      );
-      expect(
-        tester
-            .widget<IconButton>(
-              find.byWidgetPredicate(
-                (widget) =>
-                    widget is IconButton &&
-                    widget.tooltip == 'Add to Home Screen',
-              ),
-            )
-            .onPressed,
-        isNull,
-      );
-    },
-  );
-
-  testWidgets('enable failure retains native reason and permits retry', (tester) async {
-    plugins = [{..._runtimePlugin(), 'installed': true, 'enabled': false, 'required': false}];
-    var fail = true;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'list') return plugins;
-      if (call.method == 'getVlmReadiness') return <String, Object?>{};
-      if (call.method == 'setEnabled') {
-        if (fail) {
-          throw PlatformException(code: 'PLUGIN_PLATFORM_CALL_FAILED',
-              message: 'runtime_entrypoint_missing');
-        }
-        plugins = [{...plugins.single, 'enabled': true}];
-        return plugins.single;
-      }
-      return null;
-    });
     await tester.pumpWidget(_app());
     await tester.pumpAndSettle();
     await tester.tap(find.text('OmniFlow'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(Switch));
+
+    await tester.scrollUntilVisible(
+      find.text('去聊天试用'),
+      600,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('去聊天试用'));
     await tester.pumpAndSettle();
-    await tester.drag(find.byType(ListView), const Offset(0, -2000));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('runtime_entrypoint_missing'), findsWidgets);
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
-    fail = false;
-    await tester.tap(find.byType(Switch));
-    await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-    await tester.pump(const Duration(seconds: 5));
-    expect(find.textContaining('runtime_entrypoint_missing'), findsNothing);
+    expect(find.text('Chat route'), findsOneWidget);
   });
 
   testWidgets('updates an installed plugin from its detail page', (

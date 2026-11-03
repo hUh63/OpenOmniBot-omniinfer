@@ -11,7 +11,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.quicklog.QuickLogWidgetActionRouter
-import cn.com.omnimind.bot.util.PredictiveBackGate
 
 /**
  * 启动页 Activity
@@ -34,7 +33,6 @@ class LauncherActivity : ComponentActivity() {
         setTheme(StartupThemeResolver.resolveSplashTheme(this))
         applyResponsiveOrientation()
         super.onCreate(savedInstanceState)
-        PredictiveBackGate.install(this)
         OmniLog.d(TAG, "LauncherActivity onCreate")
         requestNotificationPermissionIfNeeded()
         if (QuickLogWidgetActionRouter.consumeInto(this, intent)) {
@@ -82,7 +80,6 @@ class LauncherActivity : ComponentActivity() {
         // 启动 MainActivity（Flutter 引擎）
         startMainActivity()
     }
-
 
     private fun startMainActivity() {
         val intent = Intent(this, MainActivity::class.java).apply {

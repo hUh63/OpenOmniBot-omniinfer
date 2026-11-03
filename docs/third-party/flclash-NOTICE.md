@@ -13,10 +13,12 @@ OmnibotApp's separate commercial license.
 | `ui/lib/widgets/flclash/navigation_dock.dart` | `lib/ui/navigation_dock.dart`, with surface/shape/type tokens adapted to Flutter Material and OmniPalette |
 | `ui/lib/widgets/flclash/tab_view.dart` | `lib/pages/home.dart` (`_HomePageView` slide branch, adjacent-page warp, kept-page activity gating) |
 | `ui/lib/widgets/flclash/page_activity.dart` | Activity boundary from `lib/ui/inherited.dart` (`PageActivityScope`), `lib/widgets/active_polling.dart`, and `lib/pages/home.dart`; settle-aware read scheduling is an OmnibotApp adaptation |
-| `ui/lib/widgets/flclash/open_container.dart` | `lib/ui/open_container.dart` (`ListItem.open` on Android) |
-| `ui/lib/widgets/flclash/drag_back.dart` | `lib/ui/drag_back.dart` |
-| `ui/lib/widgets/flclash/deferred_push.dart` | `lib/ui/deferred_push.dart` |
-| `ui/lib/widgets/flclash/keyboard_inset_hold.dart` | `lib/ui/keyboard_inset_hold.dart` |
+| `ui/lib/widgets/navigation/page_route.dart` | `lib/ui/navigator.dart` (`CommonRoute`), adapted to the existing GoRouter `Page` and imperative `PageRoute` entry points |
+| `ui/lib/widgets/navigation/page_transition.dart` | `lib/ui/page_transition.dart` (`SharedXPageRouteMixin`, `SharedXPageTransition` and the paint-only fade); OmniPalette supplies the surface |
+| `ui/lib/widgets/navigation/open_container.dart` | `lib/ui/open_container.dart` (`ListItem.open` on Android) |
+| `ui/lib/widgets/navigation/drag_back.dart` | `lib/ui/drag_back.dart` |
+| `ui/lib/widgets/navigation/deferred_push.dart` | `lib/ui/deferred_push.dart` |
+| `ui/lib/widgets/navigation/keyboard_inset_hold.dart` | `lib/ui/keyboard_inset_hold.dart` |
 | Settings row transition decoration in `ui/lib/features/home/pages/settings/settings_page.dart` | `lib/ui/list.dart` (`ListItem.open`) and `lib/ui/list_selected.dart` (`DecorationListItem`); group corners and surface adapted to the existing OmniSettingsGroup |
 | `ui/lib/widgets/flclash/search_header.dart` and `search_surface.dart` | Proxy page `lib/ui/scaffold.dart`, `lib/ui/search_field.dart`, `lib/ui/button.dart`, `lib/ui/motion.dart`, and the solid/liquid-glass surface and press portions of `lib/ui/goo.dart` and `lib/ui/navigation_dock.dart` |
 | `ui/lib/widgets/flclash/liquid_glass.dart`, `liquid_glass_capture.dart`, and `ui/shaders/liquid_glass.frag` | `lib/ui/liquid_glass.dart`, `lib/ui/liquid_glass_capture.dart`, and `shaders/liquid_glass.frag`; Flutter Material/HCT/reduced-motion adapters replace the upstream app helpers |
@@ -65,8 +67,14 @@ full-page travel, then the upstream 350 ms `fastEaseInToSlowEaseOut` settle.
 As in upstream, Android system back has no additional progress observer and
 commits through the official Router/Navigator pop, preserving the 300 ms
 contraction into the source row. Cancellation leaves the page in place.
-OmnibotApp's predictive-back setting gates pointer-gesture entry, and
+Pointer entry no longer depends on the retired predictive-back setting;
 reduced-motion mode skips programmatic transforms.
+Ordinary pages now also retain the upstream `CommonRoute` motion: 450 ms,
+quarter-width horizontal travel, emphasized easing and paint-only fade windows.
+Home-to-chat, other GoRouter destinations and imperative pushes share this route.
+The Page adapter reads updated settings so changing a conversation retains its
+existing ChatPage owner. These adapters and the moved navigation helpers retain
+the upstream license despite their application-specific names.
 Gesture admission also observes Navigator's departing next-route animation when
 container routes do not participate in `secondaryAnimation`, so an uncovered
 page cannot start dragging beneath an overlay that is still exiting.
