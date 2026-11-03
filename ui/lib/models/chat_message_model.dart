@@ -37,6 +37,18 @@ class ChatMessageModel {
   bool get isHistoryPayloadOffloaded =>
       content?['historyPayloadOffloaded'] == true;
 
+  /// 投影落盘的「完整记录」附件：只有带 historyPayloadOffloaded 标记的附件才走
+  /// 这个入口，普通图片/文件附件仍按原样渲染。
+  List<Map<String, dynamic>> get historyPayloadAttachments {
+    final raw = content?['attachments'];
+    if (raw is! List) return const <Map<String, dynamic>>[];
+    return raw
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .where((item) => item['historyPayloadOffloaded'] == true)
+        .toList();
+  }
+
   /// 原生流式排序元数据
   final Map<String, dynamic>? streamMeta;
   final Map<String, dynamic>? turnUsage;

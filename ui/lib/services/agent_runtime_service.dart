@@ -1837,12 +1837,17 @@ class AgentRuntimeService {
   }
 
   static Future<CodexRemoteFilePayload> readRemoteFile({
+    String? agentId,
+    String? sessionId,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
     required String path,
   }) async {
     final result = await _invokeMap('config/remote/fs/read', {
+      if (agentId != null && agentId.trim().isNotEmpty) 'agentId': agentId.trim(),
+      if (sessionId != null && sessionId.trim().isNotEmpty)
+        'sessionId': sessionId.trim(),
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
