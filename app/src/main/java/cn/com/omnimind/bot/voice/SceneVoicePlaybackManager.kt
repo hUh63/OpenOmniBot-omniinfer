@@ -176,6 +176,13 @@ class SceneVoicePlaybackManager(
     @Volatile
     private var currentPaused = false
 
+    /**
+     * 朗读全程持有的前台服务租约。targetSdk 37 起，后台朗读没有前台服务会被系统回收，
+     * 所以队列跑起来就先要一个租约；要不到（例如后台任务里没有可见 Activity）就按原来的
+     * 进程内播放继续，宁可少一层保护也不让朗读直接失败。
+     */
+    private var foregroundLease: SceneVoiceForegroundLeases.Lease? = null
+
     fun setEventEmitter(emitter: ((Map<String, Any?>) -> Unit)?) {
         eventEmitter = emitter
     }
@@ -276,6 +283,7 @@ class SceneVoicePlaybackManager(
         }
         // FlutterEngine 重建会 new 一个新的 manager：旧 scope 没有父作用域，不 cancel
         // 就永久存活，连带 OkHttp 的 Dispatcher 线程池 / ConnectionPool 一起累积。
+        releaseForegroundLease()
         scope.cancel()
         runCatching { platformHttpClient.dispatcher.executorService.shutdown() }
         runCatching { platformHttpClient.connectionPool.evictAll() }
@@ -381,6 +389,40 @@ class SceneVoicePlaybackManager(
         )
     }
 
+    private suspend fun acquireForegroundLease() {
+        if (foregroundLease?.isReady == true) return
+        releaseForegroundLease()
+        val lease = runCatching {
+            SceneVoicePlaybackService.acquire(appContext, this) { stopped, error ->
+                if (foregroundLease !== stopped) return@acquire
+                foregroundLease = null
+                if (!error.isNullOrBlank()) {
+                    OmniLog.w(TAG, "voice foreground service stopped: $error")
+                } else {
+                    OmniLog.w(TAG, "voice foreground service stopped")
+                }
+                // 通知栏点「停止朗读」/ 系统收回前台服务：租约一失效就停播，
+                // 否则会留下没有前台服务的孤立播放。
+                stop(currentMessageId)
+            }
+        }.getOrNull()
+        if (lease == null) {
+            OmniLog.w(TAG, "voice foreground lease unavailable, playing without foreground service")
+            return
+        }
+        foregroundLease = lease
+        runCatching { lease.awaitReady() }
+            .onFailure {
+                OmniLog.w(TAG, "voice foreground lease not ready type=${it.javaClass.simpleName}")
+            }
+    }
+
+    private fun releaseForegroundLease() {
+        val lease = foregroundLease ?: return
+        foregroundLease = null
+        runCatching { SceneVoicePlaybackService.leases.release(lease) }
+    }
+
     private fun ensureProcessorLocked() {
         if (processorJob?.isActive == true) {
             return
@@ -391,30 +433,36 @@ class SceneVoicePlaybackManager(
     }
 
     private suspend fun processLoop() {
-        while (true) {
-            val item = synchronized(lock) {
-                queue.removeFirstOrNull()?.also {
-                    currentMessageId = it.messageId
-                    currentStopRequested = false
-                }
-            } ?: break
-            try {
-                processItem(item)
-            } catch (t: Throwable) {
-                OmniLog.e(TAG, "voice playback failed type=${t.javaClass.simpleName}")
-                val safeError = if (t is PlatformGatewayException) {
-                    t.message
-                } else {
-                    "voice playback failed (${t.javaClass.simpleName})"
-                }
-                emitState(item.messageId, "error", error = safeError)
-            } finally {
-                releaseCurrentPlaybackResources()
-                synchronized(lock) {
-                    currentMessageId = null
-                    currentStopRequested = false
+        acquireForegroundLease()
+        try {
+            while (true) {
+                val item = synchronized(lock) {
+                    queue.removeFirstOrNull()?.also {
+                        currentMessageId = it.messageId
+                        currentStopRequested = false
+                    }
+                } ?: break
+                try {
+                    processItem(item)
+                } catch (t: Throwable) {
+                    OmniLog.e(TAG, "voice playback failed type=${t.javaClass.simpleName}")
+                    val safeError = if (t is PlatformGatewayException) {
+                        t.message
+                    } else {
+                        "voice playback failed (${t.javaClass.simpleName})"
+                    }
+                    emitState(item.messageId, "error", error = safeError)
+                } finally {
+                    releaseCurrentPlaybackResources()
+                    synchronized(lock) {
+                        currentMessageId = null
+                        currentStopRequested = false
+                    }
                 }
             }
+        } finally {
+            // 队列跑空 / 被 cancel：整个播放会话结束才放掉前台服务。
+            releaseForegroundLease()
         }
         synchronized(lock) {
             processorJob = null
