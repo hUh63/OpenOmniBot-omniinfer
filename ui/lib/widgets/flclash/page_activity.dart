@@ -119,7 +119,7 @@ class _PageLoad {
 mixin FlClashPageLoadMixin<T extends StatefulWidget> on State<T> {
   final _pageLoads = <Object, _PageLoad>{};
   final _pageDisposed = Completer<void>();
-  final _routeActivation = FlClashRouteActivation();
+  final _routeActivation = RouteActivation();
 
   @override
   void didChangeDependencies() {
