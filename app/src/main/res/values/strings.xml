@@ -36,4 +36,5 @@
     <string name="quick_log_delete_success">记忆已删除</string>
     <string name="quick_log_delete_failed">删除失败，请重试</string>
     <string name="quick_log_not_found">这条记忆已经不存在了</string>
+    <string name="personal_context_notification_access">通知访问</string>
 </resources>
