@@ -121,7 +121,7 @@ class SceneVoicePlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(if (english) "Reading aloud" else "正在朗读")
             .setContentText(if (english) "Preparing or playing voice messages" else "正在合成或播放语音消息")
             .setContentIntent(openApp)

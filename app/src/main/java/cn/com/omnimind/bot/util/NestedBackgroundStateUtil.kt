@@ -14,8 +14,12 @@ import androidx.lifecycle.Lifecycle.Event.ON_STOP
  */
 class NestedBackgroundStateUtil private constructor() : Application.ActivityLifecycleCallbacks, LifecycleObserver {
     private var listener: NestedBackgroundStateListener? = null
+    @Volatile
     private var activityCount = 0
     private var isInBackground = false
+
+    /** 当前是否有处于 started 状态的 Activity：前台服务等场景据此判断能否合法启动。 */
+    val hasVisibleActivity: Boolean get() = activityCount > 0
 
     companion object {
         @Volatile
