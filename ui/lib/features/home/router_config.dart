@@ -8,6 +8,7 @@ import 'package:ui/features/home/pages/authorize_setting/authorize_setting_page.
 import 'package:ui/features/home/pages/agent/remote_codex_setting_page.dart';
 import 'package:ui/features/home/pages/agent/agent_sessions_page.dart';
 import 'package:ui/features/home/pages/agent/agent_mode_setting_page.dart';
+import 'package:ui/features/home/pages/main_navigation_page.dart';
 import 'package:ui/features/home/pages/agent/agent_config_page.dart';
 import 'package:ui/features/home/pages/chat_history/chat_history_page.dart';
 import 'package:ui/features/home/pages/permission_guide/permission_guide_detail_page.dart';
@@ -136,9 +137,13 @@ List<GoRoute> homeRoutes = [
   GoRoute(
     path: '/home/home',
     name: 'home/home',
-    builder: (context, state) {
-      return ChatPage(threadTarget: _parseChatThreadTarget(state));
-    },
+    // 首页是四个 keep-alive 面（会话 / 助手 / 轨迹 / 设置）；打开具体会话或配置
+    // 仍然 push 原来的路由，功能入口一个不少。
+    builder: (context, state) => MainNavigationPage(
+      initialTab: MainNavigationTab.fromName(
+        state.uri.queryParameters['tab'],
+      ),
+    ),
   ),
   GoRoute(
     path: '/home/blank_page',

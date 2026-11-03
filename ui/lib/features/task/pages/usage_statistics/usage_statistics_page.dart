@@ -9,7 +9,14 @@ import 'package:ui/widgets/common_app_bar.dart';
 /// This page intentionally depends only on conversation and token-usage data.
 /// It remains independent from the legacy task-execution history feature.
 class UsageStatisticsPage extends StatelessWidget {
-  const UsageStatisticsPage({super.key});
+  const UsageStatisticsPage({
+    super.key,
+    this.embedded = false,
+    this.active = true,
+  });
+
+  final bool embedded;
+  final bool active;
 
   @override
   Widget build(BuildContext context) {

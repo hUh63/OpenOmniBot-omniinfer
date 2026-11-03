@@ -104,6 +104,8 @@ class HomeDrawer extends ConsumerStatefulWidget {
     this.memoryCount,
     this.newConversationMode = ConversationMode.agent,
     this.embedded = false,
+    this.homePage = false,
+    this.active = true,
     this.closeOnNavigate = true,
     this.onThreadTargetSelected,
     this.onSearchFocusChanged,
@@ -113,6 +115,11 @@ class HomeDrawer extends ConsumerStatefulWidget {
   final int? memoryCount;
   final ConversationMode newConversationMode;
   final bool embedded;
+  /// true 表示它自己就是首页内容（MainNavigationPage 的 home tab），而不是盖在
+  /// 聊天页上的抽屉：不包 Drawer、不跟随导航关闭。
+  final bool homePage;
+  /// tab 当前是否可见；keep-alive 下用来避免后台重复刷新。
+  final bool active;
   final bool closeOnNavigate;
   final ValueChanged<ConversationThreadTarget>? onThreadTargetSelected;
   final ValueChanged<bool>? onSearchFocusChanged;

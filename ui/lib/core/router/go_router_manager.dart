@@ -33,7 +33,8 @@ class RouteOptions {
 
 /// GoRouter路由管理器
 class GoRouterManager {
-  static const String homeRoute = '/home/chat';
+  // 首页是 MainNavigationPage（会话/助手/轨迹/设置四 tab）；聊天页改为 push 打开。
+  static const String homeRoute = '/home/home';
   static final GlobalKey<NavigatorState> _rootNavigatorKey =
       GlobalKey<NavigatorState>();
   static final GlobalKey<NavigatorState> _shellNavigatorKey =
@@ -394,7 +395,7 @@ class GoRouterManager {
 
   static String _normalizeHomeRoute(String route) {
     final uri = Uri.parse(route);
-    if (uri.path == '/home/home') {
+    if (uri.path == homeRoute) {
       return uri.replace(path: homeRoute).toString();
     }
     return route;

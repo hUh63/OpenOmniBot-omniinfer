@@ -17,7 +17,14 @@ import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/settings_detail_sheet.dart';
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({
+    super.key,
+    this.embedded = false,
+    this.active = true,
+  });
+
+  final bool embedded;
+  final bool active;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();

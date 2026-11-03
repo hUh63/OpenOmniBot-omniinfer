@@ -306,7 +306,7 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
     await StorageService.setBool(StorageKeys.welcomeCompleted, true);
     if (!mounted) return;
     setState(() => _isCompletingTutorial = false);
-    GoRouterManager.clearAndNavigateTo('/home/chat');
+    GoRouterManager.clearAndNavigateTo(GoRouterManager.homeRoute);
   }
 
   // -------------------------------------------------------------------------

@@ -19,7 +19,15 @@ import 'package:ui/widgets/settings_section_title.dart';
 enum _AgentFilter { all, available, unavailable }
 
 class AgentModeSettingPage extends StatefulWidget {
-  const AgentModeSettingPage({super.key});
+  const AgentModeSettingPage({
+    super.key,
+    this.embedded = false,
+    this.active = true,
+  });
+
+  /// 作为 MainNavigationPage 的 tab 内容嵌入时，不再自带整页 AppBar。
+  final bool embedded;
+  final bool active;
 
   @override
   State<AgentModeSettingPage> createState() => _AgentModeSettingPageState();

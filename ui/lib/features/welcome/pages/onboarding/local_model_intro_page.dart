@@ -368,7 +368,7 @@ class _LocalModelIntroPageState extends State<LocalModelIntroPage>
                           StorageKeys.welcomeCompleted,
                           true,
                         );
-                        GoRouterManager.clearAndNavigateTo('/home/chat');
+                        GoRouterManager.clearAndNavigateTo(GoRouterManager.homeRoute);
                         GoRouterManager.push(
                           '/home/local_models?tab=market&backend=$kOnboardingRecommendedBackend&pinned=$kOnboardingRecommendedModelId',
                         );
