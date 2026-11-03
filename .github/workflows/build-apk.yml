@@ -113,87 +113,45 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.10
+          tag_name: v0.6.3-omniinfer-v6.5.11
           # Without this the tag lands on the default branch's HEAD instead of the
           # commit this build actually checked out.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 可选 Root 后端 / 特权链路与数据库修复 / webchat 稳定性 (v0.6.3-omniinfer-v6.5.10)"
+          name: "OmniInfer 版 · 四 tab 主界面 / 历史分片读 / 第三方 Agent 卸载 / targetSdk 37 (v0.6.3-omniinfer-v6.5.11)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6.5.10)：9 个提交，主线是「合并上游 0.7 的可选 Root 后端」「把特权链路 / 数据库 / webchat
-            一批真实缺陷修掉」，以及一轮新的全域排查（崩溃、泄漏、启动阻塞）。全部改动只过编译门，未做
-            真机回归；涉及 Root / Shizuku 的功能请在已授权设备上验证。
+            本轮 (v6.5.11)：15 个提交，主线是「合并上游 0.7 的主界面与导航重构」「历史展示加内存上限」
+            「第三方 Agent 可控卸载」，以及 targetSdk 37 适配。全部改动只过编译门，未做真机回归。
 
-            一、可选 Root 后端（对齐上游 0.7）
-            - baselib 新增 privileged 包（能力管理 / 命令执行 / 会话注册 / 设备控制 / 动作策略 / Root 探测），
-              Shizuku 与 Root 共用同一套工具面；设置页新增「Root 访问」入口（开关 + 状态 + 一键检测）。
-            - 工具层：android_privileged_action 支持 root 后端，shell.exec / 设备动作按授权结果放行。
+            一、主界面与导航（对齐上游 0.7）
+            - 首页改为四 tab（首页 / Agents / 轨迹 / 设置），聊天页改为 push 打开；原抽屉内的入口全部保留，
+              设置页能力未减。
+            - 引入 FlClash 导航与玻璃组件族（含 liquid glass shader 与许可证声明），首批页面接入玻璃化外观。
 
-            二、特权执行链路 5 处缺陷
-            - 命令黑名单左边界不含 `/`：`/system/bin/reboot` 这类绝对路径可直接绕过；改为否定前瞻。
-            - 持久 shell 把「命令 + 结束标记」一起写进 stdin，读 stdin 的命令会吞掉结束标记，卡到超时被
-              整会话杀掉；改为 `{ command } </dev/null` 分组。
-            - 一次 su IO 失败就把 Root 判为不可用并清掉「曾授权」标记，下次启动不再自动探测，Root 永久
-              停在未授权；改为只有「明确被拒」才清标记。
-            - ACP 会话关闭路径用 check() 断言关闭结果，抛异常会跳过 mcpSession.close() 与 onClosed()，
-              会话资源永久泄漏；改为 runCatching + 日志，保证清理链一定走完。
-            - session_start 被取消 / 远程超时后服务端会话残留（按 binding 找不到、按 requestId 也杀不到）；
-              改为先登记再请求，取消路径在 NonCancellable 里回收。
+            二、历史与内存
+            - 历史展示改为「片读 + 展示投影」：SQL 层把超过 32KB 的 summary/payloadJson 换成空串并返回字节数，
+              每批 16 行、合计上限 100 条 / 1MB；超限正文流式复制到 offloads 目录，作为附件打开。
+              超长会话不再撑爆 CursorWindow，翻历史也不再 O(n²)。
+            - 删除会话时连带清理 offloads 目录，避免附件孤儿堆积。
+            - 键集游标与「实际消费行数」语义保持不变，老的分页行为没有回退。
 
-            三、数据库与历史读取
-            - agent_conversation_entries 补 (conversationId, conversationMode, createdAt) 与 entryType 索引，
-              schema 19 → 20（MIGRATION_19_20）：历史读取与 stream_event 普查不再全量排序/全表扫描。
-            - 历史读取与整段加载从 LIMIT/OFFSET 改键集游标，长会话 O(n²) → O(n)。
-            - copyConversationHistory 逐条写入与 refreshConversationMetadata 的读-算-写包进事务
-              （避免半截分叉历史、messageCount 回退）。
-            - 删除会话/占位清理路径连带清 codex_thread_bindings，避免孤儿绑定把已删线程复活。
+            三、第三方 Agent 卸载
+            - 设置页新增卸载入口（二次确认），只删除本应用托管安装的包；外部安装的残留只提示、不删除，
+              卸载失败只探测不重试，避免反复破坏用户设备。
 
-            四、ACP / webchat 稳定性
-            - ACP 会话关闭链路补 finally：mcpSession.close() 失败不再跳过 onClosed/cleanupComplete；
-              stdio MCP 关闭改为先停读再抢锁（原来会卡到 40s 超时，观感是「关不掉」）。
-            - open() 取消时回收已连上的兄弟连接，避免泄漏 MCP 子进程。
-            - webchat：工作区文件 move 原来先删目标再拷贝（同路径会删掉源文件、自嵌套会写满磁盘），
-              改为 canonical 校验 + staging 改名；readFile 带 lineStart 会绕过 1MB 保护并整文件读进内存
-              （几百 MB 日志直接 OOM），改为受字符预算约束并如实标记 truncated。
-            - webchat 实时通道：401 时主动探测并回登录页（原来只标记 offline、每 3 秒无限重连）；
-              ?token= 读完即从地址栏清除。
-            - run 终态看门狗：用户点停止后 ACP 不回终态（进程挂死/连接断）时，该会话会永久锁在
-              「运行中」，之后每次发消息都被拒。补 12s 取消宽限 + 30 分钟零事件双条件本地收敛。
-            - 三张消息 entry 表跨协程读写加锁 + 快照迭代（原会抛 ConcurrentModificationException，
-              打断事件消费协程，run 卡在运行中）。
-            - 流式快照间隔按体量自适应（150ms → 最多 1.2s，目标 ≤1.5MB/s），长会话不再每秒推 6 次整段历史。
+            四、Android 17（targetSdk 37）
+            - 新增 ACCESS_LOCAL_NETWORK 权限链路（MCP / Agent / webchat 各请求点）；未授权时只宣告回环地址，
+              不再给出连不上的局域网 IP。
+            - 语音朗读改为持有前台服务租约：后台朗读不会被系统回收；拿不到租约时仍按原逻辑在进程内播放，
+              朗读不会失败。通知栏「停止朗读」与系统回收都会结束当前条目。
 
-            五、附件（webchat）
-            - 浏览器上传的图片只有 data URL，原来原样落库：base64 进消息 payload，既顶到 Room 单行 2MB
-              的 CursorWindow 上限，又被每帧全量快照重推。改为先落盘，历史只留路径。
-            - 新增 GET /webchat/api/conversations/attachment 按需取图（Cookie 鉴权、Cache-Control 24h），
-              消息里的附件 dataUrl 换成该 URL。
-            - 会话列表实时刷新改为 400ms 去抖 + 串行 + 在飞合并，归档列表只在归档状态变化时刷新
-              （原来每条事件并行拉两次全量列表）。
-
-            六、本轮新排查（崩溃 / 泄漏 / 启动）
-            - stdio MCP 的 stdout/stderr 读取协程没有 catch：子进程退出时抛 IOException 会逃逸到没有
-              CoroutineExceptionHandler 的共享 scope → 进程被杀。一个可选的第三方 MCP 挂掉不该带走整个 App。
-            - 远端重连恢复逐条隔离：任一陈旧 sessionId 失败不再中断整张表的恢复（原来会退避重试 6 次
-              仍命中同一条，所有会话都恢复不了，表现为「bridge 一连就断」）。
-            - 无 listener 期间的事件缓冲加 512 条上限（原来一轮长回答几万条 delta 会一路涨到 OOM）；
-              connect() 等待远端恢复加 20s 上限（原来在 sessionMutex 内可能卡 60s+，切 Provider 全部串行）。
-            - App.onCreate 删掉 runBlocking 等 workspace seed：大迁移必然超过 2s，既把启动钉成 2s 白屏，
-              超时后插件恢复还会和仍在跑的 seeder 并发写 skills 目录。插件恢复改到 seeder 线程末尾串行。
-            - 语音播放 release() 补 scope.cancel() + OkHttp 回收（FlutterEngine 每次重建都泄漏一套）；
-              已缓存 PCM 的停止不再被判定为播放失败。
-            - 闹钟响铃加 5 分钟自动静音（原来 looping + 振动 repeat=0，只能手动关）。
-            - 通知读取设置（枚举全部已安装应用）从平台主线程移到后台线程。
-            - 手动录制浮层：show() 后一帧内取消会跳过 removeView 并清空句柄，留下一层吞掉全屏触摸的
-              幽灵浮层（只能杀进程）；改为无条件 removeViewImmediate。
-            - 自动保存进行中到达的编辑不再被丢弃（Remote PC Bridge 设置）；本地模型页轮询在页面被覆盖时
-              停止；聊天页事件流被原生关闭后自动重订；权限页加载态收进 finally。
-
-            七、安全与上游吸收杂项
-            - MCP token 加密失败时不再降级写明文（该 token 能调 /mcp 全部设备工具）。
-            - 吸收上游：Gson 模型防 R8 剥离、冷启动启动路径精简、models.dev 目录缓存落盘 + 后台解析、
-              运行日志改为有界环形缓冲（流式读取 + 字节预算，避免日志文件无限增长）。
+            五、发布与稳定性
+            - 密钥存储改为 fail-closed（加密不可用不再降级写明文）；冷启动不再在主线程做 IO；OkHttp 不再在
+              构造期建连接池。
+            - proguard 改为 -keep class { <init>(...); <fields>; }，避免 R8 删类 / 合并模型导致 release 版
+              Gson 反序列化失败。
+            - 终端恢复 Material3 导航并移除 Miuix 依赖（JVM 目标回落 17）。
 
             安装后如遇异常，请反馈具体操作路径。
           files: apk-out/*.apk
