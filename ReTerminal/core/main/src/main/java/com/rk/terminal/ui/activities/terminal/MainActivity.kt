@@ -29,7 +29,9 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import top.yukonga.miuix.kmp.nav.core.rememberNavController
+import androidx.navigation.NavDestination.Companion.hasRoute
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
 import com.rk.terminal.service.SessionService
 import com.rk.libcommons.OMNIBOT_SETUP_SESSION_ID
 import com.rk.terminal.ui.navHosts.MainActivityNavHost
@@ -37,7 +39,6 @@ import com.rk.terminal.ui.routes.MainActivityRoutes
 import com.rk.terminal.ui.screens.terminal.TerminalScreen
 import com.rk.terminal.ui.screens.terminal.terminalView
 import com.rk.terminal.ui.theme.KarbonTheme
-import com.rk.terminal.util.PredictiveBackGate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
@@ -45,7 +46,6 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     var sessionBinder:SessionService.SessionBinder? = null
     var isBound = false
-
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -57,16 +57,19 @@ class MainActivity : ComponentActivity() {
                 setContent {
                     KarbonTheme {
                         Surface {
-                            val navController = rememberNavController<MainActivityRoutes>(MainActivityRoutes.MainScreen)
+                            val navController = rememberNavController()
                             MainActivityNavHost(navController = navController, mainActivity = this@MainActivity)
 
-                            val currentRoute = navController.backStack.lastOrNull()
+                            val currentEntry by navController.currentBackStackEntryAsState()
+                            val currentDestination = currentEntry?.destination
 
                             val focusManager = LocalFocusManager.current
                             val keyboardController = LocalSoftwareKeyboardController.current
 
-                            LaunchedEffect(currentRoute) {
-                                if (currentRoute != MainActivityRoutes.MainScreen) {
+                            LaunchedEffect(currentDestination) {
+                                if (currentDestination != null &&
+                                    !currentDestination.hasRoute<MainActivityRoutes.MainScreen>()
+                                ) {
                                     // 1️⃣ Clear Compose focus
                                     focusManager.clearFocus(force = true)
 
@@ -78,12 +81,10 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
-
                         }
                     }
                 }
             }
-
 
         }
 
@@ -116,7 +117,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-
     private var denied = 1
     private val requestNotificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
@@ -138,44 +138,13 @@ class MainActivity : ComponentActivity() {
     var isKeyboardVisible = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        PredictiveBackGate.install(this)
         enableEdgeToEdge()
         requestPermission()
-
-        // Cross-activity transitions matching the main app's page style
-        // (full-width slide in, 25% parallax on the covered page).
-        // On API 34+ these participate in the predictive back gesture.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-            PredictiveBackGate.isPredictiveBackEnabled(this)
-        ) {
-            overrideActivityTransition(
-                OVERRIDE_TRANSITION_OPEN,
-                com.rk.terminal.R.anim.slide_in_right,
-                com.rk.terminal.R.anim.slide_out_left,
-            )
-            overrideActivityTransition(
-                OVERRIDE_TRANSITION_CLOSE,
-                com.rk.terminal.R.anim.slide_in_left,
-                com.rk.terminal.R.anim.slide_out_right,
-            )
-        }
 
         if (intent.hasExtra("awake_intent")){
             moveTaskToBack(true)
         }
 
-    }
-
-    override fun finish() {
-        super.finish()
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-            PredictiveBackGate.isPredictiveBackEnabled(this)
-        ) {
-            overridePendingTransition(
-                com.rk.terminal.R.anim.slide_in_left,
-                com.rk.terminal.R.anim.slide_out_right,
-            )
-        }
     }
 
     var wasKeyboardOpen = false
@@ -197,7 +166,6 @@ class MainActivity : ComponentActivity() {
 
             isKeyboardVisible = isVisible
         }
-
 
         if (wasKeyboardOpen && !isKeyboardVisible){
             terminalView.get()?.let {
