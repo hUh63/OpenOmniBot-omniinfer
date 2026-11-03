@@ -46,7 +46,7 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
   ) {
     HomeDrawerState._hasConversationSnapshotCache = true;
     HomeDrawerState._conversationSnapshotCache = List<ConversationModel>.from(
-      conversations,
+      conversations.where((row) => row.agentId != 'na-cloud'),
     );
     _rememberConversationImagePreviewCacheSnapshot();
   }
@@ -60,7 +60,9 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
   }
 
   void _scheduleDrawerSnapshotPersist(List<ConversationModel> conversations) {
-    final snapshot = List<ConversationModel>.from(conversations);
+    final snapshot = List<ConversationModel>.from(
+      conversations.where((row) => row.agentId != 'na-cloud'),
+    );
     unawaited(
       Future<void>(() async {
         await _persistDrawerSnapshot(snapshot);
@@ -70,7 +72,9 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
 
   void _restoreDrawerSnapshotFromMemory() {
     _allConversations = ConversationService.filterSidebarSnapshot(
-      HomeDrawerState._conversationSnapshotCache,
+      HomeDrawerState._conversationSnapshotCache
+          .where((row) => row.agentId != 'na-cloud')
+          .toList(),
     );
     _conversationImagePreviewCache
       ..clear()
@@ -174,7 +178,6 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     }
 
     _conversationImagePreviewSignatures[threadKey] = signature;
-    _conversationImagePreviewLoadedAt[threadKey] = DateTime.now();
     _conversationImagePreviewCache.remove(threadKey);
     _conversationImagePreviewFailures.remove(threadKey);
     final future = _loadConversationImagePreviews(
@@ -183,15 +186,6 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
       notify: notify,
     );
     _conversationImagePreviewFutures[threadKey] = future;
-    // 在飞标记必须无条件回收：原来只在「签名没变」的分支里 remove，而流式输出会
-    // 让 updatedAt/lastMessage 在加载途中就变掉，于是这条会话的 future 永远留在
-    // map 里，_scheduleConversationImagePreviewLoad 一进来就 return——缩略图从此
-    // 不再更新（要等整行滚出可见区被 prune 才恢复）。按身份删，避免误删后续新请求。
-    future.whenComplete(() {
-      if (identical(_conversationImagePreviewFutures[threadKey], future)) {
-        _conversationImagePreviewFutures.remove(threadKey);
-      }
-    });
     return future;
   }
 
@@ -218,6 +212,12 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
           ? targets.length
           : index + _kConversationImagePreviewPreloadBatchSize;
       final batch = targets.sublist(index, end);
+      // Each preview read decodes a whole conversation history on the UI
+      // isolate. Never start one while the drawer slides.
+      await _waitForDrawerToSettle();
+      if (!mounted) {
+        return;
+      }
       await Future.wait(
         batch.map(
           (conversation) =>
@@ -226,6 +226,27 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
       );
     }
     _rememberConversationImagePreviewCacheSnapshot();
+  }
+
+  /// Yields frames while the enclosing drawer is mid-slide. Other running
+  /// animations (the composer's looping border) must not hold previews back,
+  /// so this reads the drawer's own route animation, not the frame scheduler.
+  Future<void> _waitForDrawerToSettle() async {
+    for (var frame = 0; frame < 60 && mounted && _isDrawerSliding(); frame++) {
+      await SchedulerBinding.instance.endOfFrame;
+    }
+  }
+
+  bool _isDrawerSliding() {
+    if (widget.embedded) return false;
+    final scaffold = Scaffold.maybeOf(context);
+    if (scaffold == null || !scaffold.hasDrawer) return false;
+    // Scaffold exposes no drawer animation; the drawer is settled when its
+    // open state matches a full-width layout of this widget.
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !box.hasSize || !box.attached) return false;
+    final left = box.localToGlobal(Offset.zero).dx;
+    return scaffold.isDrawerOpen ? left.abs() > 0.5 : true;
   }
 
   void _hydrateConversationImagePreviewSnapshotsFromDecoded(
@@ -321,50 +342,10 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     }());
   }
 
-  /// 行首次可见时按需取这条会话的图片预览（同一 threadKey 只跑一次）。
-  void _scheduleConversationImagePreviewLoad(
-    ConversationModel conversation,
-    String signature,
-  ) {
-    final threadKey = conversation.threadKey;
-    if (_conversationImagePreviewFutures.containsKey(threadKey)) {
-      return;
-    }
-    if (_conversationImagePreviewCache.containsKey(threadKey)) {
-      final lastLoadedAt = _conversationImagePreviewLoadedAt[threadKey];
-      if (lastLoadedAt != null &&
-          DateTime.now().difference(lastLoadedAt) <
-              HomeDrawerState._imagePreviewReloadInterval) {
-        // 刚读过一次：签名变化（流式输出的 updatedAt / lastMessage）先沿用旧缩略图。
-        return;
-      }
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      if (_conversationImagePreviewFutures.containsKey(threadKey)) return;
-      // 只有「同签名且已有缓存」才算加载完成。首次加载时签名还没写进 map
-      // （要等 _conversationImagePreviewsFor 开始时才写），所以这里不能用
-      // `signatures[key] != signature` 早退，否则永远拉不到。
-      if (_conversationImagePreviewSignatures[threadKey] == signature &&
-          _conversationImagePreviewCache.containsKey(threadKey)) {
-        return;
-      }
-      unawaited(_conversationImagePreviewsFor(conversation, notify: true));
-    });
-  }
-
   bool _needsConversationImagePreviewPreload(ConversationModel conversation) {
     final threadKey = conversation.threadKey;
     final signature = _conversationImagePreviewSignature(conversation);
     if (_conversationImagePreviewSignatures[threadKey] != signature) {
-      // 签名随 updatedAt / messageCount 变化：流式输出时列表会频繁刷新，
-      // 若每次都重读消息，单单「预热」就能把 IO 打满。短时间内沿用旧的缩略图。
-      final lastLoadedAt = _conversationImagePreviewLoadedAt[threadKey];
-      if (lastLoadedAt != null &&
-          DateTime.now().difference(lastLoadedAt) <
-              HomeDrawerState._imagePreviewReloadInterval) {
-        return false;
-      }
       return true;
     }
     return !_conversationImagePreviewCache.containsKey(threadKey);
@@ -378,8 +359,6 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
     final threadKey = conversation.threadKey;
     try {
       await OmnibotResourceService.ensureWorkspacePathsLoaded();
-      // 缩略图要在「整个会话」里找图（更早的图片也算），所以仍然读完整历史。
-      // 降负载放在别处：只有行可见才加载、且 12s 内不重复读（见加载入口）。
       final messages = await ConversationHistoryService.getConversationMessages(
         conversation.id,
         mode: conversation.mode,
@@ -789,13 +768,6 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
   Widget _buildConversationImagePreviewStrip(ConversationModel conversation) {
     final threadKey = conversation.threadKey;
     final signature = _conversationImagePreviewSignature(conversation);
-    // 抽屉的行是懒构建的：只有真的出现在屏幕上才会走到这里。此前抽屉一打开
-    // 就对「所有未归档会话」逐条拉全部消息来提取图片，会话越多越堵；现在
-    // 首屏只预热最近若干条，其余行首次可见时才去取。
-    if (_conversationImagePreviewSignatures[threadKey] != signature ||
-        !_conversationImagePreviewCache.containsKey(threadKey)) {
-      _scheduleConversationImagePreviewLoad(conversation, signature);
-    }
     final cached = _conversationImagePreviewSignatures[threadKey] == signature
         ? _conversationImagePreviewCache[threadKey]
         : null;

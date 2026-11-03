@@ -6,15 +6,17 @@ class _DrawerShortcutAction {
     required this.onTap,
     this.assetPath,
     this.svgString,
+    this.icon,
   }) : assert(
-         assetPath != null || svgString != null,
-         'assetPath or svgString is required',
+         assetPath != null || svgString != null || icon != null,
+         'An icon is required',
        );
 
   final String label;
   final VoidCallback onTap;
   final String? assetPath;
   final String? svgString;
+  final IconData? icon;
 }
 
 class _ConversationSection {
