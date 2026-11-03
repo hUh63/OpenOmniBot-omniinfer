@@ -28,7 +28,7 @@ class SceneVoicePlaybackService : Service() {
         internal val leases = SceneVoiceForegroundLeases(
             canStart = {
                 Build.VERSION.SDK_INT < 37 ||
-                    NestedBackgroundStateUtil.getInstance().hasVisibleActivity()
+                    NestedBackgroundStateUtil.getInstance().hasVisibleActivity
             },
             startService = { generation ->
                 val context = checkNotNull(appContext)
