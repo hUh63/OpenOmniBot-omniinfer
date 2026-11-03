@@ -21,14 +21,20 @@ import 'package:ui/widgets/settings_section_title.dart';
 class AgentSessionsPage extends StatefulWidget {
   const AgentSessionsPage({
     super.key,
+    this.agentId,
     this.embedded = false,
     this.remoteOnly = false,
     this.onSessionSelected,
   });
 
+  /// 路由通过 extra 指定要展示的 Agent。本仓的会话列表按当前 runtime 统一列取，
+  /// 所以这里只把远程 Agent 映射成 remoteOnly，其余保持页面原有行为。
+  final String? agentId;
   final bool embedded;
   final bool remoteOnly;
   final ValueChanged<ConversationThreadTarget>? onSessionSelected;
+
+  bool get effectiveRemoteOnly => remoteOnly || agentId == 'codex-remote';
 
   @override
   State<AgentSessionsPage> createState() => _AgentSessionsPageState();
@@ -84,7 +90,7 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
   }
 
   bool get _isRemoteRuntime =>
-      widget.remoteOnly || _status.runtime == 'remote' || _status.remoteEnabled;
+      widget.effectiveRemoteOnly || _status.runtime == 'remote' || _status.remoteEnabled;
 
   Future<void> _loadSessions({
     bool showLoading = true,
@@ -103,10 +109,10 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
     }
     AgentRuntimeStatus? lastStatus;
     try {
-      var status = loadMore || widget.remoteOnly
+      var status = loadMore || widget.effectiveRemoteOnly
           ? _status
           : await AgentRuntimeService.status();
-      if (widget.remoteOnly && !loadMore) {
+      if (widget.effectiveRemoteOnly && !loadMore) {
         final config = await AgentRuntimeService.readRemoteBridgeConfig();
         if (!mounted) return;
         if (!config.remoteConfigured) {
@@ -718,7 +724,7 @@ class _AgentSessionsPageState extends State<AgentSessionsPage> {
     }
   }
 
-  String get _title => _isLoading && !widget.remoteOnly
+  String get _title => _isLoading && !widget.effectiveRemoteOnly
       ? (LegacyTextLocalizer.localize('会话'))
       : _isRemoteRuntime
       ? (LegacyTextLocalizer.localize('远程 Codex Sessions'))

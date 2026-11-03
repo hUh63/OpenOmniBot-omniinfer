@@ -345,7 +345,7 @@ class MessageBubble extends StatelessWidget {
     return Wrap(
       spacing: 8,
       runSpacing: 8,
-      children: attachments.map((item) {
+      children: attachments.map<Widget>((item) {
         if (item['historyPayloadOffloaded'] == true) {
           return HistoryPayloadAttachment(attachment: item);
         }

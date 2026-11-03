@@ -356,6 +356,11 @@ class AccountService {
 
   static Future<void> logout() => _channel.invokeMethod<void>('logout');
 
+  /// 读取当前用户邮箱（仅用于反馈表单预填），不触发 AI 服务开通。
+  /// 原生没实现该方法时返回空串：反馈表单不依赖邮箱也能提交。
+  static Future<String> getFeedbackEmail() async =>
+      (await _channel.invokeMethod<String>('getFeedbackEmail'))?.trim() ?? '';
+
   static Future<AccountOverview> getOverview() async {
     final result = await _requiredMap('getOverview');
     return AccountOverview.fromMap(result);

@@ -18,6 +18,8 @@ class CodexRemoteFilePreviewPage extends StatefulWidget {
     super.key,
     required this.path,
     this.title,
+    this.agentId,
+    this.sessionId,
     this.remoteBridgeUrl = '',
     this.remoteBridgeToken = '',
     this.remoteCwd = '',
@@ -26,6 +28,11 @@ class CodexRemoteFilePreviewPage extends StatefulWidget {
 
   final String path;
   final String? title;
+
+  /// 打开该文件的 Agent 与其会话。本仓按 path + bridge 配置取内容，这里只保留
+  /// 上游路由传下来的身份信息，便于后续按 Agent 区分来源。
+  final String? agentId;
+  final String? sessionId;
   final String remoteBridgeUrl;
   final String remoteBridgeToken;
   final String remoteCwd;

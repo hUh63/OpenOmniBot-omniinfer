@@ -8,7 +8,7 @@ List<GoRoute> homeLocalModelRoutes = [
   GoRoute(
     path: '/home/local_models',
     name: 'home/local_models',
-    pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
+    pageBuilder: (context, state) => GoRouterManager.buildPage(
       key: state.pageKey,
       name: 'home/local_models',
       child: LocalModelsPage(
@@ -21,7 +21,7 @@ List<GoRoute> homeLocalModelRoutes = [
   GoRoute(
     path: '/home/imessage_setting',
     name: 'home/imessage_setting',
-    pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
+    pageBuilder: (context, state) => GoRouterManager.buildPage(
       key: state.pageKey,
       name: 'home/imessage_setting',
       child: const ImessageSettingPage(),
@@ -30,7 +30,7 @@ List<GoRoute> homeLocalModelRoutes = [
   GoRoute(
     path: '/home/companion_setting',
     name: 'home/companion_setting',
-    pageBuilder: (context, state) => GoRouterManager.buildActivitySlidePage(
+    pageBuilder: (context, state) => GoRouterManager.buildPage(
       key: state.pageKey,
       name: 'home/companion_setting',
       child: const CompanionSettingPage(),

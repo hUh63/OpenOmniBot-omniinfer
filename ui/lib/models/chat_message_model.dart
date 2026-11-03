@@ -32,6 +32,11 @@ class ChatMessageModel {
   /// 是否为总结中状态
   final bool isSummarizing;
 
+  /// 历史展示投影把超大正文换成附件时，原生会在 content 上打 historyPayloadOffloaded；
+  /// 这时正文只是预览，不能据此编辑原文，也不该拿它重试。
+  bool get isHistoryPayloadOffloaded =>
+      content?['historyPayloadOffloaded'] == true;
+
   /// 原生流式排序元数据
   final Map<String, dynamic>? streamMeta;
   final Map<String, dynamic>? turnUsage;
