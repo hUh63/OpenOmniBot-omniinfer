@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/widget_previews.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:ui/widgets/omni_navigation_rail.dart';
 
 import 'navigation_dock.dart';
 import 'liquid_glass.dart';
@@ -37,15 +38,40 @@ Widget flClashNavigationGlassDarkStandardPreview() => const _DockPreview(
 Widget flClashNavigationGlassDarkUltraPreview() =>
     const _DockPreview(dark: true, glass: true);
 
+@Preview(name: 'FlClash rail glass · light · standard', size: Size(390, 540))
+Widget flClashRailGlassLightStandardPreview() => const _DockPreview(
+  rail: true,
+  glass: true,
+  quality: LiquidGlassQuality.standard,
+);
+
+@Preview(name: 'FlClash rail glass · light · ultra', size: Size(390, 540))
+Widget flClashRailGlassLightUltraPreview() =>
+    const _DockPreview(rail: true, glass: true);
+
+@Preview(name: 'FlClash rail glass · dark · standard', size: Size(390, 540))
+Widget flClashRailGlassDarkStandardPreview() => const _DockPreview(
+  rail: true,
+  dark: true,
+  glass: true,
+  quality: LiquidGlassQuality.standard,
+);
+
+@Preview(name: 'FlClash rail glass · dark · ultra', size: Size(390, 540))
+Widget flClashRailGlassDarkUltraPreview() =>
+    const _DockPreview(rail: true, dark: true, glass: true);
+
 class _DockPreview extends StatefulWidget {
   const _DockPreview({
     this.dark = false,
     this.glass = false,
+    this.rail = false,
     this.quality = LiquidGlassQuality.ultra,
   });
 
   final bool dark;
   final bool glass;
+  final bool rail;
   final LiquidGlassQuality quality;
 
   @override
@@ -54,6 +80,14 @@ class _DockPreview extends StatefulWidget {
 
 class _DockPreviewState extends State<_DockPreview> {
   int _selectedIndex = 0;
+  static const _destinations = [
+    FlClashNavigationDestination(icon: LucideIcons.house, label: '首页'),
+    FlClashNavigationDestination(icon: LucideIcons.bot, label: 'Agents'),
+    FlClashNavigationDestination(icon: LucideIcons.route, label: '轨迹'),
+    FlClashNavigationDestination(icon: LucideIcons.settings, label: '设置'),
+  ];
+
+  void _select(int value) => setState(() => _selectedIndex = value);
 
   @override
   Widget build(BuildContext context) {
@@ -65,30 +99,23 @@ class _DockPreviewState extends State<_DockPreview> {
         children: [
           Center(child: Text(['首页', 'Agents', '轨迹', '设置'][_selectedIndex])),
           Align(
-            alignment: Alignment.bottomCenter,
-            child: FlClashNavigationDock(
-              selectedIndex: _selectedIndex,
-              onDestinationSelected: (value) =>
-                  setState(() => _selectedIndex = value),
-              destinations: const [
-                FlClashNavigationDestination(
-                  icon: LucideIcons.house,
-                  label: '首页',
-                ),
-                FlClashNavigationDestination(
-                  icon: LucideIcons.bot,
-                  label: 'Agents',
-                ),
-                FlClashNavigationDestination(
-                  icon: LucideIcons.route,
-                  label: '轨迹',
-                ),
-                FlClashNavigationDestination(
-                  icon: LucideIcons.settings,
-                  label: '设置',
-                ),
-              ],
-            ),
+            alignment: widget.rail
+                ? Alignment.centerLeft
+                : Alignment.bottomCenter,
+            child: widget.rail
+                ? SizedBox(
+                    width: OmniNavigationRail.width,
+                    child: OmniNavigationRail(
+                      destinations: _destinations,
+                      selectedIndex: _selectedIndex,
+                      onDestinationSelected: _select,
+                    ),
+                  )
+                : FlClashNavigationDock(
+                    selectedIndex: _selectedIndex,
+                    onDestinationSelected: _select,
+                    destinations: _destinations,
+                  ),
           ),
         ],
       ),

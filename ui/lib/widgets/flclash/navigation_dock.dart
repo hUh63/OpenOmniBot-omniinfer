@@ -1,7 +1,8 @@
 // Adapted from FlClash (GPL-3.0), lib/ui/navigation_dock.dart.
 // Source: https://github.com/chen08209/FlClash/tree/7fd417fb9a9a277c6a9339a8ac87f907df7c25f7
 // OmnibotApp modifications: Flutter Material imports, IconData destinations,
-// and the upstream solid/glass surfaces, quality modes and lifted selection lens.
+// the upstream solid/glass surfaces, quality modes and lifted selection lens,
+// and an axis-aware layout for the tablet rail using the same glass engine.
 // Geometry, spring simulations, lens tinting and pointer handling are retained.
 
 // Keep upstream render-object constructors recognizable when comparing ports.
@@ -126,7 +127,10 @@ double _rubberBand(double overshoot, double limit) {
 double _saturate(double value) => 1 - 2 / (math.exp(2 * value) + 1);
 
 /// The lens's box, measured from the start edge of the destination at 0.
+/// Width/height retain the upstream main/cross extents; only the resulting
+/// geometry is transposed for a rail, leaving content and capture upright.
 Rect _lensRect({
+  required Axis axis,
   required double position,
   required double stretch,
   required double pitch,
@@ -137,13 +141,28 @@ Rect _lensRect({
   final growth = _lensGrowth * 2 * lift;
   final lensWidth = (width + growth) * (1 + stretch);
   final lensHeight = (height + growth) * (1 - stretch * _jellyAspect);
-  return Rect.fromLTWH(
+  final rect = Rect.fromLTWH(
     (position + 0.5) * pitch - lensWidth / 2,
     (height - lensHeight) / 2,
     lensWidth,
     lensHeight,
   );
+  return axis == Axis.horizontal
+      ? rect
+      : Rect.fromLTWH(rect.top, rect.left, rect.height, rect.width);
 }
+
+double _mainExtent(Size size, Axis axis) =>
+    axis == Axis.horizontal ? size.width : size.height;
+
+double _mainPosition(Offset offset, Axis axis) =>
+    axis == Axis.horizontal ? offset.dx : offset.dy;
+
+Offset _alongAxis(double value, Axis axis) =>
+    axis == Axis.horizontal ? Offset(value, 0) : Offset(0, value);
+
+TextDirection _layoutDirection(BuildContext context, Axis axis) =>
+    axis == Axis.horizontal ? Directionality.of(context) : TextDirection.ltr;
 
 /// Spaces destinations as iOS's tab bar does: the resting lens overhangs its
 /// destination by [_barPadding] and never narrows below [_minLensWidth].
@@ -317,10 +336,17 @@ class _DockSurface extends StatelessWidget {
 }
 
 class FlClashNavigationDestination {
-  const FlClashNavigationDestination({required this.icon, required this.label});
+  const FlClashNavigationDestination({
+    this.key,
+    required this.icon,
+    required this.label,
+    this.tooltip,
+  });
 
+  final Key? key;
   final IconData icon;
   final String label;
+  final String? tooltip;
 }
 
 class FlClashNavigationDock extends StatelessWidget {
@@ -329,12 +355,17 @@ class FlClashNavigationDock extends StatelessWidget {
     required this.destinations,
     required this.selectedIndex,
     required this.onDestinationSelected,
+    this.axis = Axis.horizontal,
   }) : assert(destinations.length > 0),
        assert(selectedIndex >= 0 && selectedIndex < destinations.length);
 
   final List<FlClashNavigationDestination> destinations;
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
+
+  /// Vertical uses the parent's width and scrolls when its destinations cannot
+  /// fit at their natural height. Both axes share the same optics and motion.
+  final Axis axis;
 
   static double heightOf(BuildContext context) {
     return _barHeight +
@@ -351,6 +382,9 @@ class FlClashNavigationDock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (axis == Axis.vertical) {
+      return _buildVertical(context);
+    }
     final height = heightOf(context);
     final dock = Padding(
       padding: EdgeInsets.fromLTRB(
@@ -396,17 +430,71 @@ class FlClashNavigationDock extends StatelessWidget {
       child: RepaintBoundary(child: LayoutBuilder(builder: (_, _) => dock)),
     );
   }
+
+  Widget _buildVertical(BuildContext context) {
+    final itemExtent = math.max(
+      _maxItemExtent,
+      _iconSize +
+          _labelGap +
+          MediaQuery.textScalerOf(context).scale(_labelSize) *
+              _labelLeading /
+              _labelSize +
+          _barPadding * 4,
+    );
+    final barExtent = destinations.length * itemExtent + _barPadding * 4;
+    final extent = barExtent + _shadowRoom * 2;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scrolls = constraints.maxHeight < extent;
+        return SizedBox(
+          height: math.min(extent, constraints.maxHeight),
+          child: SingleChildScrollView(
+            clipBehavior: scrolls ? Clip.hardEdge : Clip.none,
+            physics: scrolls ? null : const NeverScrollableScrollPhysics(),
+            child: Padding(
+              padding: const EdgeInsets.all(_shadowRoom),
+              child: _HitSlop(
+                axis: Axis.vertical,
+                child: SizedBox(
+                  height: barExtent,
+                  child: RepaintBoundary(
+                    child: _FloatingNavigationBar(
+                      axis: Axis.vertical,
+                      dragSelectionEnabled: !scrolls,
+                      destinations: destinations,
+                      selectedIndex: selectedIndex,
+                      onDestinationSelected: onDestinationSelected,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 /// Lets a touch that misses the dock by at most [_hitSlop] still reach it.
 class _HitSlop extends SingleChildRenderObjectWidget {
-  const _HitSlop({super.child});
+  const _HitSlop({this.axis = Axis.horizontal, super.child});
+
+  final Axis axis;
 
   @override
-  RenderObject createRenderObject(BuildContext context) => _RenderHitSlop();
+  RenderObject createRenderObject(BuildContext context) => _RenderHitSlop(axis);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderHitSlop renderObject) {
+    renderObject.axis = axis;
+  }
 }
 
 class _RenderHitSlop extends RenderProxyBox {
+  _RenderHitSlop(this.axis);
+
+  Axis axis;
   @override
   bool hitTest(BoxHitTestResult result, {required Offset position}) {
     if (size.contains(position)) {
@@ -426,6 +514,12 @@ class _RenderHitSlop extends RenderProxyBox {
   // A pill's rounded ends clip hit tests; its straight core never does.
   Offset _onSpine(Offset position) {
     final radius = size.shortestSide / 2;
+    if (axis == Axis.vertical) {
+      return Offset(
+        size.width / 2,
+        position.dy.clamp(radius, size.height - radius),
+      );
+    }
     return Offset(
       position.dx.clamp(radius, size.width - radius),
       size.height / 2,
@@ -549,11 +643,15 @@ class _FloatingNavigationBar extends StatefulWidget {
     required this.destinations,
     required this.selectedIndex,
     required this.onDestinationSelected,
+    this.axis = Axis.horizontal,
+    this.dragSelectionEnabled = true,
   });
 
   final List<FlClashNavigationDestination> destinations;
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
+  final Axis axis;
+  final bool dragSelectionEnabled;
 
   @override
   State<_FloatingNavigationBar> createState() => __FloatingNavigationBarState();
@@ -581,7 +679,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
   bool _lifted = false;
   int? _pointer;
   int? _pressedIndex;
-  double _pressX = 0;
+  double _pressPosition = 0;
   bool _dragging = false;
   bool _dropping = false;
   VelocityTracker? _tracker;
@@ -593,7 +691,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
   int get _selectedIndex => widget.selectedIndex.clamp(0, _lastIndex);
 
   ({double pitch, double lens, double inset}) get _layout => _dockLayout(
-    context.size!.width - _barPadding * 2,
+    _mainExtent(context.size!, widget.axis) - _barPadding * 2,
     widget.destinations.length,
   );
 
@@ -615,6 +713,13 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
   @override
   void didUpdateWidget(covariant _FloatingNavigationBar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.axis != widget.axis ||
+        oldWidget.dragSelectionEnabled != widget.dragSelectionEnabled) {
+      _cursor = null;
+      _cancelPress();
+      _hoverAt.value = null;
+      _hoverShow.springTo(0, _fadeSpring);
+    }
     _syncParallax();
     _leanContent();
     final rest = _lensRest;
@@ -708,12 +813,15 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
   }
 
   double _positionAt(Offset localPosition) {
-    final width = context.size!.width;
-    final dx = Directionality.of(context) == TextDirection.ltr
-        ? localPosition.dx
-        : width - localPosition.dx;
+    final span = _mainExtent(context.size!, widget.axis);
+    final mainPosition = _mainPosition(localPosition, widget.axis);
+    final positionFromStart =
+        _layoutDirection(context, widget.axis) == TextDirection.ltr
+        ? mainPosition
+        : span - mainPosition;
     final layout = _layout;
-    final position = (dx - _barPadding - layout.inset) / layout.pitch - 0.5;
+    final position =
+        (positionFromStart - _barPadding - layout.inset) / layout.pitch - 0.5;
     if (position < 0) {
       return _rubberBand(position, _overdrag);
     }
@@ -825,7 +933,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
     final tracker = _tracker;
     _tracker = null;
     if (event is PointerUpEvent && tracker != null) {
-      _fling(tracker.getVelocity().pixelsPerSecond.dx);
+      _fling(_mainPosition(tracker.getVelocity().pixelsPerSecond, widget.axis));
     }
     _release(commit: event is PointerUpEvent);
     _glow.springTo(0, _glowOutSpring);
@@ -844,7 +952,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
     }
     final index = _indexAt(_positionAt(localPosition));
     _pressedIndex = index;
-    _pressX = localPosition.dx;
+    _pressPosition = _mainPosition(localPosition, widget.axis);
     _dragging = false;
     _dropping = false;
     _lift.springTo(1, _liftSpring);
@@ -856,14 +964,22 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
       return;
     }
     if (!_dragging) {
-      if ((localPosition.dx - _pressX).abs() < kTouchSlop) {
+      if ((_mainPosition(localPosition, widget.axis) - _pressPosition).abs() <
+          kTouchSlop) {
+        return;
+      }
+      // In a short viewport, this gesture scrolls the rail. Its raw pointer
+      // listener must not commit a destination when the scroll is released.
+      if (!widget.dragSelectionEnabled) {
+        _cancelPress();
         return;
       }
       _dragging = true;
     }
     final size = context.size!;
+    final mainPosition = _mainPosition(localPosition, widget.axis);
     final overshoot =
-        localPosition.dx - localPosition.dx.clamp(0.0, size.width);
+        mainPosition - mainPosition.clamp(0.0, _mainExtent(size, widget.axis));
     _stretch.springTo(
       _rubberBand(overshoot, size.shortestSide * _pullLimit),
       _trackSpring,
@@ -879,15 +995,16 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
 
   /// Carries a drag let go mid-flick on to the next destination, at most one
   /// past the one under the finger.
-  void _fling(double velocityX) {
+  void _fling(double velocity) {
     final pressed = _pressedIndex;
     if (!_dragging || pressed == null) {
       return;
     }
     final extent = _layout.pitch;
-    final direction = Directionality.of(context) == TextDirection.ltr ? 1 : -1;
+    final direction =
+        _layoutDirection(context, widget.axis) == TextDirection.ltr ? 1 : -1;
     final lead =
-        velocityX /
+        velocity /
         extent *
         direction *
         _flingProjection.inMicroseconds /
@@ -915,6 +1032,16 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
     if (commit && index != widget.selectedIndex) {
       widget.onDestinationSelected(index);
     }
+  }
+
+  void _cancelPress() {
+    _pointer = null;
+    _tracker = null;
+    _release(commit: false);
+    _glow.springTo(0, _glowOutSpring);
+    _glowSpread.springTo(1, _glowOutSpring);
+    _stretch.springTo(0, _pressSpring);
+    _settleSwell(_pressSpring);
   }
 
   @override
@@ -967,29 +1094,41 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
                 child: LayoutBuilder(
                   builder: (context, constraints) {
                     final layout = _dockLayout(
-                      constraints.maxWidth,
+                      _mainExtent(constraints.biggest, widget.axis),
                       widget.destinations.length,
                     );
-                    final room = layout.pitch - _labelInset * 2;
+                    final room =
+                        (widget.axis == Axis.horizontal
+                            ? layout.pitch
+                            : constraints.maxWidth) -
+                        _labelInset * 2;
                     final labelScale = widest <= room
                         ? 1.0
                         : math.max(room / widest, _minLabelSize / _labelSize);
                     Rect lensRect() => _lensRect(
+                      axis: widget.axis,
                       position: _lens.value,
                       stretch: _jelly.value,
                       pitch: layout.pitch,
                       width: layout.lens,
-                      height: constraints.maxHeight,
+                      height: widget.axis == Axis.horizontal
+                          ? constraints.maxHeight
+                          : constraints.maxWidth,
                       lift: _lift.value,
-                    ).shift(Offset(layout.inset, 0));
+                    ).shift(_alongAxis(layout.inset, widget.axis));
                     Widget items(_LensPart part) => Padding(
-                      padding: EdgeInsets.symmetric(horizontal: layout.inset),
-                      child: Row(
+                      padding: widget.axis == Axis.horizontal
+                          ? EdgeInsets.symmetric(horizontal: layout.inset)
+                          : EdgeInsets.symmetric(vertical: layout.inset),
+                      child: Flex(
+                        direction: widget.axis,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           for (final (index, destination)
                               in widget.destinations.indexed)
                             Expanded(
                               child: _FloatingBarItem(
+                                axis: widget.axis,
                                 destination: destination,
                                 selected: index == _selectedIndex,
                                 index: index,
@@ -1021,6 +1160,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
                           AnimatedBuilder(
                             animation: _motion,
                             builder: (_, _) => _Lens(
+                              axis: widget.axis,
                               rect: lensRect(),
                               lift: _lift.value,
                               glass: glass,
@@ -1030,6 +1170,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
                           AnimatedBuilder(
                             animation: _hoverMotion,
                             builder: (_, _) => _HoverHighlight(
+                              axis: widget.axis,
                               start:
                                   layout.inset +
                                   (_hover.value + 0.5) * layout.pitch -
@@ -1041,14 +1182,18 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
                         if (glass && widget.destinations.isNotEmpty)
                           AnimatedBuilder(
                             animation: _motion,
-                            builder: (_, _) =>
-                                _GlassLens(rect: lensRect(), lift: _lift.value),
+                            builder: (_, _) => _GlassLens(
+                              axis: widget.axis,
+                              rect: lensRect(),
+                              lift: _lift.value,
+                            ),
                           ),
                         items(lensed ? _LensPart.outside : _LensPart.both),
                         if (lensed)
                           AnimatedBuilder(
                             animation: _motion,
                             builder: (_, child) => _LensContent(
+                              axis: widget.axis,
                               rect: lensRect(),
                               lift: _lift.value,
                               warp: ultra,
@@ -1070,7 +1215,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
       animation: _barMotion,
       builder: (_, child) => _PressTransform(
         lift: _swell.value,
-        pull: Offset(_stretch.value, 0),
+        pull: _alongAxis(_stretch.value, widget.axis),
         child: child,
       ),
       child: bar,
@@ -1083,6 +1228,7 @@ class __FloatingNavigationBarState extends State<_FloatingNavigationBar>
 /// under it follows the cursor half as far.
 class _HoverHighlight extends StatelessWidget {
   const _HoverHighlight({
+    required this.axis,
     required this.start,
     required this.width,
     required this.opacity,
@@ -1091,6 +1237,7 @@ class _HoverHighlight extends StatelessWidget {
   final double start;
   final double width;
   final double opacity;
+  final Axis axis;
 
   @override
   Widget build(BuildContext context) {
@@ -1099,11 +1246,13 @@ class _HoverHighlight extends StatelessWidget {
       return const SizedBox.shrink();
     }
     return Positioned.directional(
-      textDirection: Directionality.of(context),
-      start: start,
-      top: 0,
-      bottom: 0,
-      width: width,
+      textDirection: _layoutDirection(context, axis),
+      start: axis == Axis.horizontal ? start : 0,
+      end: axis == Axis.vertical ? 0 : null,
+      top: axis == Axis.vertical ? start : 0,
+      bottom: axis == Axis.horizontal ? 0 : null,
+      width: axis == Axis.horizontal ? width : null,
+      height: axis == Axis.vertical ? width : null,
       child: DecoratedBox(
         decoration: ShapeDecoration(
           color: Theme.of(context).colorScheme.onSurface
@@ -1116,8 +1265,14 @@ class _HoverHighlight extends StatelessWidget {
 }
 
 class _Lens extends StatelessWidget {
-  const _Lens({required this.rect, required this.lift, required this.glass});
+  const _Lens({
+    required this.axis,
+    required this.rect,
+    required this.lift,
+    required this.glass,
+  });
 
+  final Axis axis;
   final Rect rect;
   final double lift;
 
@@ -1133,7 +1288,8 @@ class _Lens extends StatelessWidget {
     final tone = colorScheme.brightness == Brightness.dark ? 4.0 : 90.0;
     final hct = Hct.fromInt(colorScheme.secondary.toARGB32())..tone = tone;
     final platter = Color(hct.toInt()).withValues(alpha: 0.85);
-    return PositionedDirectional(
+    return Positioned.directional(
+      textDirection: _layoutDirection(context, axis),
       start: rect.left,
       top: rect.top,
       width: rect.width,
@@ -1156,8 +1312,13 @@ class _Lens extends StatelessWidget {
 /// The clear lens a lifted selection becomes on glass. The destinations stand
 /// on it, as iOS draws them over its lens, so it bends only the bar.
 class _GlassLens extends StatelessWidget {
-  const _GlassLens({required this.rect, required this.lift});
+  const _GlassLens({
+    required this.axis,
+    required this.rect,
+    required this.lift,
+  });
 
+  final Axis axis;
   final Rect rect;
   final double lift;
 
@@ -1168,7 +1329,7 @@ class _GlassLens extends StatelessWidget {
     }
     final colorScheme = Theme.of(context).colorScheme;
     return Positioned.directional(
-      textDirection: Directionality.of(context),
+      textDirection: _layoutDirection(context, axis),
       start: rect.left,
       top: rect.top,
       width: rect.width,
@@ -1201,6 +1362,7 @@ List<BoxShadow> _lensShadows(ColorScheme colorScheme, double lift) {
 /// offscreen, so that pane reads them and not the bar.
 class _LensContent extends StatelessWidget {
   const _LensContent({
+    required this.axis,
     required this.rect,
     required this.lift,
     required this.warp,
@@ -1208,13 +1370,14 @@ class _LensContent extends StatelessWidget {
   });
 
   final Rect rect;
+  final Axis axis;
   final double lift;
   final bool warp;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final textDirection = Directionality.of(context);
+    final textDirection = _layoutDirection(context, axis);
     final clipper = _LensClip(rect, textDirection);
     if (!warp) {
       return Positioned.fill(
@@ -1283,6 +1446,7 @@ enum _LensPart { both, outside, inside }
 
 class _FloatingBarItem extends StatefulWidget {
   const _FloatingBarItem({
+    required this.axis,
     required this.destination,
     required this.selected,
     required this.index,
@@ -1299,6 +1463,7 @@ class _FloatingBarItem extends StatefulWidget {
   });
 
   final FlClashNavigationDestination destination;
+  final Axis axis;
   final bool selected;
   final int index;
 
@@ -1348,6 +1513,7 @@ class _FloatingBarItemState extends State<_FloatingBarItem> {
     }
 
     final content = _LensTint(
+      axis: widget.axis,
       part: widget.part,
       lens: widget.lens,
       lensWidth: widget.lensWidth,
@@ -1356,7 +1522,7 @@ class _FloatingBarItemState extends State<_FloatingBarItem> {
       parallax: widget.parallax,
       index: widget.index,
       color: tint,
-      textDirection: Directionality.of(context),
+      textDirection: _layoutDirection(context, widget.axis),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: _labelInset),
         child: Column(
@@ -1384,6 +1550,7 @@ class _FloatingBarItemState extends State<_FloatingBarItem> {
       return content;
     }
     return FocusableActionDetector(
+      key: widget.destination.key,
       actions: _actions,
       mouseCursor: SystemMouseCursors.click,
       onShowFocusHighlight: (value) => setState(() => _focused = value),
@@ -1405,8 +1572,12 @@ class _FloatingBarItemState extends State<_FloatingBarItem> {
                   : BorderSide.none,
             ),
           ),
-          child: widget.labelOverflows
-              ? Tooltip(message: widget.destination.label, child: content)
+          child: widget.labelOverflows || widget.destination.tooltip != null
+              ? Tooltip(
+                  message:
+                      widget.destination.tooltip ?? widget.destination.label,
+                  child: content,
+                )
               : content,
         ),
       ),
@@ -1420,6 +1591,7 @@ class _FloatingBarItemState extends State<_FloatingBarItem> {
 /// destinations, while layout and hit testing see it at rest.
 class _LensTint extends SingleChildRenderObjectWidget {
   const _LensTint({
+    required this.axis,
     required this.part,
     required this.lens,
     required this.lensWidth,
@@ -1433,6 +1605,7 @@ class _LensTint extends SingleChildRenderObjectWidget {
   });
 
   final _LensPart part;
+  final Axis axis;
   final _Spring lens;
   final double lensWidth;
   final ValueListenable<double> jelly;
@@ -1445,6 +1618,7 @@ class _LensTint extends SingleChildRenderObjectWidget {
   @override
   RenderObject createRenderObject(BuildContext context) {
     return _RenderLensTint(
+      axis: axis,
       part: part,
       lens: lens,
       lensWidth: lensWidth,
@@ -1460,6 +1634,7 @@ class _LensTint extends SingleChildRenderObjectWidget {
   @override
   void updateRenderObject(BuildContext context, _RenderLensTint renderObject) {
     renderObject
+      ..axis = axis
       ..part = part
       ..lens = lens
       ..lensWidth = lensWidth
@@ -1474,6 +1649,7 @@ class _LensTint extends SingleChildRenderObjectWidget {
 
 class _RenderLensTint extends RenderProxyBox {
   _RenderLensTint({
+    required Axis axis,
     required _LensPart part,
     required _Spring lens,
     required double lensWidth,
@@ -1483,7 +1659,8 @@ class _RenderLensTint extends RenderProxyBox {
     required int index,
     required Color color,
     required TextDirection textDirection,
-  }) : _part = part,
+  }) : _axis = axis,
+       _part = part,
        _lens = lens,
        _lensWidth = lensWidth,
        _jelly = jelly,
@@ -1498,6 +1675,13 @@ class _RenderLensTint extends RenderProxyBox {
   final _tint = LayerHandle<ColorFilterLayer>();
   final _outsideMotion = LayerHandle<TransformLayer>();
   final _insideMotion = LayerHandle<TransformLayer>();
+
+  Axis _axis;
+  set axis(Axis value) {
+    if (value == _axis) return;
+    _axis = value;
+    markNeedsPaint();
+  }
 
   _LensPart _part;
   set part(_LensPart value) {
@@ -1626,11 +1810,12 @@ class _RenderLensTint extends RenderProxyBox {
 
   Rect get _lensBounds {
     final rect = _lensRect(
+      axis: _axis,
       position: _lens.value - _index,
       stretch: _jelly.value,
-      pitch: size.width,
+      pitch: _mainExtent(size, _axis),
       width: _lensWidth,
-      height: size.height,
+      height: _axis == Axis.horizontal ? size.height : size.width,
       lift: _lift.value,
     );
     return _textDirection == TextDirection.ltr
@@ -1645,14 +1830,17 @@ class _RenderLensTint extends RenderProxyBox {
 
   Matrix4? _motion(double scale) {
     final direction = _textDirection == TextDirection.ltr ? 1 : -1;
-    final shift = _parallax.value * size.width * direction;
-    if (scale == 1 && shift == 0) {
+    final shift = _alongAxis(
+      _parallax.value * _mainExtent(size, _axis) * direction,
+      _axis,
+    );
+    if (scale == 1 && shift == Offset.zero) {
       return null;
     }
     final center = size.center(Offset.zero);
     return Matrix4.diagonal3Values(scale, scale, 1)..setTranslationRaw(
-      center.dx * (1 - scale) + shift,
-      center.dy * (1 - scale),
+      center.dx * (1 - scale) + shift.dx,
+      center.dy * (1 - scale) + shift.dy,
       0,
     );
   }
@@ -1698,12 +1886,19 @@ class _RenderLensTint extends RenderProxyBox {
     final lensBounds = _lensBounds;
     // The lens rests [_barPadding] past its destination, over the edges of
     // the neighbours where nothing is drawn.
-    final reached = Rect.fromLTRB(
-      lensBounds.left + _barPadding,
-      lensBounds.top,
-      lensBounds.right - _barPadding,
-      lensBounds.bottom,
-    );
+    final reached = _axis == Axis.horizontal
+        ? Rect.fromLTRB(
+            lensBounds.left + _barPadding,
+            lensBounds.top,
+            lensBounds.right - _barPadding,
+            lensBounds.bottom,
+          )
+        : Rect.fromLTRB(
+            lensBounds.left,
+            lensBounds.top + _barPadding,
+            lensBounds.right,
+            lensBounds.bottom - _barPadding,
+          );
     final outside = _part != _LensPart.inside;
     final inside = _part != _LensPart.outside;
     if (!reached.overlaps(moved(rest)) && !reached.overlaps(moved(magnified))) {

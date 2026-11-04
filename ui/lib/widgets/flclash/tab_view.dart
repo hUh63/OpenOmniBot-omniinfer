@@ -13,15 +13,17 @@ typedef FlClashTabBuilder = Widget Function(
 );
 
 /// FlClash's optional slide tab motion, selected here by the application's UI.
-/// Nonadjacent destinations are temporarily placed side by side, so intervening
-/// pages are never opened. Retargeting keeps the visible pair in place: it can
-/// reverse immediately, or continue to the latest third destination on landing.
+/// Nonadjacent destinations are temporarily adjacent along [scrollDirection],
+/// so intervening pages are never opened. Retargeting keeps the visible pair in
+/// place: it can reverse immediately, or continue to the latest third destination
+/// on landing.
 class FlClashTabView extends StatefulWidget {
   const FlClashTabView({
     super.key,
     required this.selectedIndex,
     required this.itemCount,
     required this.builder,
+    this.scrollDirection = Axis.horizontal,
   }) : assert(selectedIndex >= 0 && selectedIndex < itemCount);
 
   static const duration = kTabScrollDuration;
@@ -30,6 +32,7 @@ class FlClashTabView extends StatefulWidget {
   final int selectedIndex;
   final int itemCount;
   final FlClashTabBuilder builder;
+  final Axis scrollDirection;
 
   @override
   State<FlClashTabView> createState() => _FlClashTabViewState();
@@ -64,7 +67,12 @@ class _FlClashTabViewState extends State<FlClashTabView> {
   @override
   void didUpdateWidget(covariant FlClashTabView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.selectedIndex != widget.selectedIndex) {
+    if (oldWidget.scrollDirection != widget.scrollDirection &&
+        _controller.hasClients) {
+      // A driven slide targets pixels on the previous axis. Settle the latest
+      // selection before changing axes, retaining the same kept-alive owners.
+      _jumpTo(widget.selectedIndex);
+    } else if (oldWidget.selectedIndex != widget.selectedIndex) {
       _toPage(widget.selectedIndex);
     }
   }
@@ -178,6 +186,7 @@ class _FlClashTabViewState extends State<FlClashTabView> {
       activity: _activity,
       child: PageView.builder(
         controller: _controller,
+        scrollDirection: widget.scrollDirection,
         physics: const NeverScrollableScrollPhysics(),
         allowImplicitScrolling: true,
         itemCount: widget.itemCount,
