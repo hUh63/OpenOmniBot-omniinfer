@@ -40,7 +40,6 @@ List<GoRoute> taskRoutes = [
     name: 'task/run_log',
     builder: (context, state) => RunLogDetailPage(
       runId: state.pathParameters['runId']!,
-      backend: const OmniFlowExecutionBackend(),
     ),
   ),
 ];
