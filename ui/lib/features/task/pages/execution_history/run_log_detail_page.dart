@@ -1,21 +1,23 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/utils/ui.dart';
+import 'package:ui/widgets/omni_glass_floating_action_button.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/theme/theme_context.dart';
 import 'package:go_router/go_router.dart';
 import 'package:ui/features/task/pages/execution_history/widgets/run_log_timeline_components.dart';
-import 'package:ui/features/task/execution/execution_backend.dart';
+import 'package:ui/features/task/run_log/omniflow_tool_client.dart';
 import 'package:ui/features/task/run_log/run_log_metrics.dart';
 
 class RunLogDetailPage extends StatefulWidget {
-  const RunLogDetailPage({
-    super.key,
-    required this.runId,
-    required this.backend,
-  });
+  const RunLogDetailPage({super.key, required this.runId});
 
   final String runId;
-  final ExecutionBackend backend;
 
   @override
   State<RunLogDetailPage> createState() => _RunLogDetailPageState();
@@ -42,16 +44,12 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
     });
     try {
       final results = await Future.wait([
-        widget.backend.getRunLog(widget.runId),
-        widget.backend.list(
-          ExecutionCollectionKind.functions,
-          limit: 100,
-          offset: 0,
-        ),
+        OmniFlowToolClient.getRunLog(widget.runId),
+        OmniFlowToolClient.listFunctions(),
       ]);
-      final runLog = results[0] as Map<String, dynamic>;
-      final functions = (results[1] as ExecutionPage).items;
-      final linkedFunction = linkedExecutionFunction(runLog, functions);
+      final runLog = results[0];
+      final functions = _mapList(results[1]['functions']);
+      final linkedFunction = _linkedFunction(runLog, functions);
       if (!mounted) return;
       setState(() {
         _runLog = runLog;
@@ -72,12 +70,15 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
     if (_converting) return;
     setState(() => _converting = true);
     try {
-      final function = await widget.backend.register({
-        'run_id': widget.runId,
-        ...?_runLog,
-      });
+      final registration = await OmniFlowToolClient.registerFunctionFromRunLog(
+        widget.runId,
+      );
       if (!mounted) return;
-      final functionId = function['function_id'].toString();
+      if (!registration.success) {
+        throw StateError(registration.errorMessage ?? '注册失败');
+      }
+      final function = registration.function!;
+      final functionId = registration.functionId;
       setState(() {
         _functionId = functionId;
         _functionName = function['name']?.toString();
@@ -112,9 +113,9 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
   Future<void> _showState(String stateId, Map<String, dynamic> action) async {
     if (stateId.isEmpty) return;
     try {
-      final state = await widget.backend.getRunLogState(stateId);
+      final state = await OmniFlowToolClient.getRunLogState(stateId);
       if (!mounted) return;
-      await showModalBottomSheet<void>(
+      await showOmniGlassModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
         builder: (context) => _StateSheet(state: state, action: action),
@@ -132,7 +133,7 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
     int fallbackIndex,
     RunLogTokenUsage? tokenUsage,
   ) {
-    return showModalBottomSheet<void>(
+    return showOmniGlassBottomSheet<void>(
       context: context,
       useRootNavigator: true,
       isScrollControlled: true,
@@ -150,8 +151,10 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text(_text(context, '运行记录', 'Run Log')),
+      backgroundColor: context.omniPalette.pageBackground,
+      appBar: CommonAppBar(
+        primary: true,
+        title: _text(context, '运行记录', 'Run Log'),
         actions: [
           IconButton(
             tooltip: _text(context, '刷新', 'Refresh'),
@@ -160,36 +163,50 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
           ),
         ],
       ),
+      floatingActionButtonLocation: const _RunLogActionLocation(),
       floatingActionButton: _runLog == null
           ? null
-          : FloatingActionButton.extended(
-              key: ValueKey(
-                _functionId?.isNotEmpty == true
-                    ? 'run-log-view-function'
-                    : 'run-log-register-function',
-              ),
-              onPressed: _converting
-                  ? null
-                  : (_functionId?.isNotEmpty == true
-                        ? _openFunction
-                        : _convert),
-              icon: _converting
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(
-                      _functionId?.isNotEmpty == true
-                          ? Icons.account_tree_outlined
-                          : Icons.add_task_rounded,
-                    ),
-              label: Text(
-                _functionId?.isNotEmpty == true
-                    ? _text(context, '查看复用指令', 'View Function')
-                    : _text(context, '注册为复用指令', 'Register Function'),
+          : OmniGlassFloatingActionButton(
+              builder: (context, glass) => FloatingActionButton.extended(
+                backgroundColor: glass ? Colors.transparent : null,
+                foregroundColor: glass ? context.omniPalette.textPrimary : null,
+                elevation: glass ? 0 : null,
+                focusElevation: glass ? 0 : null,
+                hoverElevation: glass ? 0 : null,
+                highlightElevation: glass ? 0 : null,
+                disabledElevation: glass ? 0 : null,
+                key: ValueKey(
+                  _functionId?.isNotEmpty == true
+                      ? 'run-log-view-function'
+                      : 'run-log-register-function',
+                ),
+                onPressed: _converting
+                    ? null
+                    : (_functionId?.isNotEmpty == true
+                          ? _openFunction
+                          : _convert),
+                icon: _converting
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        _functionId?.isNotEmpty == true
+                            ? Icons.account_tree_outlined
+                            : Icons.add_task_rounded,
+                      ),
+                label: Text(
+                  _functionId?.isNotEmpty == true
+                      ? _text(context, '查看复用指令', 'View Function')
+                      : _text(context, '注册为复用指令', 'Register Function'),
+                ),
               ),
             ),
-      body: _buildBody(),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: OmniContentWidth(child: _buildBody()),
+      ),
     );
   }
 
@@ -209,7 +226,10 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
     final steps = _mapList(runLog['steps']);
     final metrics = RunLogMetrics.fromPayload(runLog);
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+      padding: edgeToEdgeScrollPadding(
+        context,
+        const EdgeInsets.fromLTRB(16, 16, 16, 100),
+      ),
       children: [
         RunLogOverviewPanel(
           payload: runLog,
@@ -254,6 +274,43 @@ class _RunLogDetailPageState extends State<RunLogDetailPage> {
   }
 }
 
+/// Align the action to the readable column while retaining Scaffold's keyboard
+/// and system-navigation avoidance on the vertical axis.
+class _RunLogActionLocation extends FloatingActionButtonLocation {
+  const _RunLogActionLocation();
+
+  @override
+  Offset getOffset(ScaffoldPrelayoutGeometry geometry) {
+    final offset = FloatingActionButtonLocation.endFloat.getOffset(geometry);
+    final availableWidth =
+        geometry.scaffoldSize.width -
+        geometry.minInsets.left -
+        geometry.minInsets.right;
+    final columnInset = math.max(0.0, (availableWidth - 840) / 2);
+    return offset.translate(
+      geometry.textDirection == TextDirection.ltr ? -columnInset : columnInset,
+      0,
+    );
+  }
+}
+
+Map<String, dynamic>? _linkedFunction(
+  Map<String, dynamic> runLog,
+  List<Map<String, dynamic>> functions,
+) {
+  final runId = runLog['run_id']?.toString().trim() ?? '';
+  final executedFunctionId = runLog['function_id']?.toString().trim() ?? '';
+  for (final function in functions) {
+    final functionId = function['function_id']?.toString().trim() ?? '';
+    final sourceRunId = function['source_run_id']?.toString().trim() ?? '';
+    if ((executedFunctionId.isNotEmpty && functionId == executedFunctionId) ||
+        (runId.isNotEmpty && sourceRunId == runId)) {
+      return function;
+    }
+  }
+  return null;
+}
+
 class _StateSheet extends StatelessWidget {
   const _StateSheet({required this.state, required this.action});
 
@@ -282,40 +339,22 @@ class _StateSheet extends StatelessWidget {
             if (screenshotPath.isNotEmpty && screenshot.existsSync())
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
-                child: Stack(
-                  children: [
-                    Image.file(
-                      screenshot,
-                      width: double.infinity,
-                      fit: BoxFit.fitWidth,
-                      semanticLabel: _text(context, '记录的屏幕', 'Recorded screen'),
-                    ),
-                    if (_actionPoint(action) case final point?)
-                      Positioned.fill(
-                        child: LayoutBuilder(
-                          builder: (context, constraints) => Stack(
-                            children: [
-                              // The decoded point is a fraction of this screen,
-                              // independent of screenshot/display resolution.
-                              Positioned(
-                                left: constraints.maxWidth * point.$1 - 11,
-                                top: constraints.maxHeight * point.$2 - 11,
-                                child: Icon(
-                                  Icons.my_location_rounded,
-                                  color: Colors.redAccent,
-                                  size: 22,
-                                  semanticLabel: _text(
-                                    context,
-                                    '操作位置',
-                                    'Action location',
-                                  ),
-                                ),
-                              ),
-                            ],
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Stack(
+                    children: [
+                      Image.file(screenshot),
+                      if (_actionPoint(action) case final point?)
+                        Positioned(
+                          left: point.$1 - 10,
+                          top: point.$2 - 10,
+                          child: const Icon(
+                            Icons.my_location_rounded,
+                            color: Colors.redAccent,
+                            size: 22,
                           ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               )
             else
@@ -333,36 +372,11 @@ class _StateSheet extends StatelessWidget {
   }
 
   (double, double)? _actionPoint(Map<String, dynamic> action) {
-    final official = action.containsKey('action_type');
-    final args = official ? action : _map(action['args']);
+    final args = (action['args'] as Map?)?.cast<String, dynamic>() ?? {};
     final x = double.tryParse('${args['x'] ?? ''}');
     final y = double.tryParse('${args['y'] ?? ''}');
-    // InternalRunLogStore.externalActionPayload projects the official flat
-    // payload to display pixels. Legacy tool/args retains canonical 0..1000.
-    final display = _map(state['display']);
-    final width = official
-        ? double.tryParse('${display['width'] ?? ''}')
-        : 1000.0;
-    final height = official
-        ? double.tryParse('${display['height'] ?? ''}')
-        : 1000.0;
-    if (x == null ||
-        y == null ||
-        width == null ||
-        height == null ||
-        !width.isFinite ||
-        !height.isFinite ||
-        width <= 0 ||
-        height <= 0 ||
-        !x.isFinite ||
-        !y.isFinite ||
-        x < 0 ||
-        x > width ||
-        y < 0 ||
-        y > height) {
-      return null;
-    }
-    return (x / width, y / height);
+    if (x == null || y == null) return null;
+    return (x, y);
   }
 }
 
