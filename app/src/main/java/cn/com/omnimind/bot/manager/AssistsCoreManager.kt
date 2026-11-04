@@ -1916,8 +1916,12 @@ class AssistsCoreManager(private val context: Context) {
     fun getSceneVoiceConfig(call: MethodCall, result: MethodChannel.Result) {
         workJob.launch {
             try {
+                // 读配置要碰 SharedPreferences（首次还会解密），放主线程会卡住首帧。
+                val config = withContext(Dispatchers.IO) {
+                    SceneVoiceConfigStore.getConfig().toMap()
+                }
                 withContext(Dispatchers.Main) {
-                    result.success(SceneVoiceConfigStore.getConfig().toMap())
+                    result.success(config)
                 }
             } catch (e: Exception) {
                 OmniLog.e(TAG, "getSceneVoiceConfig error: ${e.message}")
