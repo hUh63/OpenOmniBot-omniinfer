@@ -1,29 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:ui/services/conversation_service.dart';
-import 'package:ui/services/token_usage_service.dart';
-import 'package:ui/theme/app_colors.dart';
+import 'package:ui/widgets/omni_segmented_slider.dart';
+import 'package:ui/services/usage_statistics_service.dart';
 import 'package:ui/theme/omni_theme_palette.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
-
-// ---------------------------------------------------------------------------
-//  Weekly token bucket
-// ---------------------------------------------------------------------------
-
-class _WeeklyTokenData {
-  final DateTime weekStart;
-  final Map<String, int> modelTokens = {};
-  int cachedTokens = 0;
-  int get totalTokens =>
-      modelTokens.values.fold(0, (sum, tokens) => sum + tokens);
-
-  _WeeklyTokenData({required this.weekStart});
-
-  void addModelTokens(String modelId, int tokens) {
-    if (tokens <= 0) return;
-    modelTokens[modelId] = (modelTokens[modelId] ?? 0) + tokens;
-  }
-}
+import 'package:ui/widgets/flclash/page_activity.dart';
 
 // ---------------------------------------------------------------------------
 //  Month label helper (heatmap)
@@ -41,29 +22,43 @@ class _MonthLabel {
 
 class ActivityDashboardCard extends StatefulWidget {
   final int weeksToShow;
-  const ActivityDashboardCard({super.key, this.weeksToShow = 16});
+  const ActivityDashboardCard({
+    super.key,
+    this.weeksToShow = 16,
+    this.active = true,
+  });
+
+  final bool active;
 
   @override
   State<ActivityDashboardCard> createState() => _ActivityDashboardCardState();
 }
 
 class _ActivityDashboardCardState extends State<ActivityDashboardCard>
-    with SingleTickerProviderStateMixin {
+    with
+        SingleTickerProviderStateMixin,
+        WidgetsBindingObserver,
+        FlClashPageLoadMixin {
   // -- tab --
   static const int _convTab = 0;
   static const int _tokenTab = 1;
   int _currentTab = 0; // 0=对话  1=Token
-  double _tabSwitcherDragDelta = 0;
 
   // -- conversation data --
   Map<String, int> _activityMap = {};
   bool _isConvLoading = true;
+  bool _hasConversationData = false;
+  bool _hasConvError = false;
+  int _convLoadGeneration = 0;
   int _totalConversations = 0;
   int _currentStreak = 0;
 
   // -- token data --
-  List<_WeeklyTokenData> _weeklyData = [];
+  List<WeeklyTokenData> _weeklyData = [];
   bool _isTokenLoading = true;
+  bool _hasTokenData = false;
+  bool _hasTokenError = false;
+  int _tokenLoadGeneration = 0;
   int _totalCached = 0;
   Map<String, int> _modelTotals = {};
   List<String> _modelOrder = [];
@@ -75,6 +70,7 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _fadeController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
@@ -89,15 +85,45 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _fadeController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant ActivityDashboardCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) {
+      _loadConversationData();
+      _loadTokenData();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && widget.active) {
+      _loadConversationData();
+      _loadTokenData();
+    }
   }
 
   // -----------------------------------------------------------------------
   //  Data loading — conversation
   // -----------------------------------------------------------------------
 
-  Future<void> _loadConversationData() async {
+  Future<void> _loadConversationData() => runPageLoad(
+    #conversationActivity,
+    _readConversationData,
+    revalidate: true,
+  );
+
+  Future<void> _readConversationData() async {
+    final generation = ++_convLoadGeneration;
+    setState(() {
+      // Retain the cached chart while refreshing an already visited tab.
+      _isConvLoading = !_hasConversationData;
+      _hasConvError = false;
+    });
     try {
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
@@ -105,41 +131,32 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
         Duration(days: widget.weeksToShow * 7 - 1),
       );
 
-      // 交给 SQLite 按天分组：只回几十行，不再传整张会话表。
-      final Map<String, int> activityMap =
-          await ConversationService.getConversationDailyCounts(
-            since: startDate,
-            until: now,
-          );
-      final totalInRange = activityMap.values.fold<int>(
-        0,
-        (sum, count) => sum + count,
+      final summary = await UsageStatisticsService.getConversationActivity(
+        startDate: startDate,
+        today: today,
       );
 
-      int streak = 0;
-      var checkDate = today;
-      while (true) {
-        if ((activityMap[_dateKey(checkDate)] ?? 0) > 0) {
-          streak++;
-          checkDate = checkDate.subtract(const Duration(days: 1));
-        } else {
-          break;
-        }
-      }
-
-      if (mounted) {
+      if (await waitForPageReady() &&
+          generation == _convLoadGeneration &&
+          pageLoadIsCurrent(#conversationActivity)) {
         setState(() {
-          _activityMap = activityMap;
-          _totalConversations = totalInRange;
-          _currentStreak = streak;
+          _activityMap = summary.activityMap;
+          _totalConversations = summary.totalConversations;
+          _currentStreak = summary.currentStreak;
+          _hasConversationData = true;
           _isConvLoading = false;
         });
         _tryStartFade();
       }
     } catch (e) {
       debugPrint('[ActivityDashboard] conv load failed: $e');
-      if (mounted) {
-        setState(() => _isConvLoading = false);
+      if (await waitForPageReady() &&
+          generation == _convLoadGeneration &&
+          pageLoadIsCurrent(#conversationActivity)) {
+        setState(() {
+          _isConvLoading = false;
+          _hasConvError = true;
+        });
         _tryStartFade();
       }
     }
@@ -149,7 +166,15 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
   //  Data loading — token
   // -----------------------------------------------------------------------
 
-  Future<void> _loadTokenData() async {
+  Future<void> _loadTokenData() =>
+      runPageLoad(#tokenUsage, _readTokenData, revalidate: true);
+
+  Future<void> _readTokenData() async {
+    final generation = ++_tokenLoadGeneration;
+    setState(() {
+      _isTokenLoading = !_hasTokenData;
+      _hasTokenError = false;
+    });
     try {
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
@@ -160,60 +185,39 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
         alignedStart = alignedStart.subtract(const Duration(days: 1));
       }
 
-      final records = await TokenUsageService.getRecordsSince(
-        alignedStart.millisecondsSinceEpoch,
-      );
-
       final totalDays = today.difference(alignedStart).inDays + 1;
       final totalWeeks = (totalDays / 7).ceil();
-      final weeklyData = List.generate(
+      final weekStarts = List.generate(
         totalWeeks,
-        (i) => _WeeklyTokenData(
-          weekStart: alignedStart.add(Duration(days: i * 7)),
-        ),
+        (i) => alignedStart.add(Duration(days: i * 7)),
+      );
+      final summary = await UsageStatisticsService.getTokenUsage(
+        alignedStart: alignedStart,
+        weekStarts: weekStarts,
       );
 
-      int totalCached = 0;
-      final modelTotals = <String, int>{};
-
-      for (final record in records) {
-        final daysSinceStart = DateTime.fromMillisecondsSinceEpoch(
-          record.createdAt,
-        ).difference(alignedStart).inDays;
-        if (daysSinceStart < 0) continue;
-        final weekIndex = daysSinceStart ~/ 7;
-        if (weekIndex >= totalWeeks) continue;
-        final tokens = record.totalTokens;
-        final modelId = record.modelId;
-
-        weeklyData[weekIndex].cachedTokens += record.cachedTokens;
-        totalCached += record.cachedTokens;
-        weeklyData[weekIndex].addModelTokens(modelId, tokens);
-        if (tokens > 0) {
-          modelTotals[modelId] = (modelTotals[modelId] ?? 0) + tokens;
-        }
-      }
-
-      final modelOrder = modelTotals.keys.toList()
-        ..sort((a, b) {
-          final byTokens = (modelTotals[b] ?? 0).compareTo(modelTotals[a] ?? 0);
-          return byTokens != 0 ? byTokens : a.compareTo(b);
-        });
-
-      if (mounted) {
+      if (await waitForPageReady() &&
+          generation == _tokenLoadGeneration &&
+          pageLoadIsCurrent(#tokenUsage)) {
         setState(() {
-          _weeklyData = weeklyData;
-          _totalCached = totalCached;
-          _modelTotals = modelTotals;
-          _modelOrder = modelOrder;
+          _weeklyData = summary.weeklyData;
+          _totalCached = summary.totalCached;
+          _modelTotals = summary.modelTotals;
+          _modelOrder = summary.modelOrder;
+          _hasTokenData = true;
           _isTokenLoading = false;
         });
         _tryStartFade();
       }
     } catch (e) {
       debugPrint('[ActivityDashboard] token load failed: $e');
-      if (mounted) {
-        setState(() => _isTokenLoading = false);
+      if (await waitForPageReady() &&
+          generation == _tokenLoadGeneration &&
+          pageLoadIsCurrent(#tokenUsage)) {
+        setState(() {
+          _isTokenLoading = false;
+          _hasTokenError = true;
+        });
         _tryStartFade();
       }
     }
@@ -254,8 +258,8 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
   }
 
   Color _cellColor(int level, bool isDark) {
-    const light = [0xFFEBF0F5, 0xFFBFDBF7, 0xFF7BBCE6, 0xFF3B8FD4, 0xFF1A56A8];
-    const dark = [0xFF242728, 0xFF1A3A5C, 0xFF1B5E94, 0xFF2178BD, 0xFF3B9FE8];
+    const light = [0xFFEBEBEB, 0xFFCCCCCC, 0xFFAAAAAA, 0xFF777777, 0xFF333333];
+    const dark = [0xFF292929, 0xFF444444, 0xFF777777, 0xFFAAAAAA, 0xFFDDDDDD];
     final c = isDark ? dark : light;
     return Color(c[level.clamp(0, 4)]);
   }
@@ -311,7 +315,7 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
 
     return Padding(
       key: const ValueKey('usage-statistics-content'),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 22),
       child: isLoading
           ? _buildSkeleton(palette, isDark)
           : FadeTransition(
@@ -345,7 +349,7 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
   // -----------------------------------------------------------------------
 
   Widget _buildSkeleton(OmniThemePalette palette, bool isDark) {
-    final c = isDark ? palette.surfaceSecondary : const Color(0xFFE8EFF8);
+    final c = palette.surfaceSecondary;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -393,71 +397,72 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
   // -----------------------------------------------------------------------
 
   Widget _buildStatsRow(OmniThemePalette palette, bool isDark) {
-    final accentBlue = isDark
-        ? const Color(0xFF7BBCE6)
-        : const Color(0xFF2C7FEB);
+    final accentBlue = palette.textPrimary;
     final streakColor = _currentStreak >= 3
         ? const Color(0xFFF59E0B)
         : accentBlue;
 
-    return Row(
-      children: [
-        // 对话次数
-        _buildStatPill(
-          Icons.chat_bubble_outline_rounded,
-          '$_totalConversations',
-          LegacyTextLocalizer.localize('次对话'),
-          accentBlue,
-          palette,
-        ),
-        const SizedBox(width: 8),
-        // 连续天数
-        _buildStatPill(
-          Icons.local_fire_department_rounded,
-          '$_currentStreak',
-          LegacyTextLocalizer.localize('天连续'),
-          streakColor,
-          palette,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: Wrap(
-              alignment: WrapAlignment.end,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                // Token 总量
-                _buildStatPill(
-                  Icons.bolt_rounded,
-                  _formatTokenCount(_totalTokens),
-                  'tokens',
-                  accentBlue,
-                  palette,
-                ),
-                if (_modelTotals.isNotEmpty)
-                  _buildStatPill(
-                    Icons.hub_outlined,
-                    '${_modelTotals.length}',
-                    LegacyTextLocalizer.localize('个模型'),
-                    _modelColor(_modelOrder.first, isDark),
-                    palette,
-                  ),
-                if (_totalCached > 0)
-                  _buildStatPill(
-                    Icons.cached_rounded,
-                    _formatTokenCount(_totalCached),
-                    LegacyTextLocalizer.localize('缓存'),
-                    _cachedColor(isDark),
-                    palette,
-                  ),
-              ],
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final spacious = constraints.maxWidth >= 600;
+        Widget statistic(
+          IconData icon,
+          String value,
+          String label,
+          Color color,
+        ) => ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+          child: _buildStatPill(
+            icon,
+            value,
+            label,
+            color,
+            palette,
+            spacious: spacious,
           ),
-        ),
-      ],
+        );
+        return Wrap(
+          spacing: spacious ? 24 : 16,
+          runSpacing: 12,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            statistic(
+              Icons.chat_bubble_outline_rounded,
+              _isConvLoading || _hasConvError ? '—' : '$_totalConversations',
+              LegacyTextLocalizer.localize('次对话'),
+              accentBlue,
+            ),
+            statistic(
+              Icons.local_fire_department_rounded,
+              _isConvLoading || _hasConvError ? '—' : '$_currentStreak',
+              LegacyTextLocalizer.localize('天连续'),
+              streakColor,
+            ),
+            statistic(
+              Icons.bolt_rounded,
+              _isTokenLoading || _hasTokenError
+                  ? '—'
+                  : _formatTokenCount(_totalTokens),
+              'tokens',
+              accentBlue,
+            ),
+            if (!_isTokenLoading && !_hasTokenError && _modelTotals.isNotEmpty)
+              statistic(
+                Icons.hub_outlined,
+                '${_modelTotals.length}',
+                LegacyTextLocalizer.localize('个模型'),
+                _modelColor(_modelOrder.first, isDark),
+              ),
+            if (!_isTokenLoading && !_hasTokenError && _totalCached > 0)
+              statistic(
+                Icons.cached_rounded,
+                _formatTokenCount(_totalCached),
+                LegacyTextLocalizer.localize('缓存'),
+                _cachedColor(isDark),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -466,28 +471,27 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
     String value,
     String label,
     Color iconColor,
-    OmniThemePalette palette,
-  ) {
+    OmniThemePalette palette, {
+    required bool spacious,
+  }) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 14, color: iconColor),
-        const SizedBox(width: 3),
+        Icon(icon, size: 16, color: iconColor),
+        const SizedBox(width: 5),
         Text(
           value,
           style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
+            fontSize: spacious ? 18 : 15,
+            fontWeight: FontWeight.w600,
             color: palette.textPrimary,
           ),
         ),
-        const SizedBox(width: 2),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w400,
-            color: palette.textTertiary,
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 12, color: palette.textSecondary),
           ),
         ),
       ],
@@ -503,140 +507,19 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
     setState(() => _currentTab = tabIndex);
   }
 
-  void _handleTabSwitcherDragEnd({double velocity = 0}) {
-    final shouldSwitchRight = (_tabSwitcherDragDelta + velocity * 0.015) > 0;
-    final shouldSwitch =
-        _tabSwitcherDragDelta.abs() > 14 || velocity.abs() > 250;
-    if (shouldSwitch) {
-      _switchTab(shouldSwitchRight ? _tokenTab : _convTab);
-    }
-    _tabSwitcherDragDelta = 0;
-  }
-
-  Widget _buildSegmentedControl() {
-    final palette = context.omniPalette;
-    return Builder(
-      builder: (sliderContext) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onHorizontalDragUpdate: (details) {
-          _tabSwitcherDragDelta += details.delta.dx;
-        },
-        onHorizontalDragEnd: (details) {
-          _handleTabSwitcherDragEnd(velocity: details.primaryVelocity ?? 0);
-        },
-        onTapUp: (details) {
-          final box = sliderContext.findRenderObject() as RenderBox?;
-          if (box == null || !box.hasSize) return;
-          final local = box.globalToLocal(details.globalPosition);
-          _switchTab(local.dx >= box.size.width / 2 ? _tokenTab : _convTab);
-        },
-        child: Container(
-          height: 28,
-          padding: const EdgeInsets.all(2),
-          decoration: BoxDecoration(
-            color: context.isDarkTheme ? palette.segmentTrack : Colors.white,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color: context.isDarkTheme
-                  ? palette.borderSubtle
-                  : AppColors.text10,
-            ),
-          ),
-          child: Stack(
-            children: [
-              AnimatedAlign(
-                duration: const Duration(milliseconds: 280),
-                curve: Curves.easeOutCubic,
-                alignment: _currentTab == _convTab
-                    ? Alignment.centerLeft
-                    : Alignment.centerRight,
-                child: FractionallySizedBox(
-                  widthFactor: 0.5,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 1),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(999),
-                      gradient: context.isDarkTheme
-                          ? LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [
-                                Color.lerp(
-                                  palette.surfaceElevated,
-                                  palette.accentPrimary,
-                                  0.18,
-                                )!,
-                                Color.lerp(
-                                  palette.surfaceSecondary,
-                                  palette.accentPrimary,
-                                  0.30,
-                                )!,
-                              ],
-                            )
-                          : const LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [Color(0xFF2DA5F0), Color(0xFF1930D9)],
-                            ),
-                      boxShadow: context.isDarkTheme
-                          ? null
-                          : const [
-                              BoxShadow(
-                                color: Color(0x1F1930D9),
-                                blurRadius: 10,
-                                offset: Offset(0, 4),
-                              ),
-                            ],
-                      border: context.isDarkTheme
-                          ? Border.all(color: palette.borderSubtle)
-                          : null,
-                    ),
-                  ),
-                ),
-              ),
-              Row(
-                children: [
-                  _buildTabButton(
-                    label: LegacyTextLocalizer.isEnglish ? 'Chat' : '对话',
-                    tabIndex: _convTab,
-                  ),
-                  _buildTabButton(label: 'Token', tabIndex: _tokenTab),
-                ],
-              ),
-            ],
-          ),
-        ),
+  Widget _buildSegmentedControl() => OmniSegmentedSlider<int>(
+    value: _currentTab,
+    keyPrefix: 'activity-view',
+    height: 38 + (MediaQuery.textScalerOf(context).scale(12.5) - 12.5) * 1.4,
+    options: [
+      OmniSegmentedOption(
+        value: _convTab,
+        label: LegacyTextLocalizer.isEnglish ? 'Chat' : '对话',
       ),
-    );
-  }
-
-  Widget _buildTabButton({required String label, required int tabIndex}) {
-    final selected = _currentTab == tabIndex;
-    final palette = context.omniPalette;
-    return Expanded(
-      child: Center(
-        child: AnimatedScale(
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
-          scale: selected ? 1 : 0.97,
-          child: AnimatedDefaultTextStyle(
-            duration: const Duration(milliseconds: 220),
-            curve: Curves.easeOutCubic,
-            style: TextStyle(
-              color: selected
-                  ? (context.isDarkTheme ? palette.textPrimary : Colors.white)
-                  : (context.isDarkTheme
-                        ? palette.textSecondary
-                        : AppColors.text70),
-              fontSize: 12,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-            ),
-            child: Text(label),
-          ),
-        ),
-      ),
-    );
-  }
+      const OmniSegmentedOption(value: _tokenTab, label: 'Token'),
+    ],
+    onChanged: _switchTab,
+  );
 
   // -----------------------------------------------------------------------
   //  Conversation tab — heatmap
@@ -655,6 +538,14 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
         ),
       );
     }
+    if (_hasConvError) {
+      return _buildLoadError(
+        LegacyTextLocalizer.isEnglish
+            ? 'Could not load conversations. Tap to retry.'
+            : '对话统计加载失败，点击重试',
+        _loadConversationData,
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [_buildHeatmapGrid(isDark)],
@@ -662,6 +553,7 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
   }
 
   Widget _buildHeatmapGrid(bool isDark) {
+    final palette = context.omniPalette;
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final daysBack = widget.weeksToShow * 7 - 1;
@@ -684,143 +576,177 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
       }
     }
 
-    const double cellGap = 3.0;
-    const double dayLabelWidth = 20.0;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Month labels
-        Padding(
-          padding: const EdgeInsets.only(left: dayLabelWidth, bottom: 4),
-          child: SizedBox(
-            height: 14,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final weekCellWidth = totalWeeks > 0
-                    ? constraints.maxWidth / totalWeeks
-                    : 14.0;
-                return Stack(
-                  children: monthLabels
-                      .map(
-                        (ml) => Positioned(
-                          left: ml.weekIndex * weekCellWidth,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final geometry = _chartGeometry(constraints.maxWidth, totalWeeks);
+        final labelStyle = TextStyle(
+          fontSize: 11,
+          height: 1.2,
+          fontWeight: FontWeight.w500,
+          color: palette.textSecondary,
+        );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: EdgeInsets.only(left: geometry.labelWidth, bottom: 8),
+              child: SizedBox(
+                height: geometry.labelHeight,
+                child: Stack(
+                  children: [
+                    for (var index = 0; index < monthLabels.length; index++)
+                      Positioned(
+                        left: monthLabels[index].weekIndex * geometry.pitch,
+                        width: index + 1 < monthLabels.length
+                            ? (monthLabels[index + 1].weekIndex -
+                                          monthLabels[index].weekIndex) *
+                                      geometry.pitch -
+                                  geometry.gap
+                            : geometry.plotWidth -
+                                  monthLabels[index].weekIndex * geometry.pitch,
+                        child: Tooltip(
+                          message: monthLabels[index].label,
                           child: Text(
-                            ml.label,
-                            style: TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w500,
-                              color: isDark
-                                  ? const Color(0xFF9A9488)
-                                  : const Color(0xFF98A5BB),
+                            monthLabels[index].label,
+                            key: ValueKey(
+                              'activity-month-${monthLabels[index].weekIndex}',
                             ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: labelStyle,
                           ),
                         ),
-                      )
-                      .toList(),
-                );
-              },
+                      ),
+                  ],
+                ),
+              ),
             ),
-          ),
-        ),
-        // Grid
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final gridWidth = constraints.maxWidth - dayLabelWidth;
-            final cellSize =
-                (totalWeeks > 0
-                        ? (gridWidth - (totalWeeks - 1) * cellGap) / totalWeeks
-                        : 11.0)
-                    .clamp(4.0, 14.0);
-            final gridHeight = 7 * cellSize + 6 * cellGap;
-            final rowHeight = cellSize + cellGap;
-
-            return Row(
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 SizedBox(
-                  width: dayLabelWidth,
+                  width: geometry.labelWidth,
                   child: Column(
                     children: [
-                      for (int day = 0; day < 7; day++)
+                      for (var day = 0; day < 7; day++)
                         SizedBox(
-                          height: day < 6 ? rowHeight : cellSize,
+                          height:
+                              geometry.cellHeight +
+                              (day < 6 ? geometry.gap : 0),
                           child: Align(
                             alignment: Alignment.centerLeft,
-                            child: day % 2 == 0
-                                ? Text(
-                                    _dayLabel(day),
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.w500,
-                                      color: isDark
-                                          ? const Color(0xFF9A9488)
-                                          : const Color(0xFF98A5BB),
-                                    ),
-                                  )
-                                : const SizedBox.shrink(),
+                            child: day.isEven
+                                ? Text(_dayLabel(day), style: labelStyle)
+                                : null,
                           ),
                         ),
                     ],
                   ),
                 ),
-                Expanded(
-                  child: SizedBox(
-                    height: gridHeight,
-                    child: Wrap(
-                      direction: Axis.vertical,
-                      spacing: cellGap,
-                      runSpacing: cellGap,
-                      children: List.generate(totalWeeks * 7, (index) {
-                        final week = index ~/ 7;
-                        final dayOfWeek = index % 7;
-                        final cellDate = startDate.add(
-                          Duration(days: week * 7 + dayOfWeek),
-                        );
-                        if (cellDate.isAfter(today)) {
-                          return SizedBox(width: cellSize, height: cellSize);
-                        }
-                        final count = _activityMap[_dateKey(cellDate)] ?? 0;
-                        return Tooltip(
-                          triggerMode: TooltipTriggerMode.tap,
-                          enableFeedback: false,
-                          message: count > 0
-                              ? LegacyTextLocalizer.localize(
-                                  '$count 次对话 · ${cellDate.month}/${cellDate.day}',
-                                )
-                              : LegacyTextLocalizer.localize(
-                                  '无对话 · ${cellDate.month}/${cellDate.day}',
+                SizedBox(
+                  key: const ValueKey('activity-heatmap-plot'),
+                  width: geometry.plotWidth,
+                  height: geometry.plotHeight,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (var week = 0; week < totalWeeks; week++) ...[
+                        if (week > 0) SizedBox(width: geometry.gap),
+                        Column(
+                          children: [
+                            for (var day = 0; day < 7; day++) ...[
+                              if (day > 0) SizedBox(height: geometry.gap),
+                              _buildActivityCell(
+                                date: startDate.add(
+                                  Duration(days: week * 7 + day),
                                 ),
-                          preferBelow: false,
-                          verticalOffset: 12,
-                          decoration: BoxDecoration(
-                            color: isDark
-                                ? const Color(0xFF2D3032)
-                                : const Color(0xFF353E53),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          textStyle: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.white,
-                          ),
-                          child: Container(
-                            width: cellSize,
-                            height: cellSize,
-                            decoration: BoxDecoration(
-                              color: _cellColor(_intensityLevel(count), isDark),
-                              borderRadius: BorderRadius.circular(2.5),
-                            ),
-                          ),
-                        );
-                      }),
-                    ),
+                                today: today,
+                                week: week,
+                                day: day,
+                                geometry: geometry,
+                                palette: palette,
+                                isDark: isDark,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ],
-            );
-          },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  _ActivityChartGeometry _chartGeometry(double width, int columns) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final label = TextPainter(
+      text: TextSpan(
+        text: LegacyTextLocalizer.isEnglish ? 'Wed' : _dayLabel(0),
+        style: const TextStyle(
+          fontSize: 11,
+          height: 1.2,
+          fontWeight: FontWeight.w500,
         ),
-      ],
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: scaler,
+    )..layout();
+    final labelWidth = label.width + 10;
+    final labelHeight = label.height;
+    label.dispose();
+    return _ActivityChartGeometry(
+      width: width,
+      columns: columns,
+      labelWidth: labelWidth,
+      labelHeight: labelHeight,
+    );
+  }
+
+  Widget _buildActivityCell({
+    required DateTime date,
+    required DateTime today,
+    required int week,
+    required int day,
+    required _ActivityChartGeometry geometry,
+    required OmniThemePalette palette,
+    required bool isDark,
+  }) {
+    final count = _activityMap[_dateKey(date)] ?? 0;
+    final cell = SizedBox(
+      key: ValueKey('activity-cell-$week-$day'),
+      width: geometry.cellWidth,
+      height: geometry.cellHeight,
+      child: date.isAfter(today)
+          ? null
+          : DecoratedBox(
+              decoration: BoxDecoration(
+                color: _cellColor(_intensityLevel(count), isDark),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+    );
+    if (date.isAfter(today)) return cell;
+    return Tooltip(
+      triggerMode: TooltipTriggerMode.tap,
+      enableFeedback: false,
+      message: count > 0
+          ? LegacyTextLocalizer.localize(
+              '$count 次对话 · ${date.month}/${date.day}',
+            )
+          : LegacyTextLocalizer.localize('无对话 · ${date.month}/${date.day}'),
+      preferBelow: false,
+      verticalOffset: 12,
+      decoration: BoxDecoration(
+        color: palette.textPrimary,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      textStyle: TextStyle(fontSize: 12, color: palette.pageBackground),
+      child: cell,
     );
   }
 
@@ -887,13 +813,21 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
         ),
       );
     }
+    if (_hasTokenError) {
+      return _buildLoadError(
+        LegacyTextLocalizer.isEnglish
+            ? 'Could not load token usage. Tap to retry.'
+            : 'Token 统计加载失败，点击重试',
+        _loadTokenData,
+      );
+    }
     if (_totalTokens == 0) {
       return SizedBox(
         height: 70,
         child: Center(
           child: Text(
             LegacyTextLocalizer.localize('暂无 Token 消耗数据'),
-            style: TextStyle(fontSize: 11, color: palette.textTertiary),
+            style: TextStyle(fontSize: 13, color: palette.textSecondary),
           ),
         ),
       );
@@ -908,27 +842,43 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
     );
   }
 
-  Widget _buildModelLegendStrip(bool isDark, OmniThemePalette palette) {
+  Widget _buildLoadError(String message, VoidCallback onRetry) {
     return SizedBox(
-      height: 28,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: EdgeInsets.zero,
-        itemBuilder: (context, index) {
-          final modelId = _modelOrder[index];
-          final tokens = _modelTotals[modelId] ?? 0;
-          return _buildModelLegendItem(
-            modelId: modelId,
-            tokens: tokens,
-            isDark: isDark,
-            palette: palette,
-          );
-        },
-        separatorBuilder: (context, index) => const SizedBox(width: 12),
-        itemCount: _modelOrder.length,
+      height: 100,
+      child: Center(
+        child: TextButton.icon(
+          onPressed: onRetry,
+          icon: const Icon(Icons.refresh_rounded, size: 16),
+          label: Text(message),
+          style: TextButton.styleFrom(
+            foregroundColor: context.omniPalette.textSecondary,
+            textStyle: const TextStyle(fontSize: 13),
+          ),
+        ),
       ),
     );
   }
+
+  Widget _buildModelLegendStrip(bool isDark, OmniThemePalette palette) =>
+      LayoutBuilder(
+        builder: (context, constraints) => Wrap(
+          key: const ValueKey('activity-model-legend'),
+          spacing: 18,
+          runSpacing: 8,
+          children: [
+            for (final modelId in _modelOrder)
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+                child: _buildModelLegendItem(
+                  modelId: modelId,
+                  tokens: _modelTotals[modelId] ?? 0,
+                  isDark: isDark,
+                  palette: palette,
+                ),
+              ),
+          ],
+        ),
+      );
 
   Widget _buildModelLegendItem({
     required String modelId,
@@ -937,41 +887,47 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
     required OmniThemePalette palette,
   }) {
     final color = _modelColor(modelId, isDark);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(2),
+    return Tooltip(
+      message: modelId,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 9,
+              height: 9,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(3),
+              ),
             ),
-          ),
-          const SizedBox(width: 5),
-          Text(
-            modelId,
-            maxLines: 1,
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: palette.textSecondary,
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                modelId,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: palette.textSecondary,
+                ),
+              ),
             ),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            '${_percentOf(tokens, _totalTokens)}%',
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              color: isDark
-                  ? color
-                  : Color.lerp(color, palette.textPrimary, 0.18),
+            const SizedBox(width: 6),
+            Text(
+              '${_percentOf(tokens, _totalTokens)}%',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: isDark
+                    ? color
+                    : Color.lerp(color, palette.textPrimary, 0.18),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -981,121 +937,114 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
       0,
       (p, w) => w.totalTokens > p ? w.totalTokens : p,
     );
-    const double barGap = 3.0;
-    const double heatmapCellGap = 3.0;
-    const double dayLabelWidth = 20.0;
-
     return LayoutBuilder(
       builder: (context, constraints) {
-        final totalBars = _weeklyData.length;
-        // Match heatmap grid height
-        final gridWidth = constraints.maxWidth - dayLabelWidth;
-        final heatmapCellSize =
-            (totalBars > 0
-                    ? (gridWidth - (totalBars - 1) * heatmapCellGap) / totalBars
-                    : 11.0)
-                .clamp(4.0, 14.0);
-        final barAreaHeight = 7 * heatmapCellSize + 6 * heatmapCellGap;
-        final barWidth =
-            (totalBars > 0
-                    ? (constraints.maxWidth - (totalBars - 1) * barGap) /
-                          totalBars
-                    : 8.0)
-                .clamp(4.0, 14.0);
-
-        return SizedBox(
-          height: barAreaHeight,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: List.generate(_weeklyData.length, (index) {
-              final week = _weeklyData[index];
-              final totalH = maxWeekTotal > 0
-                  ? (week.totalTokens / maxWeekTotal) * barAreaHeight
-                  : 0.0;
-              final modelIds = _orderedModelsForWeek(week);
-              return Padding(
-                padding: EdgeInsets.only(
-                  right: index < _weeklyData.length - 1 ? barGap : 0,
-                ),
-                child: Tooltip(
-                  triggerMode: TooltipTriggerMode.tap,
-                  enableFeedback: false,
-                  message: week.totalTokens > 0
-                      ? _buildWeekTooltip(week, modelIds)
-                      : LegacyTextLocalizer.localize('无消耗'),
-                  preferBelow: false,
-                  verticalOffset: 12,
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? const Color(0xFF2D3032)
-                        : const Color(0xFF353E53),
-                    borderRadius: BorderRadius.circular(6),
+        final geometry = _chartGeometry(
+          constraints.maxWidth,
+          _weeklyData.length,
+        );
+        final barAreaHeight = geometry.plotHeight;
+        final barWidth = geometry.cellWidth;
+        return Padding(
+          padding: EdgeInsets.only(left: geometry.labelWidth),
+          child: SizedBox(
+            key: const ValueKey('activity-token-plot'),
+            height: barAreaHeight,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: List.generate(_weeklyData.length, (index) {
+                final week = _weeklyData[index];
+                final totalH = maxWeekTotal > 0
+                    ? (week.totalTokens / maxWeekTotal) * barAreaHeight
+                    : 0.0;
+                final modelIds = _orderedModelsForWeek(week);
+                return Padding(
+                  padding: EdgeInsets.only(
+                    right: index < _weeklyData.length - 1 ? geometry.gap : 0,
                   ),
-                  textStyle: const TextStyle(fontSize: 11, color: Colors.white),
-                  child: SizedBox(
-                    width: barWidth,
-                    height: barAreaHeight,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: week.totalTokens == 0
-                          ? [
-                              Container(
-                                width: barWidth,
-                                height: 2,
-                                decoration: BoxDecoration(
-                                  color: palette.surfaceElevated,
-                                  borderRadius: BorderRadius.circular(1),
-                                ),
-                              ),
-                            ]
-                          : List.generate(modelIds.length, (segmentIndex) {
-                              final modelId = modelIds[segmentIndex];
-                              final tokens = week.modelTokens[modelId] ?? 0;
-                              final rawHeight =
-                                  totalH * tokens / week.totalTokens;
-                              final minHeight = totalH >= modelIds.length * 1.4
-                                  ? 1.4
-                                  : 0.6;
-                              final segmentHeight = rawHeight
-                                  .clamp(minHeight, barAreaHeight)
-                                  .toDouble();
-                              final isTop = segmentIndex == 0;
-                              final isBottom =
-                                  segmentIndex == modelIds.length - 1;
-                              return Container(
-                                width: barWidth,
-                                height: segmentHeight,
-                                decoration: BoxDecoration(
-                                  color: _modelColor(modelId, isDark),
-                                  borderRadius: BorderRadius.only(
-                                    topLeft: isTop
-                                        ? const Radius.circular(2.5)
-                                        : Radius.zero,
-                                    topRight: isTop
-                                        ? const Radius.circular(2.5)
-                                        : Radius.zero,
-                                    bottomLeft: isBottom
-                                        ? const Radius.circular(1.5)
-                                        : Radius.zero,
-                                    bottomRight: isBottom
-                                        ? const Radius.circular(1.5)
-                                        : Radius.zero,
+                  child: Tooltip(
+                    triggerMode: TooltipTriggerMode.tap,
+                    enableFeedback: false,
+                    message: week.totalTokens > 0
+                        ? _buildWeekTooltip(week, modelIds)
+                        : LegacyTextLocalizer.localize('无消耗'),
+                    preferBelow: false,
+                    verticalOffset: 12,
+                    decoration: BoxDecoration(
+                      color: palette.textPrimary,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    textStyle: TextStyle(
+                      fontSize: 12,
+                      color: palette.pageBackground,
+                    ),
+                    child: SizedBox(
+                      key: ValueKey('activity-token-week-$index'),
+                      width: barWidth,
+                      height: barAreaHeight,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: week.totalTokens == 0
+                            ? [
+                                Container(
+                                  width: barWidth,
+                                  height: 2,
+                                  decoration: BoxDecoration(
+                                    color: palette.surfaceElevated,
+                                    borderRadius: BorderRadius.circular(1),
                                   ),
                                 ),
-                              );
-                            }),
+                              ]
+                            : List.generate(modelIds.length, (segmentIndex) {
+                                final modelId = modelIds[segmentIndex];
+                                final tokens = week.modelTokens[modelId] ?? 0;
+                                // Preserve the true proportions. Giving each
+                                // tiny model a minimum height can make the
+                                // largest week's stacked column overflow.
+                                // The tooltip keeps small values inspectable.
+                                final segmentHeight =
+                                    totalH * tokens / week.totalTokens;
+                                final isTop = segmentIndex == 0;
+                                final isBottom =
+                                    segmentIndex == modelIds.length - 1;
+                                return Container(
+                                  key: ValueKey(
+                                    'activity-token-segment-$index-$segmentIndex',
+                                  ),
+                                  width: barWidth,
+                                  height: segmentHeight,
+                                  decoration: BoxDecoration(
+                                    color: _modelColor(modelId, isDark),
+                                    borderRadius: BorderRadius.only(
+                                      topLeft: isTop
+                                          ? const Radius.circular(2.5)
+                                          : Radius.zero,
+                                      topRight: isTop
+                                          ? const Radius.circular(2.5)
+                                          : Radius.zero,
+                                      bottomLeft: isBottom
+                                          ? const Radius.circular(1.5)
+                                          : Radius.zero,
+                                      bottomRight: isBottom
+                                          ? const Radius.circular(1.5)
+                                          : Radius.zero,
+                                    ),
+                                  ),
+                                );
+                              }),
+                      ),
                     ),
                   ),
-                ),
-              );
-            }),
+                );
+              }),
+            ),
           ),
         );
       },
     );
   }
 
-  List<String> _orderedModelsForWeek(_WeeklyTokenData week) {
+  List<String> _orderedModelsForWeek(WeeklyTokenData week) {
     final ordered = _modelOrder
         .where((modelId) => (week.modelTokens[modelId] ?? 0) > 0)
         .toList();
@@ -1107,7 +1056,7 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
     return ordered;
   }
 
-  String _buildWeekTooltip(_WeeklyTokenData week, List<String> modelIds) {
+  String _buildWeekTooltip(WeeklyTokenData week, List<String> modelIds) {
     final range = _formatWeekRange(week.weekStart);
     final lines = <String>[
       '$range · ${_formatTokenCount(week.totalTokens)} tokens',
@@ -1129,4 +1078,28 @@ class _ActivityDashboardCardState extends State<ActivityDashboardCard>
     final weekEnd = weekStart.add(const Duration(days: 6));
     return '${weekStart.month}/${weekStart.day}-${weekEnd.month}/${weekEnd.day}';
   }
+}
+
+/// One column geometry drives month labels, activity cells and token bars.
+/// Columns use the available width; row height stays comfortable on a Pad.
+class _ActivityChartGeometry {
+  _ActivityChartGeometry({
+    required double width,
+    required int columns,
+    required this.labelWidth,
+    required this.labelHeight,
+  }) : plotWidth = (width - labelWidth).clamp(0.0, double.infinity),
+       gap = width >= 600 ? 5 : 3,
+       columns = columns > 0 ? columns : 1;
+
+  final int columns;
+  final double labelWidth;
+  final double labelHeight;
+  final double plotWidth;
+  final double gap;
+  double get pitch => (plotWidth + gap) / columns;
+  double get cellWidth => (pitch - gap).clamp(0.0, double.infinity);
+  double get cellHeight =>
+      cellWidth.clamp(labelHeight, labelHeight > 28 ? labelHeight : 28);
+  double get plotHeight => 7 * cellHeight + 6 * gap;
 }

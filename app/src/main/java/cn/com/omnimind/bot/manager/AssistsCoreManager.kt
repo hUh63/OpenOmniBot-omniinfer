@@ -78,6 +78,7 @@ import cn.com.omnimind.bot.agent.resolveToolExecutionStatus
 import cn.com.omnimind.bot.mcp.RemoteMcpConfigStore
 import cn.com.omnimind.bot.quicklog.QuickLogService
 import cn.com.omnimind.bot.util.TaskCompletionNavigator
+import cn.com.omnimind.bot.statistics.UsageStatisticsService
 import cn.com.omnimind.bot.webchat.ConversationDomainService
 import cn.com.omnimind.bot.webchat.FlutterChatSyncBridge
 import cn.com.omnimind.bot.workspace.PublicStorageAccess
@@ -358,6 +359,7 @@ class AssistsCoreManager(private val context: Context) {
     private var mainJob: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var workJob: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val conversationDomainService by lazy { ConversationDomainService(context) }
+    private val usageStatisticsService by lazy { UsageStatisticsService(conversationDomainService) }
 
     // 当前活跃的对话ID
     private var currentConversationId: Long? = null
@@ -2961,6 +2963,41 @@ class AssistsCoreManager(private val context: Context) {
                         } else {
                             e.message
                         },
+                        null
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 用量统计：聚合在 Kotlin 侧完成，Flutter 只拿有界的图表数据。
+     * 会话活跃度按本地时区分桶，token 按模型/周分桶。
+     */
+    fun getUsageStatistics(call: MethodCall, result: MethodChannel.Result) {
+        workJob.launch {
+            try {
+                val summary = withContext(Dispatchers.IO) {
+                    when (call.method) {
+                        "getConversationActivitySummary" -> usageStatisticsService.conversationSummary(
+                            requireNotNull(call.argument<Number>("startDateMs")).toLong(),
+                            requireNotNull(call.argument<Number>("todayMs")).toLong()
+                        )
+                        "getTokenUsageSummary" -> usageStatisticsService.tokenSummary(
+                            requireNotNull(call.argument<Number>("alignedStartMs")).toLong(),
+                            (call.argument<List<Number>>("weekStartsMs") ?: emptyList())
+                                .map(Number::toLong)
+                        )
+                        else -> error("Unknown usage statistics operation")
+                    }
+                }
+                withContext(Dispatchers.Main) { result.success(summary) }
+            } catch (e: Exception) {
+                OmniLog.e(TAG, "[getUsageStatistics] ${call.method} 失败: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    result.error(
+                        "USAGE_STATISTICS_ERROR",
+                        e.message ?: "usage statistics failed",
                         null
                     )
                 }

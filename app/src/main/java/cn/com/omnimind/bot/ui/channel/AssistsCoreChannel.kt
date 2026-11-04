@@ -268,6 +268,10 @@ class AssistsCoreChannel {
                 "getTokenUsageRecords" -> {
                     assistsCoreManager!!.getTokenUsageRecords(call, result)
                 }
+                "getConversationActivitySummary",
+                "getTokenUsageSummary" -> {
+                    assistsCoreManager!!.getUsageStatistics(call, result)
+                }
                 "getConversations" -> {
                     assistsCoreManager!!.getConversations(call, result)
                 }

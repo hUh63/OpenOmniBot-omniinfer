@@ -504,6 +504,16 @@ object DatabaseHelper {
         return getDatabase().tokenUsageRecordDao().getRecordsSince(since)
     }
 
+    /** 用量图的 token 分片：每模型每周一行，聚合在 SQL 里完成。 */
+    suspend fun getTokenUsageWeeklyBuckets(since: Long, until: Long): List<TokenUsageBucket> {
+        return getDatabase().tokenUsageRecordDao().getWeeklyBuckets(since, until)
+    }
+
+    /** 活跃度图的原始行：一条用户消息一行，供上层按本地时区分桶。 */
+    suspend fun getConversationActivityRows(since: Long, until: Long): List<ConversationActivityRow> {
+        return getDatabase().conversationDao().getActivityRows(since, until)
+    }
+
     // Conversation相关方法
     suspend fun insertConversation(conversation: Conversation): Long {
         return getDatabase().conversationDao().insert(conversation)

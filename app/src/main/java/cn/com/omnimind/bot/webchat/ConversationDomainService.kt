@@ -54,6 +54,12 @@ private fun isDefaultWebConversationTitle(title: String): Boolean {
     return title.trim().lowercase() in setOf("", "新对话", "new chat", "new conversation")
 }
 
+/** 一条会话活跃度：发生时间 + 是否属于 na-cloud 会话（本仓恒为 false）。 */
+internal data class VisibleConversationActivity(
+    val createdAt: Long,
+    val isNa: Boolean,
+)
+
 class ConversationDomainService(
     private val context: Context
 ) {
@@ -864,6 +870,20 @@ class ConversationDomainService(
             else -> normalized
         }
     }
+
+    /**
+     * 用量图要的活跃度行：只取时间与归属，不构造历史 payload。
+     *
+     * 本仓没有 na-cloud 会话概念，所以 isNa 恒为 false（上游用它把云端会话
+     * 单独统计，这里没有需要区分的一端）。
+     */
+    internal suspend fun listConversationActivity(
+        since: Long,
+        until: Long
+    ): List<VisibleConversationActivity> =
+        DatabaseHelper.getConversationActivityRows(since, until).map { row ->
+            VisibleConversationActivity(row.createdAt, isNa = false)
+        }
 
     private fun isAgentMode(mode: String?): Boolean {
         return mode?.trim()?.lowercase() in AGENT_MODE_STORAGE_ALIASES

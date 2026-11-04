@@ -154,7 +154,36 @@ interface ConversationDao {
         sinceMillis: Long,
         untilMillis: Long
     ): List<ConversationDailyCount>
+    // 用量图需要「一条用户消息算一次交互」，包括老会话里的消息；
+    // canonical/legacy 两份副本按 identity 合并。调度器自动生成的那条 prompt
+    // 不算用户发送，但同一 subagent 会话里的人工回复仍然算。
+    @Query(
+        """
+        SELECT * FROM (
+        SELECT c.id, c.mode,
+            COALESCE(MAX(CASE WHEN e.conversationMode = 'agent' THEN e.createdAt END),
+                MAX(CASE WHEN e.conversationMode = 'codex' THEN e.createdAt END),
+                MIN(e.createdAt)) AS createdAt,
+            b.threadId
+        FROM conversations c
+        JOIN agent_conversation_entries e ON e.conversationId = c.id
+        LEFT JOIN codex_thread_bindings b ON b.conversationId = c.id
+        WHERE e.entryType = 'user_message'
+            AND NOT (c.mode = 'subagent' AND e.entryId GLOB 'subagent_schedule_*-user')
+        GROUP BY c.id, e.entryId
+        ) WHERE createdAt >= :since AND createdAt < :until
+    """
+    )
+    suspend fun getActivityRows(since: Long, until: Long): List<ConversationActivityRow>
 }
+
+/** 会话活跃度的一行：[ConversationDao.getActivityRows] 的投影结果。 */
+data class ConversationActivityRow(
+    val id: Long,
+    val mode: String?,
+    val createdAt: Long,
+    val threadId: String?,
+)
 
 /** 会话按天计数（[ConversationDao.getDailyCounts] 的投影结果）。 */
 data class ConversationDailyCount(
