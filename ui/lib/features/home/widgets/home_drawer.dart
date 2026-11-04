@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart' show setEquals, visibleForTesting;
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +18,8 @@ import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_c
 import 'package:ui/features/home/widgets/conversation_context_menu.dart';
 import 'package:ui/features/home/widgets/conversation_slidable.dart';
 import 'package:ui/features/home/widgets/home_drawer_search_field.dart';
+import 'package:ui/features/home/widgets/home_conversation_tile_content.dart';
+import 'package:ui/features/home/widgets/home_conversation_avatar_colors.dart';
 import 'package:ui/features/home/widgets/home_search_header.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
@@ -32,6 +36,11 @@ import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
 import 'package:ui/services/omni_plugin_service.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
+import 'package:ui/services/overlay_service.dart';
+import 'package:ui/services/permission_registry.dart';
+import 'package:ui/services/permission_service.dart';
+import 'package:ui/features/home/pages/authorize/authorize_page_args.dart';
+import 'package:ui/features/home/pages/chat/widgets/pet_overlay_permission_sheet.dart';
 import 'package:ui/services/scheduled_task_storage_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_colors.dart';
@@ -41,8 +50,10 @@ import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 import 'package:ui/widgets/app_update_dialog.dart';
 import 'package:ui/widgets/flclash/popup.dart';
+import 'package:ui/widgets/flclash/search_header.dart';
 import 'package:ui/widgets/glass_popup.dart';
 import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/omni_glass_floating_action_button.dart';
 import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:ui/widgets/settings_ui.dart';
 
@@ -52,6 +63,7 @@ part 'home_drawer_header_footer.dart';
 part 'home_drawer_home.dart';
 part 'home_drawer_image_previews.dart';
 part 'home_drawer_models.dart';
+part 'home_drawer_pet.dart';
 part 'home_drawer_search.dart';
 part 'home_drawer_selection.dart';
 
@@ -123,6 +135,8 @@ class HomeDrawer extends ConsumerStatefulWidget {
     this.searchFieldKey,
     this.deferInitialLoad = false,
     this.homePage = false,
+    this.conversationSidebar = false,
+    this.selectedThreadTarget,
     this.active = true,
   });
 
@@ -143,6 +157,15 @@ class HomeDrawer extends ConsumerStatefulWidget {
   /// Presents the existing conversation owner as the app's full-screen home.
   /// Search, history mutations and running-session status remain shared.
   final bool homePage;
+
+  /// Reuses the modern home surface inside a narrow conversation pane.
+  /// It starts with all Agents so opening a Codex/Na conversation does not
+  /// hide it behind the standalone home's remembered default category.
+  final bool conversationSidebar;
+
+  /// Presentation selection supplied by the conversation host; never owns
+  /// or changes the current ACP session.
+  final ConversationThreadTarget? selectedThreadTarget;
 
   /// Kept-alive home tabs refresh their catalog when selected again.
   final bool active;
@@ -182,6 +205,7 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
   final Map<String, Set<String>> _conversationImagePreviewFailures =
       <String, Set<String>>{};
   final Map<String, bool> _expandedConversationSections = <String, bool>{};
+  Map<String, int> _homeAvatarColorIndices = const {};
   final Set<String> _busyConversationKeys = <String>{};
   final Set<String> _selectedConversationKeys = <String>{};
   bool _isSelectingConversations = false;
@@ -197,6 +221,10 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
   bool _isSearching = false;
   bool _homeSearchVisible = false;
   final _homeMenuRevision = ValueNotifier<int>(0);
+  bool _isPetOverlayOpening = false;
+  bool _isPetOverlayShowing = false;
+  List<OmniPluginActionItem> _homeMenuWebQuickActions = const [];
+  int _webQuickActionsRequest = 0;
   _HomeConversationFilter _homeFilter = _HomeConversationFilter.xiaowan;
   AcpAgentCatalog? _homeAgentCatalog;
   bool _homeRouteWasCurrent = false;
@@ -230,10 +258,15 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
   @override
   void initState() {
     super.initState();
+    if (widget.conversationSidebar) _homeFilter = _HomeConversationFilter.all;
     if (widget.homePage) {
       unawaited(AppUpdateService.initialize());
+      unawaited(_syncPetOverlayState());
       _homeAppLifecycleListener = AppLifecycleListener(
-        onResume: () => unawaited(AppUpdateService.refreshIfNeeded()),
+        onResume: () {
+          unawaited(AppUpdateService.refreshIfNeeded());
+          unawaited(_syncPetOverlayState());
+        },
       );
     }
     _runtimeCoordinator.ensureInitialized();
@@ -294,6 +327,7 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
     super.didUpdateWidget(oldWidget);
     if (widget.homePage && widget.active && !oldWidget.active) {
       unawaited(_loadHomeAgentCatalog());
+      unawaited(_syncPetOverlayState());
     }
   }
 
@@ -391,42 +425,62 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
   Future<void> _loadWebQuickActions() =>
       runPageLoad(#homePluginActions, _readWebQuickActions, revalidate: true);
 
-  Future<void> _readWebQuickActions() async {
+  Future<List<OmniPluginActionItem>> _queryWebQuickActions() async {
+    final actions = await OmniPluginService.listActions();
+    return actions
+        .where(
+          (action) =>
+              action.supportsPlacement('home_drawer_quick_launch') &&
+              (action.presentation['agentId']?.toString().trim().isNotEmpty ??
+                  false),
+        )
+        .toList(growable: false)
+      ..sort((left, right) {
+        final order = left.quickLaunchOrder.compareTo(right.quickLaunchOrder);
+        return order != 0
+            ? order
+            : left.displayName.compareTo(right.displayName);
+      });
+  }
+
+  /// The open popup owns this snapshot. Its parent route is intentionally not
+  /// current while the menu is visible, so only the parent's cache publication
+  /// waits for that route to settle; the menu's registry read cannot use it.
+  Future<void> _refreshHomeMenuWebQuickActions() async {
+    _homeMenuWebQuickActions = _webQuickActions;
+    final request = ++_webQuickActionsRequest;
+    List<OmniPluginActionItem> actions;
     try {
-      final actions = await OmniPluginService.listActions();
-      if (!await waitForPageReady() || !pageLoadIsCurrent(#homePluginActions)) {
+      actions = await _queryWebQuickActions();
+    } catch (error) {
+      debugPrint('[HomeDrawer] failed to load menu Web quick actions: $error');
+      actions = const [];
+    }
+    if (!mounted || request != _webQuickActionsRequest) return;
+    _homeMenuWebQuickActions = actions;
+    _homeMenuRevision.value++;
+    if (!await waitForPageReady() || request != _webQuickActionsRequest) return;
+    setState(() => _webQuickActions = actions);
+  }
+
+  Future<void> _readWebQuickActions() async {
+    final request = ++_webQuickActionsRequest;
+    try {
+      final quickActions = await _queryWebQuickActions();
+      if (!await waitForPageReady() ||
+          request != _webQuickActionsRequest ||
+          !pageLoadIsCurrent(#homePluginActions)) {
         return;
       }
-      final quickActions =
-          actions
-              .where(
-                (action) =>
-                    action.supportsPlacement('home_drawer_quick_launch') &&
-                    (action.presentation['agentId']
-                            ?.toString()
-                            .trim()
-                            .isNotEmpty ??
-                        false),
-              )
-              .toList(growable: false)
-            ..sort((left, right) {
-              final order = left.quickLaunchOrder.compareTo(
-                right.quickLaunchOrder,
-              );
-              return order != 0
-                  ? order
-                  : left.displayName.compareTo(right.displayName);
-            });
       setState(() => _webQuickActions = quickActions);
-      _homeMenuRevision.value++;
       unawaited(_refreshWebQuickActionStatuses());
     } catch (error) {
       debugPrint('[HomeDrawer] failed to load Web quick actions: $error');
       if (await waitForPageReady() &&
+          request == _webQuickActionsRequest &&
           pageLoadIsCurrent(#homePluginActions) &&
           _webQuickActions.isNotEmpty) {
         setState(() => _webQuickActions = const <OmniPluginActionItem>[]);
-        _homeMenuRevision.value++;
       }
     }
   }
@@ -491,6 +545,21 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
     _searchFocusNode.unfocus();
   }
 
+  /// The chat host resolves sidebar dismissal before workspace navigation,
+  /// so two PopScopes never consume the same back action independently.
+  bool handleBackIfNeeded() {
+    if (!widget.active) return false;
+    if (_isSelectingConversations) {
+      _exitConversationSelection();
+      return true;
+    }
+    if (_homeSearchVisible) {
+      _closeHomeSearch();
+      return true;
+    }
+    return false;
+  }
+
   /// Rebuilds of this drawer, for the frame-budget tests.
   @visibleForTesting
   static int debugBuildCount = 0;
@@ -502,7 +571,10 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
       return true;
     }());
     if (widget.homePage) {
-      return _buildHomePage();
+      return OmniContentWidth(
+        key: const ValueKey('home-content-column'),
+        child: _buildHomePage(),
+      );
     }
     final backgroundColor = _drawerBackgroundColor;
     final content = ColoredBox(

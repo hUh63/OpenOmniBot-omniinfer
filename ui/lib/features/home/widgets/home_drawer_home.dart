@@ -105,19 +105,22 @@ extension _HomeDrawerHome on HomeDrawerState {
 
   Widget _buildHomePage() {
     final palette = context.omniPalette;
+    // Assign before lazy rows build, across date/pinned/scheduled boundaries.
+    // Busy rows still occupy space and must participate in neighbor avoidance.
+    _homeAvatarColorIndices = HomeConversationAvatarColors.assign(
+      _visibleConversationRows.keys,
+    );
     return PopScope(
       canPop:
           !widget.active || (!_homeSearchVisible && !_isSelectingConversations),
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop || !widget.active) return;
-        if (_isSelectingConversations) {
-          _exitConversationSelection();
-        } else if (_homeSearchVisible) {
-          _closeHomeSearch();
-        }
+        if (didPop || widget.conversationSidebar) return;
+        handleBackIfNeeded();
       },
       child: Scaffold(
-        backgroundColor: palette.pageBackground,
+        backgroundColor: widget.conversationSidebar
+            ? Colors.transparent
+            : palette.pageBackground,
         resizeToAvoidBottomInset: true,
         body: SafeArea(
           child: Column(
@@ -126,30 +129,35 @@ extension _HomeDrawerHome on HomeDrawerState {
               if (_isSelectingConversations)
                 _buildConversationSelectionHeader(),
               if (!_isSelectingConversations || _homeSearchVisible)
-                HomeSearchHeader(
-                  searching: _homeSearchVisible,
-                  updateIndicator: _buildHomeAppUpdateIndicator(),
-                  searchFieldKey: widget.searchFieldKey,
-                  controller: _searchController,
-                  focusNode: _searchFocusNode,
-                  isSearching: _isSearching,
-                  onSearch: _openHomeSearch,
-                  onClose: _closeHomeSearch,
-                  menuButton: _buildHomeMenuButton(),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final updateInMenu = _homeUpdateBelongsInMenu(
+                      constraints.maxWidth,
+                    );
+                    return HomeSearchHeader(
+                      searching: _homeSearchVisible,
+                      agentSwitcher: _buildHomeAgentSwitcher(
+                        compact: widget.conversationSidebar,
+                      ),
+                      updateIndicator: updateInMenu
+                          ? const SizedBox.shrink()
+                          : _buildHomeAppUpdateIndicator(),
+                      searchFieldKey: widget.searchFieldKey,
+                      controller: _searchController,
+                      focusNode: _searchFocusNode,
+                      isSearching: _isSearching,
+                      onSearch: _openHomeSearch,
+                      onClose: _closeHomeSearch,
+                      menuButton: _buildHomeMenuButton(
+                        updateInMenu: updateInMenu,
+                      ),
+                    );
+                  },
                 ),
               const SizedBox(height: 10),
-              if (!_isSelectingConversations) ...[
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 22),
-                  child: _homeSearchVisible
-                      ? _buildHomeSearchContext()
-                      : _buildHomeAgentSwitcher(compact: true),
-                ),
-                const SizedBox(height: 10),
-              ],
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 22),
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: SlidableAutoCloseBehavior(
                     child: isLoadingConversations
                         ? _buildConversationLoadingState()
@@ -176,16 +184,26 @@ extension _HomeDrawerHome on HomeDrawerState {
                 child: SizedBox(
                   width: 52,
                   height: 52,
-                  child: FloatingActionButton(
-                    key: const ValueKey('home-new-conversation'),
-                    heroTag: 'home-new-conversation',
-                    tooltip: context.l10n.homeDrawerNewChat,
-                    onPressed: _openNewConversation,
-                    backgroundColor: palette.accentPrimary,
-                    foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                    shape: const CircleBorder(),
-                    elevation: 3,
-                    child: const Icon(LucideIcons.plus, size: 26),
+                  child: OmniGlassFloatingActionButton(
+                    builder: (context, glass) => FloatingActionButton(
+                      key: const ValueKey('home-new-conversation'),
+                      heroTag: 'home-new-conversation',
+                      tooltip: context.l10n.homeDrawerNewChat,
+                      onPressed: _openNewConversation,
+                      backgroundColor: glass
+                          ? Colors.transparent
+                          : palette.accentPrimary,
+                      foregroundColor: glass
+                          ? palette.textPrimary
+                          : Theme.of(context).colorScheme.onPrimary,
+                      shape: const CircleBorder(),
+                      elevation: glass ? 0 : 3,
+                      focusElevation: glass ? 0 : null,
+                      hoverElevation: glass ? 0 : null,
+                      highlightElevation: glass ? 0 : null,
+                      disabledElevation: glass ? 0 : null,
+                      child: const Icon(LucideIcons.plus, size: 26),
+                    ),
                   ),
                 ),
               ),
@@ -199,6 +217,35 @@ extension _HomeDrawerHome on HomeDrawerState {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _homeSearchVisible) _searchFocusNode.requestFocus();
     });
+  }
+
+  bool _homeUpdateBelongsInMenu(double toolbarWidth) {
+    final textScaler = MediaQuery.textScalerOf(context);
+    final english = Localizations.localeOf(context).languageCode == 'en';
+    final switchLabel = TextPainter(
+      text: TextSpan(
+        text: english ? 'Switch' : '切换',
+        style: Theme.of(context).textTheme.labelLarge
+            ?.copyWith(fontSize: 11, fontWeight: FontWeight.w600),
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: textScaler,
+    )..layout();
+    // Capsule padding, icon, gaps and badge padding, followed by two name
+    // glyphs and an ellipsis. Reserve these before a separate update action.
+    final minimumAgentWidth =
+        24 + 24 + 16 + 8 + switchLabel.width + textScaler.scale(16) * 3;
+    switchLabel.dispose();
+    // FlClash's 16dp bar edges, 88dp action group and 8dp group gap, plus
+    // the existing update button's 48dp hit area and 4dp trailing inset.
+    final availableAgentWidth =
+        toolbarWidth -
+        MediaQuery.paddingOf(context).horizontal -
+        32 -
+        88 -
+        8 -
+        52;
+    return availableAgentWidth < minimumAgentWidth;
   }
 
   Widget _buildHomeAppUpdateIndicator() {
@@ -268,194 +315,120 @@ extension _HomeDrawerHome on HomeDrawerState {
     );
   }
 
-  /// Search keeps the current filter visible without moving the history list.
-  Widget _buildHomeSearchContext() => ConstrainedBox(
-    constraints: const BoxConstraints(minHeight: 48),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Row(
-        children: [
-          ExcludeSemantics(child: _buildHomeFilterIcon(_homeFilter, 24)),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              _homeFilterLabel(_homeFilter),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-                height: 1.2,
-                color: context.omniPalette.textSecondary,
-              ),
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-
   Widget _buildHomeAgentSwitcher({bool compact = false}) {
     final palette = context.omniPalette;
     final english = Localizations.localeOf(context).languageCode == 'en';
-    // Match the popup reveal's initial 24dp corners so the trigger's ink stays
-    // within the menu throughout its expansion.
-    const triggerRadius = BorderRadius.all(Radius.circular(24));
-    // Keep the header's overflow glyph fully visible beside the overlay.
-    final menuWidth = (MediaQuery.sizeOf(context).width - 84).clamp(0.0, 340.0);
-    return Builder(
-      builder: (anchorContext) => Tooltip(
-        message: english ? 'Switch Agent' : '切换 Agent',
-        child: Material(
-          color: Colors.transparent,
-          borderRadius: triggerRadius,
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            key: const ValueKey('home-agent-switcher'),
-            borderRadius: triggerRadius,
-            onTap: _isBatchConversationActionRunning
-                ? null
-                : () async {
-                    final anchor = glassPopupAnchorFromContext(anchorContext);
-                    if (anchor == null) return;
-                    performOmniSelectionHaptic();
-                    final id = await showOmniMenu<String>(
-                      context: anchorContext,
-                      anchor: anchor,
-                      width: menuWidth,
-                      items: [
-                        for (final filter in _homeFilters)
-                          OmniPopupMenuItem<String>(
-                            key: ValueKey('home-agent-option-${filter.id}'),
-                            value: filter.id,
-                            selected: _homeFilter.id == filter.id,
-                            child: Row(
-                              children: [
-                                ExcludeSemantics(
-                                  child: _buildHomeFilterIcon(
-                                    filter,
-                                    OmniMenuStyle.iconSize,
-                                  ),
-                                ),
-                                const SizedBox(width: OmniMenuStyle.iconGap),
-                                Expanded(
-                                  child: Text(
-                                    _homeFilterLabel(filter),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                SizedBox.square(
-                                  dimension: 18,
-                                  child: _homeFilter.id == filter.id
-                                      ? const Icon(LucideIcons.check, size: 18)
-                                      : null,
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    );
-                    // The catalog can change while the menu is open. Select only
-                    // a current entry using the existing conversation filter.
-                    if (!mounted || _isBatchConversationActionRunning) return;
-                    final filter = _homeFilters
-                        .where((item) => item.id == id)
-                        .firstOrNull;
-                    if (filter != null) _selectHomeFilter(filter);
-                  },
-            child: Semantics(
-              button: true,
-              enabled: !_isBatchConversationActionRunning,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 48),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ExcludeSemantics(
-                        child: _buildHomeFilterIcon(
-                          _homeFilter,
-                          compact ? 24 : 28,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Flexible(
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final name = Text(
-                              _homeFilterLabel(_homeFilter),
-                              key: const ValueKey('home-agent-name'),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: compact ? 17 : 22,
-                                fontWeight: FontWeight.w600,
-                                color: palette.textPrimary,
-                                height: 1.2,
-                              ),
-                            );
-                            final badge = DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: palette.brandSurface,
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
-                                  vertical: 2,
-                                ),
-                                child: Text(
-                                  english ? 'Switch' : '切换',
-                                  key: const ValueKey(
-                                    'home-agent-switch-action',
-                                  ),
-                                  maxLines: 1,
-                                  softWrap: false,
-                                  style: TextStyle(
-                                    fontSize: compact ? 10 : 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: palette.brandPrimary,
-                                    height: 1.2,
-                                  ),
-                                ),
-                              ),
-                            );
-                            final inlineWidth = MediaQuery.textScalerOf(context)
-                                .scale(english ? 92 : 78);
-                            if (constraints.maxWidth < inlineWidth) {
-                              // Keep the badge above-right of a readable name
-                              // when large text cannot share the same line.
-                              return Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  Align(
-                                    alignment: Alignment.centerRight,
-                                    child: badge,
-                                  ),
-                                  name,
-                                ],
-                              );
-                            }
-                            return Row(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Flexible(child: name),
-                                const SizedBox(width: 4),
-                                badge,
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                    ],
+    final menuWidth = (MediaQuery.sizeOf(context).width - 32).clamp(0.0, 340.0);
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      widthFactor: 1,
+      child: FlClashPopupBox<String>(
+        sourceShape: const RoundedSuperellipseBorder(
+          borderRadius: BorderRadius.all(Radius.circular(999)),
+        ),
+        placement: FlClashPopupPlacement.overAnchorStart,
+        onOpened: performOmniSelectionHaptic,
+        onSelected: (id) {
+          // Catalog changes do not invalidate the established filter owner.
+          if (!mounted || _isBatchConversationActionRunning) return;
+          final filter = _homeFilters
+              .where((item) => item.id == id)
+              .firstOrNull;
+          if (filter != null) _selectHomeFilter(filter);
+        },
+        targetBuilder: (buttonContext, open) => FlClashToolbarCapsule(
+          key: const ValueKey('home-agent-switcher'),
+          tooltip: english ? 'Switch Agent' : '切换 Agent',
+          onPressed: _isBatchConversationActionRunning ? null : open,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ExcludeSemantics(child: _buildHomeFilterIcon(_homeFilter, 24)),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  _homeFilterLabel(_homeFilter),
+                  key: const ValueKey('home-agent-name'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: compact ? 15 : 16,
+                    fontWeight: FontWeight.w600,
+                    color: palette.textPrimary,
+                    height: 1.2,
                   ),
                 ),
               ),
+              if (!compact || !widget.conversationSidebar) ...[
+                const SizedBox(width: 8),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: palette.brandSurface,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 2,
+                    ),
+                    child: Text(
+                      english ? 'Switch' : '切换',
+                      key: const ValueKey('home-agent-switch-action'),
+                      maxLines: 1,
+                      softWrap: false,
+                      style: TextStyle(
+                        fontSize: compact ? 10 : 11,
+                        fontWeight: FontWeight.w600,
+                        color: palette.brandPrimary,
+                        height: 1.2,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        popupBuilder: (popupContext) => SizedBox(
+          width: menuWidth,
+          child: SingleChildScrollView(
+            padding: OmniMenuStyle.panelPadding,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final filter in _homeFilters)
+                  FlClashPopupMenuItem<String>(
+                    key: ValueKey('home-agent-option-${filter.id}'),
+                    value: filter.id,
+                    selected: _homeFilter.id == filter.id,
+                    child: Row(
+                      children: [
+                        ExcludeSemantics(
+                          child: _buildHomeFilterIcon(
+                            filter,
+                            OmniMenuStyle.iconSize,
+                          ),
+                        ),
+                        const SizedBox(width: OmniMenuStyle.iconGap),
+                        Expanded(
+                          child: Text(
+                            _homeFilterLabel(filter),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        SizedBox.square(
+                          dimension: 18,
+                          child: _homeFilter.id == filter.id
+                              ? const Icon(LucideIcons.check, size: 18)
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
           ),
         ),
@@ -469,22 +442,33 @@ extension _HomeDrawerHome on HomeDrawerState {
     setState(() => _homeFilter = filter);
   }
 
-  List<_DrawerShortcutAction> get _homeMenuActions => [
-    _DrawerShortcutAction(
-      label: context.l10n.homeDrawerArchive,
-      assetPath: 'assets/home/archive_icon.svg',
-      onTap: () => _navigateTo('/home/archived_conversations'),
-    ),
-    ..._shortcutActions,
-    if (_webQuickActions.isNotEmpty)
+  List<_DrawerShortcutAction> _homeMenuActions(BuildContext sourceContext) {
+    final webQuickActions = _homeMenuWebQuickActions;
+    return [
       _DrawerShortcutAction(
-        label: 'Agent WebUI',
-        icon: LucideIcons.globe,
-        onTap: _showHomeWebActions,
+        label: context.l10n.homeDrawerArchive,
+        assetPath: 'assets/home/archive_icon.svg',
+        onTap: () => _navigateTo('/home/archived_conversations'),
       ),
-  ];
+      _DrawerShortcutAction(
+        label: _isPetOverlayShowing
+            ? LegacyTextLocalizer.localize('收起宠物')
+            : LegacyTextLocalizer.localize('唤起宠物'),
+        icon: LucideIcons.pawPrint,
+        onTap: () => unawaited(_handlePetOverlayTap()),
+      ),
+      ..._shortcutActions,
+      if (webQuickActions.isNotEmpty)
+        _DrawerShortcutAction(
+          label: 'Agent WebUI',
+          icon: LucideIcons.globe,
+          onTap: () =>
+              _showHomeWebActions(sourceContext, actions: webQuickActions),
+        ),
+    ];
+  }
 
-  Widget _buildHomeMenuButton() => Builder(
+  Widget _buildHomeMenuButton({required bool updateInMenu}) => Builder(
     builder: (buttonContext) => FlClashPopupBox<VoidCallback>(
       onOpened: () {
         scheduleMicrotask(() {
@@ -494,22 +478,52 @@ extension _HomeDrawerHome on HomeDrawerState {
         });
         // Show the cached actions on pointer down, then refresh the already-open
         // menu. Plugin I/O must not hold the source button's opening animation.
-        unawaited(_loadWebQuickActions());
+        unawaited(_refreshHomeMenuWebQuickActions());
+        unawaited(_syncPetOverlayState());
       },
       onSelected: (action) {
         if (mounted) action();
       },
-      targetBuilder: (context, open) => IconButton(
-        key: const ValueKey('home-menu-button'),
-        tooltip: MaterialLocalizations.of(context).showMenuTooltip,
-        onPressed: open,
-        icon: const Icon(LucideIcons.ellipsis),
-      ),
-      popupBuilder: (popupContext) => ValueListenableBuilder<int>(
-        valueListenable: _homeMenuRevision,
-        builder: (context, _, _) {
+      targetBuilder: (context, open) =>
+          ValueListenableBuilder<AppUpdateStatus?>(
+            valueListenable: AppUpdateService.statusNotifier,
+            builder: (context, status, _) => IconButton(
+              key: const ValueKey('home-menu-button'),
+              tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+              onPressed: open,
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(LucideIcons.ellipsis),
+                  if (updateInMenu && AppUpdateService.shouldShowBanner(status))
+                    Positioned(
+                      right: -1,
+                      top: -1,
+                      child: DecoratedBox(
+                        key: const ValueKey('home-menu-update-badge'),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFD4A017),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const SizedBox.square(dimension: 6),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+      popupBuilder: (popupContext) => ListenableBuilder(
+        listenable: Listenable.merge([
+          _homeMenuRevision,
+          AppUpdateService.statusNotifier,
+        ]),
+        builder: (context, _) {
           if (!mounted) return const SizedBox.shrink();
-          final actions = _homeMenuActions;
+          final actions = _homeMenuActions(buttonContext);
+          final updateStatus = AppUpdateService.statusNotifier.value;
+          final showUpdate =
+              updateInMenu && AppUpdateService.shouldShowBanner(updateStatus);
+          final english = Localizations.localeOf(context).languageCode == 'en';
           return SizedBox(
             width: 260,
             child: SingleChildScrollView(
@@ -518,6 +532,42 @@ extension _HomeDrawerHome on HomeDrawerState {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  if (showUpdate)
+                    FlClashPopupMenuItem<VoidCallback>(
+                      key: const ValueKey('home-menu-app-update'),
+                      value: () =>
+                          showAppUpdateDialog(this.context, updateStatus),
+                      child: Row(
+                        children: [
+                          SvgPicture.asset(
+                            'assets/home/chat/update_sparkles.svg',
+                            width: 20,
+                            height: 20,
+                            colorFilter: const ColorFilter.mode(
+                              Color(0xFFD4A017),
+                              BlendMode.srcIn,
+                            ),
+                          ),
+                          const SizedBox(width: OmniMenuStyle.iconGap),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(english ? 'Update available' : '发现新版本'),
+                                Text(
+                                  updateStatus!.latestVersionLabel,
+                                  style: const TextStyle(
+                                    color: Color(0xFFD4A017),
+                                    fontSize: 12,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   for (var i = 0; i < actions.length; i++)
                     FlClashPopupMenuItem<VoidCallback>(
                       key: ValueKey('home-menu-item-$i'),
@@ -525,7 +575,7 @@ extension _HomeDrawerHome on HomeDrawerState {
                       child: Row(
                         children: [
                           _shortcutIcon(actions[i], size: 20),
-                          const SizedBox(width: 14),
+                          const SizedBox(width: OmniMenuStyle.iconGap),
                           Expanded(child: Text(actions[i].label)),
                         ],
                       ),
@@ -539,30 +589,43 @@ extension _HomeDrawerHome on HomeDrawerState {
     ),
   );
 
-  Future<void> _showHomeWebActions() async {
-    await _refreshWebQuickActionStatuses();
-    if (!mounted) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (sheetContext) => SafeArea(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
-          ),
-          child: ListView(
-            shrinkWrap: true,
-            padding: OmniMenuStyle.panelPadding,
-            children: [
-              for (final action in _webQuickActions)
-                _buildWebPopoverOptionTile(
-                  sheetContext,
-                  action,
-                  surface: sheetContext.omniPalette.surfacePrimary,
-                  english: Localizations.localeOf(context).languageCode == 'en',
-                ),
-            ],
+  Future<void> _showHomeWebActions(
+    BuildContext sourceContext, {
+    required List<OmniPluginActionItem> actions,
+  }) async {
+    // This submenu uses the selected popup snapshot, independent of when the
+    // underlying page is allowed to publish its refreshed cache.
+    final statuses = await AgentWebStatusService.queryAll(
+      actions.where(AgentWebStatusService.supportsLifecycle).toList(),
+    );
+    if (!await waitForPageReady() || !mounted || !sourceContext.mounted) return;
+    final anchor = glassPopupAnchorFromContext(sourceContext);
+    if (anchor == null) return;
+    await showGlassPopup<void>(
+      context: sourceContext,
+      sourceContext: sourceContext,
+      anchor: anchor,
+      child: Builder(
+        builder: (popupContext) => OmniMenuSurface(
+          width: 340,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final action in actions)
+                  _buildWebPopoverOptionTile(
+                    popupContext,
+                    action,
+                    statusOverride:
+                        statuses['${action.pluginId}/${action.id}'] ??
+                        AgentWebStatus.unknown,
+                    surface: popupContext.omniPalette.surfacePrimary,
+                    english:
+                        Localizations.localeOf(context).languageCode == 'en',
+                  ),
+              ],
+            ),
           ),
         ),
       ),
