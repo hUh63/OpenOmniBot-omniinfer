@@ -243,31 +243,20 @@ class _FlClashSearchHeaderState extends State<FlClashSearchHeader>
             ),
     );
     final group = grouped
-        ? FlClashPopupSource(
-            shape: _fullShape,
-            builder: (_) => _ElasticPress(
-              child: _ToolbarGroupSurface(
-                child: _SearchButtonTheme(
-                  grouped: true,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _SearchLead(
-                        key: _searchLeadKey,
-                        motion: _motion,
-                        child: SizedBox.square(
-                          dimension: _buttonSize,
-                          child: search,
-                        ),
-                      ),
-                      SizedBox.square(
-                        dimension: _buttonSize,
-                        child: widget.actions.first,
-                      ),
-                    ],
-                  ),
+        ? FlClashToolbarButtonGroup(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _SearchLead(
+                  key: _searchLeadKey,
+                  motion: _motion,
+                  child: SizedBox.square(dimension: _buttonSize, child: search),
                 ),
-              ),
+                SizedBox.square(
+                  dimension: _buttonSize,
+                  child: widget.actions.first,
+                ),
+              ],
             ),
           )
         : _button(search);
@@ -454,9 +443,47 @@ class FlClashToolbarCapsule extends StatelessWidget {
   }
 }
 
+/// Adjacent toolbar buttons share the home search/menu capsule and press motion.
+/// Supply plain [IconButton] children; a popup opened from inside the group
+/// captures the complete capsule as its source.
+class FlClashToolbarButtonGroup extends StatelessWidget {
+  const FlClashToolbarButtonGroup({
+    super.key,
+    required this.child,
+    this.buttonSize = _buttonSize,
+    this.iconSize = _iconSize,
+  });
+
+  final Widget child;
+  final double buttonSize;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) => FlClashPopupSource(
+    shape: _fullShape,
+    builder: (_) => _ElasticPress(
+      child: _ToolbarGroupSurface(
+        child: _SearchButtonTheme(
+          grouped: true,
+          buttonSize: buttonSize,
+          iconSize: iconSize,
+          child: child,
+        ),
+      ),
+    ),
+  );
+}
+
 class _SearchButtonTheme extends StatelessWidget {
-  const _SearchButtonTheme({this.grouped = false, required this.child});
+  const _SearchButtonTheme({
+    this.grouped = false,
+    this.buttonSize = _buttonSize,
+    this.iconSize = _iconSize,
+    required this.child,
+  });
   final bool grouped;
+  final double buttonSize;
+  final double iconSize;
   final Widget child;
 
   @override
@@ -484,10 +511,10 @@ class _SearchButtonTheme extends StatelessWidget {
                     disabledForegroundColor: palette.textPrimary.withValues(
                       alpha: .38,
                     ),
-                    fixedSize: const Size.square(_buttonSize),
-                    minimumSize: const Size.square(_buttonSize),
+                    fixedSize: Size.square(buttonSize),
+                    minimumSize: Size.square(buttonSize),
                     padding: EdgeInsets.zero,
-                    iconSize: _iconSize,
+                    iconSize: iconSize,
                     shape: _fullShape,
                     visualDensity: VisualDensity.standard,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
