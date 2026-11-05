@@ -180,6 +180,10 @@ class ChatConversationRuntimeState {
   /// when the provider admits its official turn id.
   String? activeRunId;
 
+  /// 该会话运行时协商到的 ACP 协议版本。2 表示走新版事件流语义（状态更新
+  /// 不重复落地、正文以 delta 累积），0/1 表示旧版一次性快照。
+  int acpProtocolVersion = 0;
+
   /// Compatibility name retained for page and persisted-history callers.
   /// There is only one local run value; this is not a second identity and it
   /// must never be assigned an ACP turn id.

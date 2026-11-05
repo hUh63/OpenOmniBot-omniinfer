@@ -29,10 +29,18 @@ class AgentRunGroupMessage extends StatefulWidget {
     this.onStreamingTextLayoutChanged,
     this.visualProfile = AppBackgroundVisualProfile.defaultProfile,
     this.appearanceConfig = AppBackgroundConfig.defaults,
+    this.expanded,
+    this.onToggleExpanded,
   });
 
   final AgentRunTimelineGroup group;
   final bool useAcpPresentation;
+
+  /// 外部受控的展开态。为空时沿用默认节奏（运行中展开、完成后折叠）。
+  final bool? expanded;
+
+  /// 用户点击折叠/展开时的回调；由外部维护 [expanded] 时接管切换。
+  final VoidCallback? onToggleExpanded;
   final OnBeforeTaskExecute onBeforeTaskExecute;
   final void Function(String taskId)? onCancelTask;
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
@@ -62,7 +70,7 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
 
   /// A running turn stays inline. Completion folds its trace once; reopening
   /// that history presents a separate sheet without resizing the transcript.
-  bool get _effectiveExpanded => widget.group.isRunning;
+  bool get _effectiveExpanded => widget.expanded ?? widget.group.isRunning;
 
   @override
   void initState() {

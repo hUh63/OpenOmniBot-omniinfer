@@ -738,10 +738,16 @@ class AcpAgentCatalog {
     required this.selectedAgentId,
     required this.agents,
     this.runtimeStatus,
+    this.retiredAgentIds = const <String>{},
   });
 
   final String selectedAgentId;
   final List<AcpAgentProfile> agents;
+
+  /// 已下线/被替代的 Agent id 集合：原生侧仍保留其历史，但不再出现在目录里。
+  final Set<String> retiredAgentIds;
+
+  bool isRetired(String? agentId) => retiredAgentIds.contains(agentId?.trim());
 
   /// A switch response may carry the status snapshot captured immediately
   /// after ACP initialization. Keeping it with the catalog avoids a second
@@ -758,12 +764,17 @@ class AcpAgentCatalog {
   factory AcpAgentCatalog.fromMap(Map<dynamic, dynamic>? map) {
     final source = map ?? const <dynamic, dynamic>{};
     final rawAgents = source['agents'];
+    final retiredAgentIds = (source['retiredAgentIds'] as List? ?? const [])
+        .whereType<String>()
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
     final agents = <AcpAgentProfile>[];
     final seenIdentities = <String>{};
     if (rawAgents is List) {
       for (final rawAgent in rawAgents.whereType<Map>()) {
         final agent = AcpAgentProfile.fromMap(rawAgent);
-        if (agent.id.isEmpty) continue;
+        if (agent.id.isEmpty || retiredAgentIds.contains(agent.id)) continue;
         if (seenIdentities.add(_agentCatalogIdentity(agent))) {
           agents.add(agent);
         }
@@ -774,6 +785,7 @@ class AcpAgentCatalog {
           _stringOrNull(source['selectedAgentId']) ??
           (agents.isEmpty ? '' : agents.first.id),
       agents: agents,
+      retiredAgentIds: retiredAgentIds,
       runtimeStatus:
           source.containsKey('connected') || source.containsKey('ready')
           ? AgentRuntimeStatus.fromMap(source)
@@ -792,7 +804,6 @@ String _agentCatalogIdentity(AcpAgentProfile agent) {
 }
 
 String? selectAgentRequestModel({
-  required AgentRuntimeStatus status,
   required String? overrideModel,
   required String? activeModel,
   required bool activeModelSourceMatches,
@@ -1058,8 +1069,11 @@ class AgentRuntimeService {
   static Stream<Set<String>> get agentPreparationChanges =>
       _agentPreparationController.stream;
 
-  static Future<AgentRuntimeStatus> status() async {
-    final result = await _invokeMap('status');
+  static Future<AgentRuntimeStatus> status({String? agentId}) async {
+    final result = await _invokeMap('status', {
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
+    });
     return AgentRuntimeStatus.fromMap(result);
   }
 
@@ -1543,6 +1557,7 @@ class AgentRuntimeService {
     String? sessionId,
     int? conversationId,
     String? requestId,
+    String? userMessageId,
     String? clientMessageId,
     String? agentId,
     required String text,
@@ -1564,6 +1579,8 @@ class AgentRuntimeService {
       if (conversationId != null) 'conversationId': conversationId,
       if (requestId != null && requestId.trim().isNotEmpty)
         'requestId': requestId.trim(),
+      if (userMessageId != null && userMessageId.trim().isNotEmpty)
+        'userMessageId': userMessageId.trim(),
       if (agentId != null && agentId.trim().isNotEmpty)
         'agentId': agentId.trim(),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
@@ -1603,12 +1620,15 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> cancelPrompt({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     String? promptId,
     String? runId,
   }) {
     return _invokeMap('session/cancel', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
       if (promptId != null) 'promptId': promptId,
       if (runId != null && runId.trim().isNotEmpty) 'runId': runId.trim(),
     });
@@ -1633,6 +1653,7 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> reviewSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     String? cwd,
     Map<String, dynamic>? target,
     String? approvalPolicy,
@@ -1645,6 +1666,8 @@ class AgentRuntimeService {
     return _invokeMap('review/start', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
       'target': target ?? <String, dynamic>{'type': 'uncommittedChanges'},
       if (approvalPolicy != null && approvalPolicy.trim().isNotEmpty)
@@ -1689,20 +1712,26 @@ class AgentRuntimeService {
     });
   }
 
-  static Future<Map<String, dynamic>> listModels() {
-    return _invokeMap('model/list');
+  static Future<Map<String, dynamic>> listModels({String? agentId}) {
+    return _invokeMap('model/list', {
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
+    });
   }
 
   static Future<Map<String, dynamic>> listModelsForStatus(
     AgentRuntimeStatus status,
-  ) => listModels();
+  ) => listModels(agentId: status.activeAgentId);
 
   static Future<Map<String, dynamic>> listCollaborationModes() {
     return _invokeMap('collaborationMode/list');
   }
 
-  static Future<Map<String, dynamic>> readConfig() {
-    return _invokeMap('config/read');
+  static Future<Map<String, dynamic>> readConfig({String? agentId}) {
+    return _invokeMap('config/read', {
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
+    });
   }
 
   static Future<Map<String, dynamic>> setSessionConfigOption({

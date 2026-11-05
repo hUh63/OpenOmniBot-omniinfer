@@ -25,6 +25,7 @@ class OmniSegmentedSlider<T> extends StatelessWidget {
     this.position,
     this.keyPrefix = 'omni-segment-option',
     this.height = 44,
+    this.fontSize,
   });
 
   final T value;
@@ -33,6 +34,9 @@ class OmniSegmentedSlider<T> extends StatelessWidget {
   final double? position;
   final String keyPrefix;
   final double height;
+
+  /// 选项文字字号；为空时用默认 13。紧凑场景（如输入区下方的档位条）会调小。
+  final double? fontSize;
 
   @override
   Widget build(BuildContext context) {
@@ -147,7 +151,7 @@ class OmniSegmentedSlider<T> extends StatelessWidget {
                                     duration: const Duration(milliseconds: 180),
                                     curve: Curves.easeOutCubic,
                                     style: TextStyle(
-                                      fontSize: 13,
+                                      fontSize: fontSize ?? 13,
                                       fontWeight: selected
                                           ? FontWeight.w700
                                           : FontWeight.w600,

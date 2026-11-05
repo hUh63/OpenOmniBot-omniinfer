@@ -336,6 +336,7 @@ class ConversationHistoryService {
     List<ChatMessageModel> messages, {
     ConversationMode mode = ConversationMode.agent,
     bool allowHistoryRemoval = false,
+    List<String>? removedMessageIds,
   }) {
     final key = '${mode.canonicalStorageValue}:$conversationId';
     final snapshot = List<ChatMessageModel>.from(messages);
@@ -346,6 +347,7 @@ class ConversationHistoryService {
         snapshot,
         mode: mode,
         allowHistoryRemoval: allowHistoryRemoval,
+        removedMessageIds: removedMessageIds,
       ),
     );
   }
@@ -407,6 +409,7 @@ class ConversationHistoryService {
     List<ChatMessageModel> messages, {
     required ConversationMode mode,
     bool allowHistoryRemoval = false,
+    List<String>? removedMessageIds,
   }) async {
     final key = '${mode.canonicalStorageValue}:$conversationId';
     final jsonList = messages.map((m) => m.toJson()).toList();
@@ -429,6 +432,7 @@ class ConversationHistoryService {
       allowHistoryRemoval ? jsonList : changed,
       mode: mode,
       allowHistoryRemoval: allowHistoryRemoval,
+      removedMessageIds: removedMessageIds,
     );
     if (stored) {
       _acknowledgedWrites[key] = allowHistoryRemoval
@@ -448,6 +452,7 @@ class ConversationHistoryService {
     List<Map<String, dynamic>> jsonList, {
     required ConversationMode mode,
     bool allowHistoryRemoval = false,
+    List<String>? removedMessageIds,
   }) async {
     try {
       await _assistCore.invokeMethod('replaceConversationMessages', {
@@ -455,6 +460,8 @@ class ConversationHistoryService {
         'mode': mode.canonicalStorageValue,
         'messages': jsonList,
         'allowHistoryRemoval': allowHistoryRemoval,
+        if (removedMessageIds != null && removedMessageIds.isNotEmpty)
+          'removedMessageIds': removedMessageIds,
       });
       return true;
     } on PlatformException catch (e) {
@@ -519,7 +526,11 @@ class ConversationHistoryService {
   }
 
   /// 分页获取对话消息列表
-  static Future<({List<ChatMessageModel> messages, bool hasMore, int scanned})>
+  static Future<(
+      {List<ChatMessageModel> messages,
+      bool hasMore,
+      int scanned,
+      int nextOffset})>
   getConversationMessagesPaged(
     int conversationId, {
     ConversationMode mode = ConversationMode.agent,
@@ -565,9 +576,15 @@ class ConversationHistoryService {
           messages: taken,
           hasMore: recoveredMessages.length > pageSize,
           scanned: taken.length,
+          nextOffset: offset + taken.length,
         );
       }
-      return (messages: messages, hasMore: hasMore, scanned: scanned);
+      return (
+        messages: messages,
+        hasMore: hasMore,
+        scanned: scanned,
+        nextOffset: offset + scanned,
+      );
     } on PlatformException catch (e) {
       debugPrint('分页获取对话历史失败: ${e.message}');
     } catch (e) {
@@ -583,7 +600,11 @@ class ConversationHistoryService {
     );
   }
 
-  static Future<({List<ChatMessageModel> messages, bool hasMore, int scanned})>
+  static Future<(
+      {List<ChatMessageModel> messages,
+      bool hasMore,
+      int scanned,
+      int nextOffset})>
   _legacyPagedConversationMessages(
     int conversationId, {
     required ConversationMode mode,
@@ -608,6 +629,7 @@ class ConversationHistoryService {
       messages: persistedMessages.sublist(start, end),
       hasMore: end < persistedMessages.length,
       scanned: end - start,
+      nextOffset: end,
     );
   }
 
