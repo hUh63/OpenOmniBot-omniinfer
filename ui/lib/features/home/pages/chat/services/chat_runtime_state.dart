@@ -497,7 +497,7 @@ class ChatConversationRuntimeState {
     }
     // A completed turn remains fenced even after its session becomes idle.
     // Without this check, a delayed event from the previous Harness can be
-    // the first event seen after an Agent switch and silently rebind the
+    // the first event seen after a Xiaowan/DSH switch and silently rebind the
     // runtime to the old session.
     if (incomingTurnId.isNotEmpty &&
         (completedAgentTurnIds.contains(incomingTurnId) ||

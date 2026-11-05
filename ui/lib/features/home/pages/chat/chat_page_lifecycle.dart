@@ -5,7 +5,6 @@ ConversationThreadTarget _newThreadTargetForConversationMode(
 ) {
   return ConversationThreadTarget.newConversation(
     mode: mode,
-    agentId: _kXiaowanAcpAgentId,
     requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
   );
 }
@@ -26,11 +25,7 @@ ConversationThreadTarget _newAgentThreadTarget({
   return ConversationThreadTarget.newConversation(
     mode: ConversationMode.agent,
     requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
-    agentId:
-        agentId ??
-        (agentRuntime == 'remote'
-            ? _kRemoteCodexModeAgentId
-            : _kXiaowanAcpAgentId),
+    agentId: agentId,
     agentRuntime: agentRuntime,
   );
 }
@@ -144,23 +139,12 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     super.didChangeDependencies();
     final viewportSize = MediaQuery.maybeSizeOf(context);
     if (viewportSize != null) {
-      final safeWidth =
-          viewportSize.width -
-          (MediaQuery.maybeViewPaddingOf(context)?.horizontal ?? 0);
-      final isChatWorkspace = isChatWorkspaceViewport(
-        Size(safeWidth, viewportSize.height),
-      );
-      if (_wasChatWorkspace == true && !isChatWorkspace) {
+      final isHdPadLandscape = isHdPadLandscapeViewport(viewportSize);
+      if (_wasHdPadLandscape == true && !isHdPadLandscape) {
         _embeddedDrawerKey.currentState?.unfocusSearch();
-        if (_isHdPadPaneDragging) {
-          _resetHdPadPaneDragState();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _persistHdPadPanePreferences();
-          });
-        }
       }
-      _wasChatWorkspace = isChatWorkspace;
-      if (isChatWorkspace && _activeSurfaceMode == ChatSurfaceMode.workspace) {
+      _wasHdPadLandscape = isHdPadLandscape;
+      if (isHdPadLandscape && _activeSurfaceMode == ChatSurfaceMode.workspace) {
         _activeSurfaceMode = ChatSurfaceMode.normal;
       }
     }
@@ -242,7 +226,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return normalizedLatestTarget;
     }
 
-    return _newThreadTargetForConversationMode(resolvedMode);
+    return ConversationThreadTarget.newConversation(mode: resolvedMode);
   }
 
   ConversationThreadTarget? _normalizeVisibleThreadTarget(
@@ -253,20 +237,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     }
     if (target.mode == ConversationMode.openclaw) {
       return null;
-    }
-    if (target.isRemoteCodexSessionTarget || target.agentRuntime == 'remote') {
-      return target.copyWith(agentId: _kRemoteCodexModeAgentId);
-    }
-    if (target.isNewConversation) {
-      final agentId = target.agentRuntime == 'remote'
-          ? _kRemoteCodexModeAgentId
-          : target.mode == ConversationMode.normal ||
-                target.mode == ConversationMode.chatOnly
-          ? _kXiaowanAcpAgentId
-          : (target.agentId?.trim().isNotEmpty == true
-                ? target.agentId!
-                : _kXiaowanAcpAgentId);
-      return target.copyWith(agentId: agentId);
     }
     return target;
   }
@@ -332,9 +302,9 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     try {
       invalidateConversationLifecycle();
       final lifecycleToken = captureConversationLifecycleToken();
-      final effectiveTarget = _normalizeVisibleThreadTarget(
-        await _overrideTargetWithSharedDraftIfNeeded(target),
-      )!;
+      final effectiveTarget = await _overrideTargetWithSharedDraftIfNeeded(
+        target,
+      );
       if (isStaleRequest()) return;
       final targetMode = _pageModeForConversationMode(effectiveTarget.mode);
       // Carry the current composer across the first synchronous target reset.
@@ -402,7 +372,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         await _refreshAgentCommandPreferences();
         if (isStaleRequest()) return;
       }
-      unawaited(_refreshAgentRuntimeStatus());
       await _applyStagedSharedDraftIfNeeded(effectiveTarget);
       if (isStaleRequest()) return;
       await _sendInitialMessageIfNeeded(effectiveTarget);
@@ -486,6 +455,11 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     }
     try {
       AgentRuntimeStatus? status;
+      try {
+        status = await AgentRuntimeService.status();
+      } catch (_) {
+        status = null;
+      }
       final requestedAgentId = target.agentId?.trim() ?? '';
       final response = await AgentRuntimeService.readSession(
         conversationId: conversationId,
@@ -494,14 +468,9 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         conversationMode: target.mode.storageValue,
       );
       try {
-        final responseAgentId = (response['agentId'] ?? requestedAgentId)
-            .toString()
-            .trim();
-        if (responseAgentId.isNotEmpty) {
-          status = await AgentRuntimeService.status(agentId: responseAgentId);
-        }
+        status = await AgentRuntimeService.status();
       } catch (_) {
-        // Session ownership does not depend on optional status metadata.
+        // Keep the status snapshot from before session restoration.
       }
       if (!mounted || !_isConversationTargetRequestCurrent(requestId)) {
         return;
@@ -882,7 +851,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _agentMessageScrollController.dispose();
     _modePageController.dispose();
     _inputFocusNode.dispose();
-    _pageShortcutsFocusNode.dispose();
     _chatKeyboardLayoutChanges.dispose();
     _openClawBaseUrlController.dispose();
     _openClawTokenController.dispose();
@@ -1274,7 +1242,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     if (staged != null && staged.hasContent) {
       return ConversationThreadTarget.newConversation(
         mode: ConversationMode.agent,
-        agentId: _kXiaowanAcpAgentId,
         fromNativeRoute: true,
         requestKey: staged.requestKey,
       );
@@ -1289,7 +1256,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         DateTime.now().millisecondsSinceEpoch + 5000;
     return ConversationThreadTarget.newConversation(
       mode: ConversationMode.agent,
-      agentId: _kXiaowanAcpAgentId,
       fromNativeRoute: true,
       requestKey: payload.requestKey,
     );

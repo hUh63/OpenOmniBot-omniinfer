@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_segmented_slider.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/my/pages/account/account_lifecycle_sheets.dart';

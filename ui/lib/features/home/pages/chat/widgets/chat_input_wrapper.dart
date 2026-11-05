@@ -7,7 +7,6 @@ class ChatInputWrapper extends StatelessWidget {
   final FocusNode focusNode;
   final VoidCallback? onRequestFocus;
   final bool isProcessing;
-  final String? unavailableMessage;
   final Future<void> Function({String? text}) onSendMessage;
   final VoidCallback onCancelTask;
   final void Function(bool) onPopupVisibilityChanged;
@@ -51,7 +50,6 @@ class ChatInputWrapper extends StatelessWidget {
     required this.focusNode,
     this.onRequestFocus,
     required this.isProcessing,
-    this.unavailableMessage,
     required this.onSendMessage,
     required this.onCancelTask,
     required this.onPopupVisibilityChanged,
@@ -90,16 +88,6 @@ class ChatInputWrapper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (unavailableMessage != null) {
-      return Padding(
-        key: const Key('chat-agent-unavailable'),
-        padding: const EdgeInsets.all(18),
-        child: Text(
-          unavailableMessage!,
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-      );
-    }
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
       child: Column(

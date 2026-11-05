@@ -59,11 +59,18 @@ extension _ChatPageRemoteCodexSupport on _ChatPageStateBase {
   Future<Map<String, dynamic>> _readRemoteCodexThreadSnapshot(
     String threadId,
   ) async {
-    return AgentRuntimeService.readSession(
-      sessionId: threadId,
-      agentId: _kRemoteCodexModeAgentId,
-      conversationMode: ConversationMode.agent.storageValue,
-    );
+    try {
+      return await AgentRuntimeService.readSession(
+        sessionId: threadId,
+        conversationMode: ConversationMode.agent.storageValue,
+      );
+    } catch (error) {
+      debugPrint('Agent thread/read failed, falling back to resume: $error');
+      return AgentRuntimeService.loadSession(
+        sessionId: threadId,
+        conversationMode: ConversationMode.agent.storageValue,
+      );
+    }
   }
 
   void _applyRemoteCodexThreadSnapshot({
@@ -110,8 +117,9 @@ extension _ChatPageRemoteCodexSupport on _ChatPageStateBase {
       resolveVisibleChatMessages(
         runtimeMessages: runtime?.messages,
         fallbackMessages: _modeState(ChatPageMode.agent).messages,
-        preserveFallbackDuringHandoff: _modeState(ChatPageMode.agent)
-            .isAiResponding,
+        preserveFallbackDuringHandoff: _modeState(
+          ChatPageMode.agent,
+        ).isAiResponding,
       ),
     );
     final snapshotMessages = hasTurns
@@ -199,7 +207,8 @@ extension _ChatPageRemoteCodexSupport on _ChatPageStateBase {
   }
 
   bool _isRemoteCodexConfigured() {
-    return _activeAcpAgentId == _kRemoteCodexModeAgentId;
+    final runtime = _agentRuntimeStatus.runtime?.trim();
+    return runtime == 'remote' || _agentRuntimeStatus.remoteEnabled;
   }
 
   int _ensureRemoteCodexRuntimeForCurrentMessages() {
@@ -292,8 +301,9 @@ extension _ChatPageRemoteCodexSupport on _ChatPageStateBase {
           }
         }
       }
-      final currentConversation = _modeState(ChatPageMode.agent)
-          .currentConversation;
+      final currentConversation = _modeState(
+        ChatPageMode.agent,
+      ).currentConversation;
       if (currentConversation != null) {
         runtime.conversation = currentConversation.copyWith(id: runtimeId);
       }
@@ -314,8 +324,9 @@ extension _ChatPageRemoteCodexSupport on _ChatPageStateBase {
     if (activeThreadId == threadId) {
       return true;
     }
-    final currentConversationId = _modeState(ChatPageMode.agent)
-        .currentConversationId;
+    final currentConversationId = _modeState(
+      ChatPageMode.agent,
+    ).currentConversationId;
     if (currentConversationId == runtimeId) {
       return true;
     }

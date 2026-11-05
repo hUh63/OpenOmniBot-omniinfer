@@ -57,23 +57,39 @@ class _UserMessageQuickMenuContent extends StatelessWidget {
   }
 }
 
-/// Hidden side panes keep their scroll/file state without accepting input.
-class _ChatPaneVisibility extends StatelessWidget {
-  const _ChatPaneVisibility({required this.hidden, required this.child});
-  final bool hidden;
-  final Widget child;
+class _PaneResizeHandle extends StatelessWidget {
+  const _PaneResizeHandle({
+    required this.onDragUpdate,
+    this.onDragStart,
+    this.onDragEnd,
+  });
+
+  final ValueChanged<double> onDragUpdate;
+  final VoidCallback? onDragStart;
+  final VoidCallback? onDragEnd;
 
   @override
-  Widget build(BuildContext context) => ExcludeFocus(
-    excluding: hidden,
-    child: ExcludeSemantics(
-      excluding: hidden,
-      child: IgnorePointer(
-        ignoring: hidden,
-        child: TickerMode(enabled: !hidden, child: child),
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onHorizontalDragStart: (_) => onDragStart?.call(),
+      onHorizontalDragUpdate: (details) => onDragUpdate(details.delta.dx),
+      onHorizontalDragEnd: (_) => onDragEnd?.call(),
+      onHorizontalDragCancel: () => onDragEnd?.call(),
+      child: SizedBox(
+        width: HdPadPaneLayoutResolver.dividerHitWidth,
+        child: Center(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: context.omniPalette.borderStrong,
+              borderRadius: const BorderRadius.all(Radius.circular(999)),
+            ),
+            child: SizedBox(width: 3, height: 52),
+          ),
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _ContextThresholdSheet extends StatefulWidget {

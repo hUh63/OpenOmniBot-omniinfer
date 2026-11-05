@@ -848,9 +848,6 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     final snapshotConversationId = currentConversationId;
     final snapshotConversation = currentConversation;
     final snapshotMode = activeConversationModeValue;
-    final snapshotAgentId = snapshotMode == ConversationMode.openclaw
-        ? null
-        : snapshotConversation?.agentId ?? agentIdForNewConversation;
     if (snapshotConversationId != null &&
         isEphemeralConversation(snapshotConversationId, snapshotMode)) {
       return;
@@ -894,7 +891,9 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
           title: title,
           summary: summary,
           mode: snapshotMode,
-          agentId: snapshotAgentId,
+          agentId: snapshotMode == ConversationMode.agent
+              ? agentIdForNewConversation
+              : null,
           rethrowOnError: rethrowOnFailure,
         );
 
@@ -908,7 +907,6 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
               currentConversation = ConversationModel(
                 id: newConversationId,
                 mode: snapshotMode,
-                agentId: snapshotAgentId,
                 title: title,
                 summary: summary,
                 status: 0,
@@ -960,7 +958,6 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
             ConversationModel(
               id: targetId,
               mode: snapshotMode,
-              agentId: snapshotAgentId,
               title: title,
               summary: summary,
               status: 0,

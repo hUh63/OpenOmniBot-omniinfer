@@ -11,7 +11,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/utils/picked_attachment_metadata.dart';
 import 'package:flutter/material.dart';
 import 'package:ui/widgets/omni_menu.dart';
-import 'package:ui/widgets/omni_adaptive_layout.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -87,7 +86,6 @@ import 'chat_page_models.dart';
 import 'tool_activity_utils.dart';
 import 'widgets/chat_widgets.dart';
 import 'widgets/chat_keyboard_layout.dart';
-import 'widgets/chat_pane_resize_handle.dart';
 import 'widgets/chat_message_viewport.dart';
 import 'widgets/chat_browser_overlay.dart';
 import 'widgets/chat_history_loading_transition.dart';
@@ -126,7 +124,6 @@ enum _SlashCommandPanelRoute { root, effort, agentModel }
 
 const String _kRemoteCodexModeAgentId = 'codex-remote';
 const String _kXiaowanAcpAgentId = 'xiaowan-acp';
-const double _kHdPadShellHorizontalPadding = 4;
 
 class ChatPage extends StatefulWidget {
   final ConversationThreadTarget? threadTarget;
@@ -159,9 +156,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   );
   final PageController _modePageController = PageController(initialPage: 0);
   final FocusNode _inputFocusNode = FocusNode();
-  final FocusNode _pageShortcutsFocusNode = FocusNode(
-    debugLabel: 'chat-shortcuts',
-  );
 
   // ===================== Keys =====================
   final GlobalKey<AcpConfigButtonState> _acpConfigButtonKey =
@@ -303,8 +297,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   String? _normalAcpTurnId;
   Future<Map<String, dynamic>>? _configurationSessionCreation;
   int? _configurationSessionCreationTarget;
-  final Map<ChatPageMode, ({String sessionId, String agentId})>
-  _unboundConfigurationSessions = {};
+  final Map<ChatPageMode, String> _unboundConfigurationSessions = {};
   String? _activeAgentModelId;
   String? _activeAgentReasoningEffort;
   String? _agentReasoningEffortConfigId;
@@ -336,9 +329,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   double? _hdPadRightPaneWidth;
   bool _hdPadLeftPaneCollapsed = false;
   bool _hdPadRightPaneCollapsed = false;
-  bool? _wasChatWorkspace;
+  bool? _wasHdPadLandscape;
   bool _isHdPadPaneDragging = false;
-  double? _hdPadLastLayoutWidth;
   double? _hdPadPaneDragStartWidth;
   double _hdPadPaneDragDelta = 0;
   final GlobalKey<OmnibotWorkspaceBrowserState> _hdPadWorkspaceBrowserKey =
@@ -423,58 +415,45 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     if (rememberedAgentId.isNotEmpty) {
       return rememberedAgentId;
     }
+    final runtimeMessages = resolveVisibleChatMessages(
+      runtimeMessages: _runtimeForMode(ChatPageMode.agent)?.messages,
+      fallbackMessages: _modeState(ChatPageMode.agent).messages,
+      preserveFallbackDuringHandoff: _modeState(ChatPageMode.agent)
+          .isAiResponding,
+    );
+    for (final message in runtimeMessages.reversed) {
+      final messageAgentId = message.agentId?.trim() ?? '';
+      if (messageAgentId.isNotEmpty) {
+        return messageAgentId;
+      }
+    }
     return null;
   }
 
   // Pure chat remains an ACP session with tool capabilities disabled.
   String? get _activeAcpAgentId => _committedAcpAgentId;
 
-  bool get _activeAgentTargetIsRemote =>
-      _activeAcpAgentId == _kRemoteCodexModeAgentId;
-
-  String get _activeAgentModelSourceKey => _activeAgentTargetIsRemote
-      ? 'remote'
-      : 'local-${_activeAcpAgentId ?? 'agent'}';
-
-  bool get _isActiveAgentRetired =>
-      _activeMode == ChatPageMode.agent &&
-      _agentCatalog?.isRetired(_activeAcpAgentId) == true;
-
-  String get _retiredAgentMessage => formatAgentRuntimeErrorForUser(
-    'agent_retired:',
-    english: Localizations.localeOf(context).languageCode == 'en',
-  );
-
-  // Only the visible Conversation target and its persisted binding own identity.
+  // The visible conversation's target and binding own its Agent identity.
   String? get _committedAcpAgentId {
-    final target = _resolvedThreadTarget ?? widget.threadTarget;
-    final mode = target?.mode ?? _currentConversation?.mode;
-    if (mode == ConversationMode.normal || mode == ConversationMode.chatOnly) {
+    if (_activeMode == ChatPageMode.normal &&
+        activeConversationModeValue == ConversationMode.normal) {
       return _kXiaowanAcpAgentId;
     }
-    if (target?.isRemoteCodexSessionTarget == true ||
-        target?.agentRuntime == 'remote') {
+    final targetAgentId = _resolvedThreadTarget?.agentId?.trim() ?? '';
+    if (targetAgentId.isNotEmpty) {
+      return targetAgentId;
+    }
+    final boundAgentId = _conversationBoundAcpAgentId;
+    if (boundAgentId != null) {
+      return boundAgentId;
+    }
+    if (_agentRuntimeStatus.runtime == 'remote' ||
+        _agentRuntimeStatus.remoteEnabled) {
       return _kRemoteCodexModeAgentId;
     }
-    final targetAgentId = target?.agentId?.trim() ?? '';
-    if (targetAgentId.isNotEmpty) return targetAgentId;
-    return _currentConversation?.agentId?.trim().isNotEmpty == true
-        ? _currentConversation!.agentId!.trim()
-        : _conversationBoundAcpAgentId;
-  }
-
-  String? get _activeAgentUnavailableMessage {
-    if (_isActiveAgentRetired) return _retiredAgentMessage;
-    if (_activeMode != ChatPageMode.openclaw &&
-        !_isConversationHistoryLoading &&
-        _resolvedThreadTarget != null &&
-        (_activeAcpAgentId?.trim().isEmpty ?? true)) {
-      return formatAgentRuntimeErrorForUser(
-        'agent_identity_required:',
-        english: Localizations.localeOf(context).languageCode == 'en',
-      );
-    }
-    return null;
+    final activeId =
+        _agentRuntimeStatus.activeAgentId ?? _agentCatalog?.selectedAgentId;
+    return activeId?.trim().isNotEmpty == true ? activeId!.trim() : null;
   }
 
   String get _activeAcpAgentDisplayName {
@@ -684,8 +663,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
 
   double get _normalSurfaceVisibility =>
       (1.0 - _surfacePageProgress).clamp(0.0, 1.0).toDouble();
-  bool _isChatWorkspaceForMediaQuery(MediaQueryData mediaQuery) {
-    return isChatWorkspaceViewport(mediaQuery.size);
+  bool _isHdPadLandscapeForMediaQuery(MediaQueryData mediaQuery) {
+    return isHdPadLandscapeViewport(mediaQuery.size);
   }
 
   void _loadHdPadPanePreferences() {
@@ -725,43 +704,19 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     unawaited(_applyConversationThreadTarget(target));
   }
 
-  HdPadPaneLayout _currentPadLayout({double? availableWidth}) {
-    return _hdPadPaneLayoutResolver.resolve(
-      availableWidth ??
-          _hdPadLastLayoutWidth ??
-          MediaQuery.sizeOf(context).width -
-              MediaQuery.viewPaddingOf(context).horizontal -
-              _kHdPadShellHorizontalPadding * 2,
-      preferredLeftWidth: _hdPadLeftPaneWidth,
-      preferredRightWidth: _hdPadRightPaneWidth,
-      collapseLeftPane: _hdPadLeftPaneCollapsed,
-      collapseRightPane: _hdPadRightPaneCollapsed,
-    );
-  }
-
   void _toggleHdPadLeftPaneCollapsed() {
     _dismissChatInputFocus();
-    final layout = _currentPadLayout();
     setState(() {
       _resetHdPadPaneDragState();
-      _hdPadLeftPaneCollapsed = layout.leftWidth > 0;
-      if ((_hdPadLastLayoutWidth ?? 0) <
-          HdPadPaneLayoutResolver.threePaneMinWidth) {
-        _hdPadRightPaneCollapsed = true;
-      }
+      _hdPadLeftPaneCollapsed = !_hdPadLeftPaneCollapsed;
     });
   }
 
   void _toggleHdPadRightPaneCollapsed() {
     _dismissChatInputFocus();
-    final layout = _currentPadLayout();
     setState(() {
       _resetHdPadPaneDragState();
-      _hdPadRightPaneCollapsed = layout.rightWidth > 0;
-      if ((_hdPadLastLayoutWidth ?? 0) <
-          HdPadPaneLayoutResolver.threePaneMinWidth) {
-        _hdPadLeftPaneCollapsed = true;
-      }
+      _hdPadRightPaneCollapsed = !_hdPadRightPaneCollapsed;
     });
   }
 
@@ -770,9 +725,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
       _inputFocusNode.unfocus();
     }
     FocusManager.instance.primaryFocus?.unfocus();
-    if (_pageShortcutsFocusNode.context != null) {
-      _pageShortcutsFocusNode.requestFocus();
-    }
   }
 
   ConversationThreadTarget get _threadTargetForMode {
@@ -796,9 +748,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     }
     if (conversationId == null) {
       final resolvedTarget = _resolvedThreadTarget;
-      // History hydration can temporarily have no projected conversation id.
-      // Preserve the requested existing target instead of creating a draft.
       if (resolvedTarget != null &&
+          resolvedTarget.isNewConversation &&
           _pageModeForConversationMode(resolvedTarget.mode) == _activeMode) {
         return resolvedTarget.copyWith(mode: conversationMode);
       }
@@ -1375,9 +1326,9 @@ abstract class _ChatPageStateBase extends State<ChatPage>
       _conversationModeForPageMode(_activeMode);
   @override
   String? get agentIdForNewConversation =>
-      activeConversationModeValue == ConversationMode.openclaw
-      ? null
-      : _activeAcpAgentId;
+      activeConversationModeValue == ConversationMode.agent
+      ? _activeAcpAgentId
+      : null;
   @override
   bool get hasMoreMessages => _modeState(_activeMode).hasMoreMessages;
   @override
@@ -1946,6 +1897,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   });
 
   Future<void> _interruptAgentTurn();
+
+  Future<AgentRuntimeStatus> _refreshConnectedAgentRuntimeStatus();
 
   Future<void> _loadOpenClawConfig();
 
