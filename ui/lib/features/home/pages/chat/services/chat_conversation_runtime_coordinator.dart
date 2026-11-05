@@ -28,7 +28,6 @@ part 'chat_runtime_message_support.dart';
 part 'chat_runtime_streaming_support.dart';
 part 'chat_runtime_thinking_support.dart';
 part 'chat_runtime_tool_support.dart';
-part 'chat_runtime_agent_event_support.dart';
 
 const String kChatRuntimeModeNormal = 'normal';
 const String kChatRuntimeModeOpenClaw = 'openclaw';
@@ -93,13 +92,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   static const int _kMaxRuntimeStates = 8;
 
   bool _initialized = false;
-  ChatAgentEventProjection? _latestAgentEventProjection;
-
-  /// 共享 reducer 已经消化过的最后一个事件，供视图读取；
-  /// 视图不持有 ACP 订阅、也不二次归约。
-  ChatAgentEventProjection? get latestAgentEventProjection =>
-      _latestAgentEventProjection;
-
 
   bool get _isEnglish => LegacyTextLocalizer.isEnglish;
 
@@ -114,8 +106,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     AssistsMessageService.addOnExternalUserMessageAppendedCallback(
       _handleExternalUserMessageAppended,
     );
-    // coordinator 比 Home/Chat 路由活得久：回到列表也不能中断已受理 turn 的投影与落库。
-    AgentRuntimeService.events.listen(_handleAgentRuntimeEvent);
   }
 
   ChatConversationRuntimeState? runtimeFor({
