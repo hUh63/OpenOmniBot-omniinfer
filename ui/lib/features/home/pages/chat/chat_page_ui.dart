@@ -16,47 +16,43 @@ const List<String> _kAgentReasoningEffortOptions = <String>[
 enum _UserMessageQuickAction { copy, edit, retry }
 
 mixin _ChatPageUiMixin on _ChatPageStateBase {
-  bool get _showLocalTerminalActions =>
-      !(_activeMode == ChatPageMode.normal && _isPureChatSelected) &&
-      !(_activeMode == ChatPageMode.agent && _activeAcpAgentId == 'na-cloud');
-
-  String? get _composerModelLabel {
-    if (_activeMode == ChatPageMode.agent) {
-      return _activeAgentModelId ??
-          (_usesSharedProviderModel(_activeAcpAgentId)
-              ? _activeNormalChatModelId
-              : null);
-    }
-    return (_showConversationModelMentionChip
-            ? _activeConversationModelOverrideSelection?.modelId
-            : null) ??
-        _activeNormalChatModelId;
-  }
-
   Widget _buildAcpConfigButton() {
     final generation = _conversationTargetRequestId;
+    final mode = _activeMode;
     final agentId = _activeAcpAgentId;
     int? targetConversationId = _currentConversationId;
     bool isCurrent() => mounted && generation == _conversationTargetRequestId;
     Future<Map<String, dynamic>> read({bool refreshConfig = false}) async {
       if (!isCurrent()) throw StateError('Conversation changed');
-      final response = await _readActiveAcpSessionConfig(
+      await _ensureActiveConversationReadyForStreaming();
+      if (!isCurrent()) throw StateError('Conversation changed');
+      targetConversationId = _currentConversationId;
+      final response = await AgentRuntimeService.readSession(
+        conversationId: targetConversationId,
+        agentId: agentId,
+        conversationMode: _modeKey(mode),
+        includeHistory: false,
         refreshConfig: refreshConfig,
       );
       if (!isCurrent()) throw StateError('Conversation changed');
-      targetConversationId = _currentConversationId;
+      final sessionId = (response['sessionId'] ?? response['threadId'])
+          ?.toString();
+      if (sessionId != null && sessionId.isNotEmpty) {
+        // Reuse the session whose official settings the user is editing.
+        // The next send must not create a replacement session with defaults.
+        if (mode == ChatPageMode.normal) {
+          _normalAcpSessionId = sessionId;
+        } else {
+          _activeAgentThreadId = sessionId;
+        }
+      }
       return response;
     }
 
     return AcpConfigButton(
-      key: _acpConfigButtonKey,
-      presentationIdentity: generation,
+      key: ValueKey('acp-config-$generation'),
       isRunning: _isAiResponding,
-      modelLabel: _composerModelLabel,
-      onVisibilityChanged: (visible) {
-        _chatInputAreaKey.currentState?.setAuxiliaryPopupVisible(visible);
-        _onPopupVisibilityChanged(visible);
-      },
+      onVisibilityChanged: _onPopupVisibilityChanged,
       configureModel: _usesSharedProviderModel(agentId)
           ? _openConversationModelSelector
           : null,
@@ -67,14 +63,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         if (_isAiResponding) throw StateError('本轮结束后可修改运行参数');
         return AgentRuntimeService.setSessionConfigOption(
           sessionId: sessionId,
-          conversationId:
-              _unboundConfigurationSessions.values.any(
-                (session) =>
-                    session.sessionId == sessionId &&
-                    session.agentId == agentId,
-              )
-              ? null
-              : targetConversationId,
+          conversationId: targetConversationId,
           agentId: agentId,
           configId: configId,
           value: value,
@@ -83,48 +72,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     );
   }
 
-  void _returnToConversationHome() {
-    _dismissChatInputFocus();
-    if (GoRouterManager.canPop()) {
-      GoRouterManager.pop();
-    } else {
-      GoRouterManager.go('/home/home');
-    }
-  }
-
-  List<ChatAppBarAction> _chatHeaderActions() {
-    final english = LegacyTextLocalizer.isEnglish;
-    return [
-      if (_isInputAreaVisible) ...[
-        if (_activeMode == ChatPageMode.agent &&
-            _activeAcpAgentId == 'na-cloud' &&
-            _agentCatalog?.agents.any(
-                  (agent) =>
-                      agent.id == 'na-cloud' && agent.configurationAvailable,
-                ) ==
-                true)
-          ChatAppBarAction(
-            label: english ? 'Cloud connection' : '云端连接',
-            icon: LucideIcons.cloud,
-            onSelected: (_) =>
-                GoRouterManager.push('/home/agent_config/na-cloud'),
-          ),
-        ChatAppBarAction(
-          label: english ? 'Commands' : '命令',
-          icon: LucideIcons.command,
-          onSelected: (_) => _triggerSlashCommandPanel(),
-        ),
-        if (_activeMode != ChatPageMode.openclaw)
-          ChatAppBarAction(
-            label: english ? 'Context usage & limit' : '上下文用量与阈值',
-            icon: LucideIcons.chartPie,
-            onSelected: (_) => this._handleContextUsageRingLongPress(),
-          ),
-      ],
-    ];
-  }
-
-  ChatPaneOverlayAnchorGeometry? _lastStableCommandAnchorGeometry;
+  ChatPaneOverlayAnchorGeometry? _lastStableToolActivityAnchorGeometry;
   static const double _kChatInputWrapperTopPadding = 8.0;
   static const double _kChatInputFallbackHeight = 80.0;
   static const double _kHdPadPaneCollapseWidthRatio = 0.12;
@@ -135,23 +83,36 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     if (!mounted || _isHomeDrawerSearchFocused == hasFocus) {
       return;
     }
-    _isHomeDrawerSearchFocused = hasFocus;
+    final chatInputWasFocused = _inputFocusNode.hasFocus;
+    final composerLiftWasLatched = _composerLiftIntentTracker.isLatched;
     if (hasFocus && _inputFocusNode.hasFocus) {
       _inputFocusNode.unfocus();
     }
     _composerLiftIntentTracker.reset();
-    // Search and the composer can exchange focus while the IME stays at the
-    // same height. Update their shared geometry even without a metrics event.
-    void notifyLayout() {
-      if (mounted) _chatKeyboardLayoutChanges.value++;
+    // Avoid an unconditional ChatPage rebuild just to record focus ownership.
+    // The search field repaints itself locally, while the next focus/IME
+    // metrics frame normally reads this flag for composer suppression.
+    _isHomeDrawerSearchFocused = hasFocus;
+    if (hasFocus && composerLiftWasLatched && !chatInputWasFocused) {
+      // A previously lost chat focus may have left the lift latched against a
+      // stable IME inset, so no new focus/metrics notification is guaranteed.
+      setState(() {});
     }
+  }
 
-    if (SchedulerBinding.instance.schedulerPhase ==
-        SchedulerPhase.persistentCallbacks) {
-      // A resize may dispose the focused sidebar during tree finalization.
-      WidgetsBinding.instance.addPostFrameCallback((_) => notifyLayout());
+  void _handleHomeDrawerChanged(bool isOpen) {
+    if (!mounted) {
+      return;
+    }
+    if (isOpen) {
+      _dismissChatInputFocus();
+      _composerLiftIntentTracker.reset();
+      _embeddedDrawerKey.currentState?.reloadConversations();
+      _drawerKey.currentState?.reloadConversations();
     } else {
-      notifyLayout();
+      _isHomeDrawerSearchFocused = false;
+      _composerLiftIntentTracker.reset();
+      checkAndHandleDeletedConversation();
     }
   }
 
@@ -205,8 +166,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     if (hasFocus) {
       _armComposerLiftIntent();
     }
-    _modeState(mode).messageListInputFocused = hasFocus;
-    _chatKeyboardLayoutChanges.value++;
+    setState(() {
+      _modeState(mode).messageListInputFocused = hasFocus;
+    });
   }
 
   double _resolveNormalSurfaceComposerInset({
@@ -220,9 +182,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         ? _inputAreaHeight + _kChatInputWrapperTopPadding
         : _kChatInputFallbackHeight;
     return measuredComposerHeight +
-        (_showNewConversationModeSelector
-            ? NewConversationModeSelector.height + 8
-            : 0) +
         inputBottomPadding +
         keyboardSpacer +
         _kChatMessageBottomSafeSpacing;
@@ -381,35 +340,34 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     final query = _messageController.text.trimLeft().toLowerCase();
     final planModeEnabled = _isAgentPlanMode(_activeAgentCollaborationMode);
     final commands = <Map<String, dynamic>>[
-      if (_activeAcpAgentId != 'na-cloud')
-        _buildAgentCommandCard(
-          cardId: 'slash-command-agent-model',
-          toolTitle: '/model',
-          displayName: '/model',
-          toolTypeLabel: LegacyTextLocalizer.isEnglish ? 'Model' : '模型',
-          status: _activeAgentModelId == null ? 'running' : 'success',
-          statusLabel: _activeAgentModelId == null
-              ? (LegacyTextLocalizer.isEnglish ? 'Select' : '选择')
-              : (_activeAgentModelId!),
-          summary: _activeAgentModelId == null
-              ? (LegacyTextLocalizer.isEnglish
-                    ? 'Choose a model for $_activeAcpAgentDisplayName'
-                    : '选择 $_activeAcpAgentDisplayName 的模型')
-              : (LegacyTextLocalizer.isEnglish
-                    ? 'Current model: $_activeAgentModelId'
-                    : '当前模型：$_activeAgentModelId'),
-          progress: _agentModelListError != null
-              ? _agentModelListError!
-              : _isAgentModelListLoading
-              ? (LegacyTextLocalizer.isEnglish ? 'Loading models' : '加载模型中')
-              : (_agentModelOptions.isEmpty
-                    ? (LegacyTextLocalizer.isEnglish
-                          ? 'Tap to load models'
-                          : '点击加载模型')
-                    : (_agentModelOptions.length == 1
-                          ? '1 model'
-                          : '${_agentModelOptions.length} models')),
-        ),
+      _buildAgentCommandCard(
+        cardId: 'slash-command-agent-model',
+        toolTitle: '/model',
+        displayName: '/model',
+        toolTypeLabel: LegacyTextLocalizer.isEnglish ? 'Model' : '模型',
+        status: _activeAgentModelId == null ? 'running' : 'success',
+        statusLabel: _activeAgentModelId == null
+            ? (LegacyTextLocalizer.isEnglish ? 'Select' : '选择')
+            : (_activeAgentModelId!),
+        summary: _activeAgentModelId == null
+            ? (LegacyTextLocalizer.isEnglish
+                  ? 'Choose a model for $_activeAcpAgentDisplayName'
+                  : '选择 $_activeAcpAgentDisplayName 的模型')
+            : (LegacyTextLocalizer.isEnglish
+                  ? 'Current model: $_activeAgentModelId'
+                  : '当前模型：$_activeAgentModelId'),
+        progress: _agentModelListError != null
+            ? _agentModelListError!
+            : _isAgentModelListLoading
+            ? (LegacyTextLocalizer.isEnglish ? 'Loading models' : '加载模型中')
+            : (_agentModelOptions.isEmpty
+                  ? (LegacyTextLocalizer.isEnglish
+                        ? 'Tap to load models'
+                        : '点击加载模型')
+                  : (_agentModelOptions.length == 1
+                        ? '1 model'
+                        : '${_agentModelOptions.length} models')),
+      ),
       if (_availableAcpCommandForText('/review') != null)
         _buildAgentCommandCard(
           cardId: 'slash-command-agent-review',
@@ -425,21 +383,20 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
               ? 'Runs an Agent review on the active thread'
               : '在当前线程中启动 Agent review',
         ),
-      if (_activeAcpAgentId != 'na-cloud')
-        _buildAgentCommandCard(
-          cardId: 'slash-command-agent-init',
-          toolTitle: '/init',
-          displayName: '/init',
-          toolTypeLabel: LegacyTextLocalizer.isEnglish ? 'Init' : '初始化',
-          status: 'running',
-          statusLabel: LegacyTextLocalizer.isEnglish ? 'Command' : '命令',
-          summary: LegacyTextLocalizer.isEnglish
-              ? 'Generate or update AGENTS.md'
-              : '生成或更新 AGENTS.md',
-          progress: LegacyTextLocalizer.isEnglish
-              ? 'Prompt shortcut: asks the Agent to write workspace guidance'
-              : '提示词快捷操作：请求 Agent 编写工作区指引',
-        ),
+      _buildAgentCommandCard(
+        cardId: 'slash-command-agent-init',
+        toolTitle: '/init',
+        displayName: '/init',
+        toolTypeLabel: LegacyTextLocalizer.isEnglish ? 'Init' : '初始化',
+        status: 'running',
+        statusLabel: LegacyTextLocalizer.isEnglish ? 'Command' : '命令',
+        summary: LegacyTextLocalizer.isEnglish
+            ? 'Generate or update AGENTS.md'
+            : '生成或更新 AGENTS.md',
+        progress: LegacyTextLocalizer.isEnglish
+            ? 'Prompt shortcut: asks the Agent to write workspace guidance'
+            : '提示词快捷操作：请求 Agent 编写工作区指引',
+      ),
       if (_resolveAgentPlanMode(_agentCollaborationModes) != null)
         _buildAgentCommandCard(
           cardId: 'slash-command-agent-plan',
@@ -528,8 +485,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         _agentModelListError == null) {
       unawaited(_loadAgentModelOptionsWhenReady());
     }
-    final query = _slashCommandRouteQuery(_SlashCommandPanelRoute.agentModel)
-        .toLowerCase();
+    final query = _slashCommandRouteQuery(
+      _SlashCommandPanelRoute.agentModel,
+    ).toLowerCase();
     final availableModels = _agentModelOptions.isEmpty
         ? <String>[]
         : _agentModelOptions;
@@ -721,7 +679,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     );
   }
 
-  ChatPaneOverlayAnchorGeometry _resolveCommandAnchorGeometry({
+  ChatPaneOverlayAnchorGeometry _resolveToolActivityAnchorGeometry({
     required BuildContext layoutContext,
     required BoxConstraints constraints,
     required double inputBottomPadding,
@@ -732,8 +690,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         ? inputAreaHeight
         : 0.0;
     final derivedWidth = math.max(0.0, constraints.maxWidth - 48);
-    if (_isSurfacePageScrolling && _lastStableCommandAnchorGeometry != null) {
-      return _lastStableCommandAnchorGeometry!;
+    if (_isSurfacePageScrolling &&
+        _lastStableToolActivityAnchorGeometry != null) {
+      return _lastStableToolActivityAnchorGeometry!;
     }
 
     if (_isInputAreaVisible && normalizedInputHeight > 0.5) {
@@ -743,17 +702,17 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
             inputBottomPadding + keyboardSpacer + normalizedInputHeight,
         anchorHeight: normalizedInputHeight,
       );
-      _lastStableCommandAnchorGeometry = geometry;
+      _lastStableToolActivityAnchorGeometry = geometry;
       return geometry;
     }
 
-    final liveGeometry = _resolveCommandAnchorGeometryFromInputArea(
+    final liveGeometry = _resolveToolActivityAnchorGeometryFromInputArea(
       layoutContext: layoutContext,
       constraints: constraints,
       derivedWidth: derivedWidth,
     );
     if (liveGeometry != null) {
-      _lastStableCommandAnchorGeometry = liveGeometry;
+      _lastStableToolActivityAnchorGeometry = liveGeometry;
       return liveGeometry;
     }
 
@@ -782,11 +741,12 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
           .clamp(0.0, constraints.maxHeight)
           .toDouble(),
     );
-    _lastStableCommandAnchorGeometry = geometry;
+    _lastStableToolActivityAnchorGeometry = geometry;
     return geometry;
   }
 
-  ChatPaneOverlayAnchorGeometry? _resolveCommandAnchorGeometryFromInputArea({
+  ChatPaneOverlayAnchorGeometry?
+  _resolveToolActivityAnchorGeometryFromInputArea({
     required BuildContext layoutContext,
     required BoxConstraints constraints,
     required double derivedWidth,
@@ -841,7 +801,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     });
   }
 
-  /// 工具活动条只在当前模式、输入区可见、且没有被斜杠命令/OpenClaw 面板顶掉时出现。
   bool _shouldShowToolActivityStripForMode({
     required ChatPageMode mode,
     required AgentToolActivitySnapshot snapshot,
@@ -867,8 +826,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
       _modeState(_activeMode).inputAreaHeight = normalized;
       return;
     }
-    _modeState(_activeMode).inputAreaHeight = normalized;
-    _chatKeyboardLayoutChanges.value++;
+    setState(() {
+      _modeState(_activeMode).inputAreaHeight = normalized;
+    });
   }
 
   Widget _buildNormalSurfaceTransition({
@@ -1013,8 +973,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
   Widget _buildModeMessagePage(
     ChatPageMode mode,
     AppBackgroundConfig appearanceConfig,
-    AppBackgroundVisualProfile visualProfile,
-  ) {
+    AppBackgroundVisualProfile visualProfile, {
+    double bottomOverlayInset = 0,
+  }) {
     final runtime = _runtimeForMode(mode);
     final resolvedMessages = resolveVisibleChatMessages(
       runtimeMessages: runtime?.messages,
@@ -1028,6 +989,15 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     // Chat-only disables tool execution, not reasoning. Keep reasoning cards
     // in the ordinary conversation surface so ACP providers do not appear to
     // have lost all thought output; only tool/request cards are execution UI.
+    final visibleMessages = chatOnly
+        ? resolvedMessages
+              .where((message) {
+                final cardType = message.cardData?['type']?.toString();
+                return cardType != 'agent_tool_summary' &&
+                    cardType != 'agent_request';
+              })
+              .toList(growable: false)
+        : resolvedMessages;
     // `runtime.activeAgentTurnIds` is the single source of truth for which
     // turns are in flight. Only fall back to the page-level dispatch id when
     // there is no runtime yet to own it.
@@ -1041,6 +1011,27 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
       // means the turn has not been admitted yet; rendering a page-local
       // dispatch id here would reintroduce a second lifecycle source.
     }
+    final toolActivitySnapshot = resolveAgentToolActivitySnapshot(
+      List<ChatMessageModel>.from(visibleMessages),
+      activeTaskIds: activeAgentTurnIds,
+      preferredCompletedTaskId: _latestExpandedAgentRunTaskIdForMode(mode),
+    );
+    final showToolActivityStrip = _shouldShowToolActivityStripForMode(
+      mode: mode,
+      snapshot: toolActivitySnapshot,
+    );
+    final bottomInset = MediaQuery.maybeOf(context)?.viewInsets.bottom ?? 0.0;
+    final internalInputKeyboardInset =
+        mode == _activeMode && _isMessageListInputFocusedForMode(mode)
+        ? bottomInset + _kChatMessageBottomSafeSpacing
+        : 0.0;
+    final reservedBottomOverlayInset = math.max(
+      bottomOverlayInset,
+      internalInputKeyboardInset,
+    );
+    final liftEmptyGreeting =
+        mode == _activeMode &&
+        _emptyGreetingKeyboardLiftTracker.resolveForBuild(bottomInset);
     final homeGreetingSettings = HomeGreetingSettingsService.notifier.value;
     final activeAcpAgentId = _activeAcpAgentId;
     // Normal chat is ACP-backed at the transport/session layer, but it keeps
@@ -1050,83 +1041,57 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     // Harness changes the provider identity and capabilities, not the event
     // or card layout. Pure chat is simply an ACP run with no tool cards.
     final useAcpPresentation = true;
-    return ChatKeyboardLayoutBuilder(
-      builder: (context, metrics, child) {
-        final internalInputKeyboardInset =
-            mode == _activeMode && _isMessageListInputFocusedForMode(mode)
-            ? metrics.bottomInset + _kChatMessageBottomSafeSpacing
-            : 0.0;
-        final reservedBottomOverlayInset = math.max(
-          metrics.composerReservedInset,
-          internalInputKeyboardInset,
-        );
-        final liftEmptyGreeting =
-            mode == _activeMode && metrics.liftEmptyGreeting;
-        return ChatMessageViewport(
-          bottomOverlayInset:
-              reservedBottomOverlayInset +
-              (mode == _activeMode ? _slashCommandPanelOccupiedHeight : 0),
-          liftEmptyGreeting: liftEmptyGreeting,
-          child: child!,
-        );
+    return ChatMessageList(
+      messages: visibleMessages,
+      activeAgentTurnIds: activeAgentTurnIds,
+      useAcpPresentation: useAcpPresentation,
+      activeAcpAgentId: activeAcpAgentId,
+      onRetryAgentMessage: this._retryFailedAgentTurn,
+      expandedAgentRunTaskIds: _expandedAgentRunTaskIdsForMode(mode),
+      onExpandedAgentRunTaskIdsChanged: (taskIds) {
+        _updateExpandedAgentRunTaskIds(mode, taskIds);
       },
-      child: ChatHistoryLoadingTransition(
-        isLoading: _isConversationHistoryLoading,
-        textColor:
-            !appearanceConfig.isActive &&
-                appearanceConfig.chatTextColorMode !=
-                    AppBackgroundTextColorMode.custom
-            ? context.omniPalette.textSecondary
-            : visualProfile.secondaryTextColor,
-        child: ChatMessageList(
-          messages: resolvedMessages,
-          hideToolCards: chatOnly,
-          activeAgentTurnIds: activeAgentTurnIds,
-          useAcpPresentation: useAcpPresentation,
-          activeAcpAgentId: activeAcpAgentId,
-          onRetryAgentMessage: this._retryFailedAgentTurn,
-          showEmptyGreeting:
-              homeGreetingSettings.greetingEnabled &&
-              (_resolvedThreadTarget ?? widget.threadTarget)
-                      ?.isNewConversation ==
-                  true,
-          emptyGreetingQuickPrompts: homeGreetingSettings.quickPrompts,
-          emptyGreetingPinnedQuickPromptIds:
-              homeGreetingSettings.pinnedQuickPromptIds,
-          onQuickPromptSelected: _applyHomeQuickPrompt,
-          emptyGreetingAgentName: mode == ChatPageMode.agent
-              ? _activeAcpAgentDisplayName
-              : null,
-          emptyGreetingAgentWorkspaceName: mode == ChatPageMode.agent
-              ? _remoteCodexWorkspaceNameForGreeting()
-              : null,
-          onEmptyGreetingAgentWorkspaceTap: mode == ChatPageMode.agent
-              ? () => unawaited(_openRemoteCodexWorkspacePicker())
-              : null,
-          scrollController: _scrollControllerForMode(mode),
-          navigator: _modeState(mode).messageListNavigator,
-          onInternalInputFocusChanged: (hasFocus) {
-            _handleMessageListInputFocusChanged(mode, hasFocus);
-          },
-          onBeforeTaskExecute: handleBeforeTaskExecute,
-          onCancelTask: _onCancelTaskFromCard,
-          onRequestAuthorize: mode == ChatPageMode.openclaw
-              ? null
-              : _requestAuthorizeForExecution,
-          onUserMessageLongPressStart: switch (mode) {
-            ChatPageMode.normal => this._handleUserMessageLongPressStart,
-            ChatPageMode.agent => this._handleUserMessageLongPressStart,
-            ChatPageMode.openclaw => null,
-          },
-          onLatestUserMessageEditTap: mode == ChatPageMode.openclaw
-              ? null
-              : this._startEditingLatestUserMessage,
-          onLoadMore: loadMoreMessages,
-          hasMore: hasMoreMessages,
-          visualProfile: visualProfile,
-          appearanceConfig: appearanceConfig,
-        ),
-      ),
+      showEmptyGreeting: homeGreetingSettings.greetingEnabled,
+      liftEmptyGreeting: liftEmptyGreeting,
+      emptyGreetingQuickPrompts: homeGreetingSettings.quickPrompts,
+      emptyGreetingPinnedQuickPromptIds:
+          homeGreetingSettings.pinnedQuickPromptIds,
+      onQuickPromptSelected: _applyHomeQuickPrompt,
+      emptyGreetingAgentName: mode == ChatPageMode.agent
+          ? _activeAcpAgentDisplayName
+          : null,
+      emptyGreetingAgentWorkspaceName: mode == ChatPageMode.agent
+          ? _remoteCodexWorkspaceNameForGreeting()
+          : null,
+      onEmptyGreetingAgentWorkspaceTap: mode == ChatPageMode.agent
+          ? () => unawaited(_openRemoteCodexWorkspacePicker())
+          : null,
+      scrollController: _scrollControllerForMode(mode),
+      navigator: _modeState(mode).messageListNavigator,
+      bottomOverlayInset:
+          reservedBottomOverlayInset +
+          (mode == _activeMode ? _slashCommandPanelOccupiedHeight : 0) +
+          (showToolActivityStrip ? _toolActivityOccupiedHeight : 0),
+      onInternalInputFocusChanged: (hasFocus) {
+        _handleMessageListInputFocusChanged(mode, hasFocus);
+      },
+      onBeforeTaskExecute: handleBeforeTaskExecute,
+      onCancelTask: _onCancelTaskFromCard,
+      onRequestAuthorize: mode == ChatPageMode.openclaw
+          ? null
+          : _requestAuthorizeForExecution,
+      onUserMessageLongPressStart: switch (mode) {
+        ChatPageMode.normal => this._handleUserMessageLongPressStart,
+        ChatPageMode.agent => this._handleUserMessageLongPressStart,
+        ChatPageMode.openclaw => null,
+      },
+      onLatestUserMessageEditTap: mode == ChatPageMode.openclaw
+          ? null
+          : this._startEditingLatestUserMessage,
+      onLoadMore: loadMoreMessages,
+      hasMore: hasMoreMessages,
+      visualProfile: visualProfile,
+      appearanceConfig: appearanceConfig,
     );
   }
 
@@ -1175,7 +1140,8 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     if (_activeMode != ChatPageMode.agent) {
       return false;
     }
-    return _activeAcpAgentId == 'na-cloud' || _activeAgentTargetIsRemote;
+    final runtime = _agentRuntimeStatus.runtime?.trim();
+    return runtime == 'remote' || _agentRuntimeStatus.remoteEnabled;
   }
 
   Widget _buildRemoteCodexWorkspaceBrowser({
@@ -1183,19 +1149,13 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     required bool translucentSurfaces,
     required bool enableSystemBackHandler,
   }) {
-    final workspacePath = _activeAcpAgentId == 'na-cloud'
-        ? '/workspace'
-        : (_agentRuntimeStatus.remoteCwd ?? _agentRuntimeStatus.cwd ?? '')
-              .trim();
+    final workspacePath =
+        (_agentRuntimeStatus.remoteCwd ?? _agentRuntimeStatus.cwd ?? '').trim();
     final bridgeUrl = (_agentRuntimeStatus.remoteBridgeUrl ?? '').trim();
     if (workspacePath.isEmpty) {
       return _buildRemoteCodexWorkspaceUnavailable();
     }
     return CodexRemoteWorkspaceBrowser(
-      agentId: _activeAcpAgentId == 'na-cloud'
-          ? 'na-cloud'
-          : _kRemoteCodexModeAgentId,
-      allowFileMutations: true,
       key: key,
       workspacePath: workspacePath,
       remoteBridgeUrl: bridgeUrl,
@@ -1274,70 +1234,60 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         : ChatIslandDisplayLayer.mode;
   }
 
+  Widget _buildPaneSurface({
+    required Widget child,
+    required bool translucent,
+    required AppBackgroundVisualProfile visualProfile,
+    bool showBorder = true,
+    bool showShadow = true,
+  }) {
+    final palette = context.omniPalette;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: backgroundSurfaceColor(
+          translucent: translucent,
+          baseColor: palette.surfacePrimary,
+          opacity: translucent ? 0.72 : 1,
+        ),
+        borderRadius: BorderRadius.circular(24),
+        border: showBorder
+            ? Border.all(
+                color: translucent
+                    ? visualProfile.islandBorderColor
+                    : const Color(0xFFD9E6FB),
+              )
+            : null,
+        boxShadow: showShadow
+            ? const [
+                BoxShadow(
+                  color: Color(0x121A2433),
+                  blurRadius: 28,
+                  offset: Offset(0, 12),
+                ),
+              ]
+            : null,
+      ),
+      child: ClipRRect(borderRadius: BorderRadius.circular(24), child: child),
+    );
+  }
+
   Widget _buildChatPaneShell({
     required BuildContext layoutContext,
     required BoxConstraints constraints,
     required AppBackgroundConfig backgroundConfig,
     required AppBackgroundVisualProfile visualProfile,
     required bool backgroundActive,
+    required double inputBottomPadding,
+    required double keyboardSpacer,
+    required double commandPanelBottomOffset,
     required Widget conversationBody,
     required bool hideWorkspaceOverlays,
     required bool showMenuButton,
     required bool showSurfaceSwitcher,
+    required VoidCallback onMenuTap,
     VoidCallback? onWorkspacePaneTap,
     bool showWorkspacePaneButton = false,
-    VoidCallback? onConversationPaneTap,
-    bool conversationPaneVisible = false,
-    bool workspacePaneVisible = false,
   }) {
-    return OmniContentWidth(
-      maxWidth: 840,
-      child: LayoutBuilder(
-        builder: (context, contentConstraints) => _buildChatPaneContent(
-          layoutContext: context,
-          constraints: contentConstraints,
-          backgroundConfig: backgroundConfig,
-          visualProfile: visualProfile,
-          backgroundActive: backgroundActive,
-          conversationBody: conversationBody,
-          hideWorkspaceOverlays: hideWorkspaceOverlays,
-          showMenuButton: showMenuButton,
-          showSurfaceSwitcher: showSurfaceSwitcher,
-          onWorkspacePaneTap: onWorkspacePaneTap,
-          showWorkspacePaneButton: showWorkspacePaneButton,
-          onConversationPaneTap: onConversationPaneTap,
-          conversationPaneVisible: conversationPaneVisible,
-          workspacePaneVisible: workspacePaneVisible,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildChatPaneContent({
-    required BuildContext layoutContext,
-    required BoxConstraints constraints,
-    required AppBackgroundConfig backgroundConfig,
-    required AppBackgroundVisualProfile visualProfile,
-    required bool backgroundActive,
-    required Widget conversationBody,
-    required bool hideWorkspaceOverlays,
-    required bool showMenuButton,
-    required bool showSurfaceSwitcher,
-    VoidCallback? onWorkspacePaneTap,
-    bool showWorkspacePaneButton = false,
-    VoidCallback? onConversationPaneTap,
-    bool conversationPaneVisible = false,
-    bool workspacePaneVisible = false,
-  }) {
-    final slashCommandCards =
-        _showSlashCommandPanel &&
-            !_showModelMentionPanel &&
-            !_openClawPanelExpanded
-        ? _buildSlashCommandCards()
-        : const <Map<String, dynamic>>[];
-    final showSlashCommandStrip =
-        _isInputAreaVisible && slashCommandCards.isNotEmpty;
-    // 工具活动条：当前轮的卡片/工具调用在输入区上方滚动呈现。
     final toolActivitySnapshot = resolveAgentToolActivitySnapshot(
       List<ChatMessageModel>.from(_messages),
       activeTaskIds: _activeRuntime?.activeAgentTurnIds ?? const <String>{},
@@ -1349,15 +1299,47 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     final toolActivityCards = extractAgentToolCards(toolActivityMessages);
     final isPinnedCompletedToolActivity =
         toolActivityCards.isNotEmpty && !toolActivitySnapshot.isActiveRun;
+    final slashCommandCards =
+        _showSlashCommandPanel &&
+            !_showModelMentionPanel &&
+            !_openClawPanelExpanded
+        ? _buildSlashCommandCards()
+        : const <Map<String, dynamic>>[];
+    final showSlashCommandStrip =
+        _isInputAreaVisible && slashCommandCards.isNotEmpty;
     final showToolActivityStrip = _shouldShowToolActivityStripForMode(
       mode: _activeMode,
       snapshot: toolActivitySnapshot,
     );
+    final toolActivityCanExpand = toolActivityCards.length > 1;
+    // The activity strip sits flush above the composer, so its downward drop
+    // shadow reads as part of the input surface instead of as separate chrome.
+    final suppressToolActivitySurfaceShadow =
+        showToolActivityStrip || showSlashCommandStrip;
+    final overlayAnchor = (toolActivityCards.isEmpty && !showSlashCommandStrip)
+        ? null
+        : _resolveToolActivityAnchorGeometry(
+            layoutContext: layoutContext,
+            constraints: constraints,
+            inputBottomPadding: inputBottomPadding,
+            keyboardSpacer: keyboardSpacer,
+            inputAreaHeight: _inputAreaHeight,
+          );
+    if ((!showToolActivityStrip || toolActivityCards.isEmpty) &&
+        _toolActivityOccupiedHeight > 0) {
+      _scheduleToolActivityInsetSync(0);
+    }
     if (!showSlashCommandStrip &&
         !_showModelMentionPanel &&
         !_openClawPanelExpanded &&
         _slashCommandPanelOccupiedHeight > 0) {
       _scheduleSlashCommandOccupiedHeightSync(0);
+    }
+    if ((!toolActivityCanExpand || !showToolActivityStrip) &&
+        _isToolActivityExpanded) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _setToolActivityExpanded(false);
+      });
     }
     if (!showSlashCommandStrip && _isSlashCommandExpanded) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1378,28 +1360,40 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     final bottomRegionBackgroundColor = !backgroundActive && context.isDarkTheme
         ? context.omniPalette.pageBackground
         : Colors.transparent;
+    final composerBottomOffset = inputBottomPadding + keyboardSpacer;
+    final composerReservedInset = _resolveNormalSurfaceComposerInset(
+      inputBottomPadding: inputBottomPadding,
+      keyboardSpacer: keyboardSpacer,
+    );
     return Stack(
       clipBehavior: Clip.hardEdge,
       children: [
         Column(
           children: [
             ChatAppBar(
-              usePadLayout:
-                  constraints.maxWidth >= OmniLayoutBreakpoints.medium,
-              onMenuTap: _returnToConversationHome,
-              title: _currentConversation?.title,
-              actions: _chatHeaderActions(),
+              onMenuTap: onMenuTap,
               onPetTap: () {
                 unawaited(_handlePetOverlayTap());
               },
               isPetOpening: _isPetOverlayOpening,
               isPetShowing: _isPetOverlayShowing,
-              onPrimaryModeTap:
-                  _activeMode == ChatPageMode.agent && _activeAcpAgentId != null
-                  ? () => GoRouterManager.push(
-                      '/home/agent_sessions',
-                      extra: _activeAcpAgentId,
-                    )
+              onOmniAiTap: () {
+                // Xiaowan and the built-in Xiaowan ACP profile are one
+                // visible Agent. Keep the old shortcut callback only as the
+                // UI compatibility boundary and route it through ACP.
+                unawaited(_handleAcpAgentModeShortcutTap(_kXiaowanAcpAgentId));
+              },
+              onPureChatToggleTap: () {
+                unawaited(_handlePureChatModeShortcutTap());
+              },
+              onAgentTap: () {
+                unawaited(_handleAgentTap());
+              },
+              onAcpAgentTap: (agentId) {
+                unawaited(_handleAcpAgentModeShortcutTap(agentId));
+              },
+              onPrimaryModeTap: _activeMode == ChatPageMode.agent
+                  ? () => GoRouterManager.push('/home/agent_sessions')
                   : null,
               activeMode: appBarMode,
               onModeChanged: (value) {
@@ -1415,12 +1409,15 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
               hasTerminalEnvironment: _terminalEnvironmentVariables.isNotEmpty,
               isBrowserEnabled: _isBrowserSessionAvailable,
               activeToolType: _lastAgentToolType,
+              isAgentReady: _agentRuntimeStatus.ready,
+              isAgentConnected: _agentRuntimeStatus.connected,
+              isAgentLoading:
+                  _isAgentRuntimeStatusLoading || _isAcpAgentSwitching,
+              isAgentSelected: _activeMode == ChatPageMode.agent,
+              isOmniAiSelected:
+                  _activeMode == ChatPageMode.normal && !_isPureChatSelected,
               acpAgentModes: _chatAcpAgentModeOptions,
-              activeAcpAgentId: switch (_activeMode) {
-                ChatPageMode.agent => _appBarActiveAcpAgentId,
-                ChatPageMode.openclaw => 'openclaw',
-                ChatPageMode.normal => _kXiaowanAcpAgentId,
-              },
+              activeAcpAgentId: _appBarActiveAcpAgentId,
               showAppUpdateIndicator: showAppUpdateIndicator,
               appUpdateTooltip: appUpdateTooltip,
               onAppUpdateTap: showAppUpdateIndicator
@@ -1432,14 +1429,13 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
               visualProfile: visualProfile,
               showMenuButton: showMenuButton,
               showSurfaceSwitcher: showSurfaceSwitcher,
-              isPureChatSelected:
-                  _activeMode == ChatPageMode.normal && _isPureChatSelected,
-              showTerminalActions: _showLocalTerminalActions,
+              showPureChatToggle:
+                  _activeMode == ChatPageMode.normal ||
+                  _activeMode == ChatPageMode.agent,
+              isPureChatSelected: _isPureChatSelected,
+              isPureChatToggleLocked: _isPureChatToggleLocked,
               showWorkspacePaneButton: showWorkspacePaneButton,
               onWorkspacePaneTap: onWorkspacePaneTap,
-              onConversationPaneTap: onConversationPaneTap,
-              conversationPaneVisible: conversationPaneVisible,
-              workspacePaneVisible: workspacePaneVisible,
               tutorialMenuAnchorKey: _firstUseTourMenuAnchorKey,
               tutorialActionsAnchorKey: _firstUseTourActionsAnchorKey,
               tutorialModeAnchorKey: _firstUseTourModeAnchorKey,
@@ -1456,52 +1452,27 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
               viewportWidth: constraints.maxWidth,
               child: ColoredBox(
                 color: bottomRegionBackgroundColor,
-                child: ChatKeyboardLayoutBuilder(
-                  builder: (context, metrics, child) => Padding(
-                    padding: EdgeInsets.only(
-                      bottom: metrics.composerBottomOffset,
-                    ),
-                    child: child,
-                  ),
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: composerBottomOffset),
                   child: Container(
                     key: _inputAreaKey,
                     child: ChatInputWrapper(
-                      unavailableMessage: _activeAgentUnavailableMessage,
                       inputAreaKey: _chatInputAreaKey,
                       controller: _messageController,
                       focusNode: _inputFocusNode,
                       onRequestFocus: _armComposerLiftIntent,
+                      // 停止入口必须在所有运行态可点。此前 `!_hasPendingAgentUserInputRequest`
+                      // 会在 agent 等待用户回答澄清时把按钮变回「添加附件」——那也是一种
+                      // 运行中状态，用户想中断却没有入口。
                       isProcessing:
-                          _isAiResponding &&
-                          _editingUserMessageId == null &&
-                          !_hasPendingAgentUserInputRequest,
+                          _isAiResponding && _editingUserMessageId == null,
                       onSendMessage: this._handleComposerSendMessage,
                       onCancelTask: _onCancelTask,
                       onPopupVisibilityChanged: _onPopupVisibilityChanged,
-                      topBanner: _showNewConversationModeSelector
-                          ? NewConversationModeSelector(
-                              selectedId: _newConversationModeId,
-                              agentModes: _chatAcpAgentModeOptions,
-                              enabled: _canSwitchNewConversationMode,
-                              onSelected: (modeId) {
-                                unawaited(_selectNewConversationMode(modeId));
-                              },
-                              onPopupVisibilityChanged: (visible) {
-                                if (!mounted) return;
-                                _chatInputAreaKey.currentState
-                                    ?.setAuxiliaryPopupVisible(visible);
-                                _onPopupVisibilityChanged(visible);
-                              },
-                            )
-                          : null,
-                      onTerminalTap: _showLocalTerminalActions
-                          ? _handleTerminalToolTap
-                          : null,
+                      onTerminalTap: _handleTerminalToolTap,
                       useLargeComposerStyle: true,
                       useAttachmentPickerForPlus: true,
                       onPickAttachment: _pickAttachments,
-                      onPickImages: () =>
-                          _pickAttachments(type: FileType.image),
                       onTriggerSlashCommand: _triggerSlashCommandPanel,
                       attachments: _pendingAttachments,
                       hasExternalSendPayload: _editingUserMessageHasAttachments,
@@ -1525,25 +1496,20 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                           ? null
                           : this._handleContextUsageRingLongPress,
                       modelPickerSettings: null,
-                      runtimeConfigButton:
-                          _activeMode == ChatPageMode.agent &&
-                              _activeAcpAgentId == 'na-cloud'
-                          ? null
-                          : KeyedSubtree(
-                              key: _firstUseTourModelAnchorKey,
-                              child: _buildAcpConfigButton(),
-                            ),
+                      runtimeConfigButton: KeyedSubtree(
+                        key: _firstUseTourModelAnchorKey,
+                        child: _buildAcpConfigButton(),
+                      ),
                       agentRunSettings: null,
                       onAgentRunSettingsOpened: null,
                       onAgentRunSettingsChanged: null,
-                      agentPermissionMode:
-                          _activeMode == ChatPageMode.agent &&
-                              _activeAcpAgentId != 'na-cloud'
+                      agentPermissionMode: _activeMode == ChatPageMode.agent
                           ? _agentPermissionMode
                           : null,
                       agentPermissionModes:
                           _activeMode == ChatPageMode.agent &&
-                              !_activeAgentTargetIsRemote
+                              _agentRuntimeStatus.runtime != 'remote' &&
+                              !_agentRuntimeStatus.remoteEnabled
                           ? const <AgentPermissionMode>[
                               AgentPermissionMode.readOnly,
                               AgentPermissionMode.defaultMode,
@@ -1551,8 +1517,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                             ]
                           : AgentPermissionMode.values,
                       onAgentPermissionModeChanged:
-                          _activeMode == ChatPageMode.agent &&
-                              _activeAcpAgentId != 'na-cloud'
+                          _activeMode == ChatPageMode.agent
                           ? _selectAgentPermissionMode
                           : null,
                       onInputHeightChanged: _handleInputAreaHeightChanged,
@@ -1571,83 +1536,62 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
             ),
           ),
         if (showToolActivityStrip)
-          ChatKeyboardLayoutBuilder(
-            builder: (context, metrics, _) {
-              final overlayAnchor = _resolveCommandAnchorGeometry(
-                layoutContext: layoutContext,
-                constraints: constraints,
-                inputBottomPadding: metrics.inputBottomPadding,
-                keyboardSpacer: metrics.keyboardSpacer,
-                inputAreaHeight: _inputAreaHeight,
-              );
-              return Positioned(
-                left: overlayAnchor.rect.left,
-                width: overlayAnchor.rect.width,
-                bottom: overlayAnchor.bottom,
-                child: _buildNormalSurfaceTransition(
-                  viewportWidth: constraints.maxWidth,
-                  child: KeyedSubtree(
-                    key: _toolActivityStripKey,
-                    child: ChatToolActivityStrip(
-                      messages: toolActivityMessages,
-                      showPreviewThumbnail: toolActivitySnapshot.isActiveRun,
-                      openActiveCardOnTap: isPinnedCompletedToolActivity,
-                      anchorRect: overlayAnchor.rect,
-                      onOccupiedHeightChanged: _scheduleToolActivityInsetSync,
-                      expanded: _isToolActivityExpanded,
-                      onExpandedChanged: _setToolActivityExpanded,
-                      suppressSurfaceShadow: true,
-                      onStopToolCall: _handleToolActivityStopRequested,
-                    ),
-                  ),
+          Positioned(
+            left: overlayAnchor?.rect.left ?? 24,
+            width:
+                overlayAnchor?.rect.width ??
+                math.max(0.0, constraints.maxWidth - 48),
+            bottom: overlayAnchor?.bottom ?? 0,
+            child: _buildNormalSurfaceTransition(
+              viewportWidth: constraints.maxWidth,
+              child: KeyedSubtree(
+                key: _toolActivityStripKey,
+                child: ChatToolActivityStrip(
+                  messages: toolActivityMessages,
+                  showPreviewThumbnail: toolActivitySnapshot.isActiveRun,
+                  openActiveCardOnTap: isPinnedCompletedToolActivity,
+                  anchorRect: overlayAnchor?.rect,
+                  onOccupiedHeightChanged: _scheduleToolActivityInsetSync,
+                  expanded: _isToolActivityExpanded,
+                  onExpandedChanged: _setToolActivityExpanded,
+                  suppressSurfaceShadow: suppressToolActivitySurfaceShadow,
+                  onStopToolCall: _handleToolActivityStopRequested,
                 ),
-              );
-            },
+              ),
+            ),
           ),
         if (showSlashCommandStrip)
-          ChatKeyboardLayoutBuilder(
-            builder: (context, metrics, _) {
-              final overlayAnchor = _resolveCommandAnchorGeometry(
-                layoutContext: layoutContext,
-                constraints: constraints,
-                inputBottomPadding: metrics.inputBottomPadding,
-                keyboardSpacer: metrics.keyboardSpacer,
-                inputAreaHeight: _inputAreaHeight,
-              );
-              return Positioned(
-                left: overlayAnchor.rect.left,
-                width: overlayAnchor.rect.width,
-                bottom: overlayAnchor.bottom,
-                child: _buildNormalSurfaceTransition(
-                  viewportWidth: constraints.maxWidth,
-                  child: Container(
-                    key: _slashCommandStripKey,
-                    child: KeyedSubtree(
-                      key: ValueKey<String>(
-                        'slash-command-${_resolveSlashCommandPanelRoute(_messageController.text).name}',
-                      ),
-                      child: ChatCommandActivityStrip(
-                        commands: slashCommandCards,
-                        anchorRect: overlayAnchor.rect,
-                        onOccupiedHeightChanged:
-                            _scheduleSlashCommandOccupiedHeightSync,
-                        suppressSurfaceShadow: true,
-                        onSelectCommand: _handleSlashCommandCardSelected,
-                      ),
-                    ),
+          Positioned(
+            left: overlayAnchor?.rect.left ?? 24,
+            width:
+                overlayAnchor?.rect.width ??
+                math.max(0.0, constraints.maxWidth - 48),
+            bottom: overlayAnchor?.bottom ?? 0,
+            child: _buildNormalSurfaceTransition(
+              viewportWidth: constraints.maxWidth,
+              child: Container(
+                key: _slashCommandStripKey,
+                child: KeyedSubtree(
+                  key: ValueKey<String>(
+                    'slash-command-${_resolveSlashCommandPanelRoute(_messageController.text).name}',
+                  ),
+                  child: ChatCommandActivityStrip(
+                    commands: slashCommandCards,
+                    anchorRect: overlayAnchor?.rect,
+                    onOccupiedHeightChanged:
+                        _scheduleSlashCommandOccupiedHeightSync,
+                    suppressSurfaceShadow: suppressToolActivitySurfaceShadow,
+                    onSelectCommand: _handleSlashCommandCardSelected,
                   ),
                 ),
-              );
-            },
+              ),
+            ),
           ),
         if (_showModelMentionPanel || _openClawPanelExpanded)
-          ChatKeyboardLayoutBuilder(
-            builder: (context, metrics, child) => Positioned(
-              left: 24,
-              right: 24,
-              bottom: metrics.commandPanelBottomOffset,
-              child: child!,
-            ),
+          Positioned(
+            left: 24,
+            right: 24,
+            bottom: commandPanelBottomOffset,
             child: _buildNormalSurfaceTransition(
               viewportWidth: constraints.maxWidth,
               child: _buildSlashCommandPanel(),
@@ -1670,10 +1614,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         Positioned.fill(
           child: _buildNormalSurfaceTransition(
             viewportWidth: constraints.maxWidth,
-            child: ChatKeyboardLayoutBuilder(
-              builder: (context, metrics, _) => _buildMessageAnchorBarOverlay(
-                composerReservedInset: metrics.composerReservedInset,
-              ),
+            child: _buildMessageAnchorBarOverlay(
+              composerReservedInset: composerReservedInset,
+              showToolActivityStrip: showToolActivityStrip,
             ),
           ),
         ),
@@ -1685,6 +1628,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
   /// 向左展开的锚点条。始终跟随 composer 顶部（含其上方条带）定位。
   Widget _buildMessageAnchorBarOverlay({
     required double composerReservedInset,
+    required bool showToolActivityStrip,
   }) {
     final mode = _primaryChatMessagePageMode;
     final runtime = _runtimeForMode(mode);
@@ -1703,7 +1647,8 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
       composerReservedInset -
           _kChatMessageBottomSafeSpacing +
           6 +
-          _slashCommandPanelOccupiedHeight,
+          _slashCommandPanelOccupiedHeight +
+          (showToolActivityStrip ? _toolActivityOccupiedHeight : 0),
     );
     final visible =
         _isInputAreaVisible &&
@@ -1776,28 +1721,24 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     );
   }
 
-  Widget _buildAdaptiveWorkspaceShell({
+  Widget _buildHdPadLandscapeShell({
     required AppBackgroundConfig backgroundConfig,
     required AppBackgroundVisualProfile visualProfile,
     required bool backgroundActive,
+    required double inputBottomPadding,
+    required double keyboardSpacer,
+    required double commandPanelBottomOffset,
   }) {
-    const shellPadding = EdgeInsets.symmetric(
-      horizontal: _kHdPadShellHorizontalPadding,
-    );
+    const shellPadding = EdgeInsets.fromLTRB(8, 10, 8, 10);
     return LayoutBuilder(
       builder: (context, constraints) {
         final availableWidth = math
             .max(0, constraints.maxWidth - shellPadding.horizontal)
             .toDouble();
-        final expandedLeft = _hdPadPaneLayoutResolver.resolve(
+        final expandedLayout = _hdPadPaneLayoutResolver.resolve(
           availableWidth,
           preferredLeftWidth: _hdPadLeftPaneWidth,
-          collapseRightPane: true,
-        );
-        final expandedRight = _hdPadPaneLayoutResolver.resolve(
-          availableWidth,
           preferredRightWidth: _hdPadRightPaneWidth,
-          collapseLeftPane: true,
         );
         final layout = _hdPadPaneLayoutResolver.resolve(
           availableWidth,
@@ -1806,25 +1747,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
           collapseLeftPane: _hdPadLeftPaneCollapsed,
           collapseRightPane: _hdPadRightPaneCollapsed,
         );
-        final leftHidden = layout.leftWidth == 0;
-        final rightHidden = layout.rightWidth == 0;
-        final leftContentWidth = leftHidden
-            ? expandedLeft.leftWidth
-            : layout.leftWidth;
-        final rightContentWidth = rightHidden
-            ? expandedRight.rightWidth
-            : layout.rightWidth;
-        final resized = _hdPadLastLayoutWidth != availableWidth;
-        _hdPadLastLayoutWidth = availableWidth;
-        if (resized && _isHdPadPaneDragging) {
-          // A rotation or split-window resize may remove the drag recognizer
-          // before it receives a pointer-up. The pane owner closes that UI
-          // transaction here and saves the last accepted widths.
-          _resetHdPadPaneDragState();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _persistHdPadPanePreferences();
-          });
-        }
         final leftCollapseThreshold = _resolveHdPadPaneCollapseThreshold(
           availableWidth: availableWidth,
           minPaneWidth: HdPadPaneLayoutResolver.minLeftWidth,
@@ -1833,73 +1755,48 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
           availableWidth: availableWidth,
           minPaneWidth: HdPadPaneLayoutResolver.minRightWidth,
         );
-        final paneDuration =
-            _isHdPadPaneDragging ||
-                resized ||
-                MediaQuery.disableAnimationsOf(context)
+        final paneDuration = _isHdPadPaneDragging
             ? Duration.zero
             : const Duration(milliseconds: 280);
         const paneCurve = Curves.easeInOutCubic;
-        return ColoredBox(
-          // The panes share one canvas, including a single tint over wallpaper.
-          // Their content stays clipped while resizing, without separate cards.
-          color: backgroundActive
-              ? backgroundSurfaceColor(
-                  translucent: true,
-                  baseColor: context.omniPalette.surfacePrimary,
-                  opacity: 0.72,
-                )
-              : context.omniPalette.pageBackground,
-          child: Padding(
-            padding: shellPadding,
-            child: Row(
-              children: [
-                AnimatedContainer(
-                  duration: paneDuration,
-                  curve: paneCurve,
-                  width: layout.leftWidth,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.centerLeft,
-                      minWidth: leftContentWidth,
-                      maxWidth: leftContentWidth,
-                      child: SizedBox(
-                        width: leftContentWidth,
-                        child: _ChatPaneVisibility(
-                          hidden: leftHidden,
-                          child: AnimatedSlide(
-                            duration: paneDuration,
-                            curve: Curves.easeInOutCubic,
-                            offset: leftHidden
-                                ? const Offset(-0.08, 0)
-                                : Offset.zero,
-                            child: ClipRect(
-                              child: HomeDrawer(
-                                key: _embeddedDrawerKey,
-                                homePage: true,
-                                conversationSidebar: true,
-                                selectedThreadTarget:
-                                    _currentConversationId == null
-                                    ? null
-                                    : ConversationThreadTarget.existing(
-                                        conversationId: _currentConversationId,
-                                        mode:
-                                            _currentConversation?.mode ??
-                                            _conversationModeForPageMode(
-                                              _activeMode,
-                                            ),
-                                      ),
-                                active: !leftHidden,
-                                embedded: true,
-                                closeOnNavigate: false,
-                                onSearchFocusChanged:
-                                    _handleHomeDrawerSearchFocusChanged,
-                                searchFieldKey: _embeddedDrawerSearchFieldKey,
-                                newConversationMode:
-                                    _conversationModeForPageMode(_activeMode),
-                                onThreadTargetSelected:
-                                    _handleEmbeddedDrawerThreadTargetSelected,
+        return Padding(
+          padding: shellPadding,
+          child: Row(
+            children: [
+              AnimatedContainer(
+                duration: paneDuration,
+                curve: paneCurve,
+                width: layout.leftWidth,
+                child: ClipRect(
+                  child: OverflowBox(
+                    alignment: Alignment.centerLeft,
+                    minWidth: expandedLayout.leftWidth,
+                    maxWidth: expandedLayout.leftWidth,
+                    child: SizedBox(
+                      width: expandedLayout.leftWidth,
+                      child: IgnorePointer(
+                        ignoring: _hdPadLeftPaneCollapsed,
+                        child: AnimatedSlide(
+                          duration: const Duration(milliseconds: 280),
+                          curve: Curves.easeInOutCubic,
+                          offset: _hdPadLeftPaneCollapsed
+                              ? const Offset(-0.08, 0)
+                              : Offset.zero,
+                          child: _buildPaneSurface(
+                            translucent: backgroundActive,
+                            visualProfile: visualProfile,
+                            child: HomeDrawer(
+                              key: _embeddedDrawerKey,
+                              embedded: true,
+                              closeOnNavigate: false,
+                              onSearchFocusChanged:
+                                  _handleHomeDrawerSearchFocusChanged,
+                              searchFieldKey: _embeddedDrawerSearchFieldKey,
+                              newConversationMode: _conversationModeForPageMode(
+                                _activeMode,
                               ),
+                              onThreadTargetSelected:
+                                  _handleEmbeddedDrawerThreadTargetSelected,
                             ),
                           ),
                         ),
@@ -1907,66 +1804,62 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                     ),
                   ),
                 ),
-                AnimatedContainer(
-                  duration: paneDuration,
-                  curve: paneCurve,
-                  width: leftHidden
-                      ? 0
-                      : HdPadPaneLayoutResolver.dividerHitWidth,
-                  child: leftHidden
-                      ? const SizedBox.shrink()
-                      : ChatPaneResizeHandle(
-                          key: const ValueKey(
-                            'chat-conversation-resize-handle',
-                          ),
-                          label: LegacyTextLocalizer.isEnglish
-                              ? 'Conversation sidebar width'
-                              : '会话侧栏宽度',
-                          hint: LegacyTextLocalizer.isEnglish
-                              ? 'Drag or use arrow keys to resize. Double-tap or press Enter to collapse.'
-                              : '拖动或按左右方向键调整，双击或按回车收起',
-                          width: HdPadPaneLayoutResolver.dividerHitWidth,
-                          paneWidth: layout.leftWidth,
-                          viewportWidth: availableWidth,
-                          onCollapse: _toggleHdPadLeftPaneCollapsed,
-                          onDragStart: () {
-                            setState(() {
-                              _isHdPadPaneDragging = true;
-                              _hdPadPaneDragStartWidth = layout.leftWidth;
-                              _hdPadPaneDragDelta = 0;
-                            });
-                          },
-                          onDragUpdate: (delta) {
-                            _hdPadPaneDragDelta += delta;
-                            final nextWidth =
-                                (_hdPadPaneDragStartWidth ?? layout.leftWidth) +
-                                _hdPadPaneDragDelta;
-                            final shouldCollapse =
-                                nextWidth <= leftCollapseThreshold;
-                            setState(() {
-                              if (shouldCollapse) {
-                                _hdPadLeftPaneCollapsed = true;
-                                _resetHdPadPaneDragState();
-                              } else {
-                                _hdPadLeftPaneCollapsed = false;
-                                _hdPadLeftPaneWidth = nextWidth;
-                              }
-                            });
+              ),
+              AnimatedContainer(
+                duration: paneDuration,
+                curve: paneCurve,
+                width: _hdPadLeftPaneCollapsed
+                    ? 0
+                    : HdPadPaneLayoutResolver.dividerHitWidth,
+                child: _hdPadLeftPaneCollapsed
+                    ? const SizedBox.shrink()
+                    : _PaneResizeHandle(
+                        onDragStart: () {
+                          setState(() {
+                            _isHdPadPaneDragging = true;
+                            _hdPadPaneDragStartWidth = layout.leftWidth;
+                            _hdPadPaneDragDelta = 0;
+                          });
+                        },
+                        onDragUpdate: (delta) {
+                          _hdPadPaneDragDelta += delta;
+                          final nextWidth =
+                              (_hdPadPaneDragStartWidth ?? layout.leftWidth) +
+                              _hdPadPaneDragDelta;
+                          final shouldCollapse =
+                              nextWidth <= leftCollapseThreshold;
+                          setState(() {
                             if (shouldCollapse) {
-                              _persistHdPadPanePreferences();
+                              _hdPadLeftPaneCollapsed = true;
+                              _resetHdPadPaneDragState();
+                            } else {
+                              _hdPadLeftPaneCollapsed = false;
+                              _hdPadLeftPaneWidth = nextWidth;
                             }
-                          },
-                          onDragEnd: () {
-                            setState(_resetHdPadPaneDragState);
+                          });
+                          if (shouldCollapse) {
                             _persistHdPadPanePreferences();
-                          },
-                        ),
-                ),
-                AnimatedContainer(
-                  duration: paneDuration,
-                  curve: paneCurve,
-                  width: layout.centerWidth,
-                  child: ClipRect(
+                          }
+                        },
+                        onDragEnd: () {
+                          setState(_resetHdPadPaneDragState);
+                          _persistHdPadPanePreferences();
+                        },
+                      ),
+              ),
+              AnimatedContainer(
+                duration: paneDuration,
+                curve: paneCurve,
+                width: layout.centerWidth,
+                child: _buildPaneSurface(
+                  translucent: backgroundActive,
+                  visualProfile: visualProfile,
+                  child: Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerDown: _handlePagePointerDown,
+                    onPointerMove: _handlePagePointerMove,
+                    onPointerUp: _handlePagePointerUp,
+                    onPointerCancel: _handlePagePointerCancel,
                     child: LayoutBuilder(
                       builder: (context, paneConstraints) {
                         return _buildChatPaneShell(
@@ -1975,103 +1868,100 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                           backgroundConfig: backgroundConfig,
                           visualProfile: visualProfile,
                           backgroundActive: backgroundActive,
+                          inputBottomPadding: inputBottomPadding,
+                          keyboardSpacer: keyboardSpacer,
+                          commandPanelBottomOffset: commandPanelBottomOffset,
                           conversationBody: _buildModeMessagePage(
                             _primaryChatMessagePageMode,
                             backgroundConfig,
                             visualProfile,
+                            bottomOverlayInset:
+                                _resolveNormalSurfaceComposerInset(
+                                  inputBottomPadding: inputBottomPadding,
+                                  keyboardSpacer: keyboardSpacer,
+                                ),
                           ),
                           hideWorkspaceOverlays: false,
                           showMenuButton: true,
                           showSurfaceSwitcher: false,
-                          showWorkspacePaneButton: true,
-                          onConversationPaneTap: _toggleHdPadLeftPaneCollapsed,
-                          conversationPaneVisible: !leftHidden,
-                          workspacePaneVisible: !rightHidden,
+                          onMenuTap: _toggleHdPadLeftPaneCollapsed,
+                          showWorkspacePaneButton: _hdPadRightPaneCollapsed,
                           onWorkspacePaneTap: _toggleHdPadRightPaneCollapsed,
                         );
                       },
                     ),
                   ),
                 ),
-                AnimatedContainer(
-                  duration: paneDuration,
-                  curve: paneCurve,
-                  width: rightHidden
-                      ? 0
-                      : HdPadPaneLayoutResolver.dividerHitWidth,
-                  child: rightHidden
-                      ? const SizedBox.shrink()
-                      : ChatPaneResizeHandle(
-                          key: const ValueKey('chat-workspace-resize-handle'),
-                          label: LegacyTextLocalizer.isEnglish
-                              ? 'Workspace width'
-                              : '工作区宽度',
-                          hint: LegacyTextLocalizer.isEnglish
-                              ? 'Drag or use arrow keys to resize. Double-tap or press Enter to collapse.'
-                              : '拖动或按左右方向键调整，双击或按回车收起',
-                          width: HdPadPaneLayoutResolver.dividerHitWidth,
-                          paneWidth: layout.rightWidth,
-                          viewportWidth: availableWidth,
-                          leadingPane: false,
-                          onCollapse: _toggleHdPadRightPaneCollapsed,
-                          onDragStart: () {
-                            setState(() {
-                              _isHdPadPaneDragging = true;
-                              _hdPadPaneDragStartWidth = layout.rightWidth;
-                              _hdPadPaneDragDelta = 0;
-                            });
-                          },
-                          onDragUpdate: (delta) {
-                            _hdPadPaneDragDelta += delta;
-                            final nextWidth =
-                                (_hdPadPaneDragStartWidth ??
-                                    layout.rightWidth) -
-                                _hdPadPaneDragDelta;
-                            final shouldCollapse =
-                                nextWidth <= rightCollapseThreshold;
-                            setState(() {
-                              if (shouldCollapse) {
-                                _hdPadRightPaneCollapsed = true;
-                                _resetHdPadPaneDragState();
-                              } else {
-                                _hdPadRightPaneCollapsed = false;
-                                _hdPadRightPaneWidth = nextWidth;
-                              }
-                            });
+              ),
+              AnimatedContainer(
+                duration: paneDuration,
+                curve: paneCurve,
+                width: _hdPadRightPaneCollapsed
+                    ? 0
+                    : HdPadPaneLayoutResolver.dividerHitWidth,
+                child: _hdPadRightPaneCollapsed
+                    ? const SizedBox.shrink()
+                    : _PaneResizeHandle(
+                        onDragStart: () {
+                          setState(() {
+                            _isHdPadPaneDragging = true;
+                            _hdPadPaneDragStartWidth = layout.rightWidth;
+                            _hdPadPaneDragDelta = 0;
+                          });
+                        },
+                        onDragUpdate: (delta) {
+                          _hdPadPaneDragDelta += delta;
+                          final nextWidth =
+                              (_hdPadPaneDragStartWidth ?? layout.rightWidth) -
+                              _hdPadPaneDragDelta;
+                          final shouldCollapse =
+                              nextWidth <= rightCollapseThreshold;
+                          setState(() {
                             if (shouldCollapse) {
-                              _persistHdPadPanePreferences();
+                              _hdPadRightPaneCollapsed = true;
+                              _resetHdPadPaneDragState();
+                            } else {
+                              _hdPadRightPaneCollapsed = false;
+                              _hdPadRightPaneWidth = nextWidth;
                             }
-                          },
-                          onDragEnd: () {
-                            setState(_resetHdPadPaneDragState);
+                          });
+                          if (shouldCollapse) {
                             _persistHdPadPanePreferences();
-                          },
-                        ),
-                ),
-                AnimatedContainer(
-                  duration: paneDuration,
-                  curve: paneCurve,
-                  width: layout.rightWidth,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.centerRight,
-                      minWidth: rightContentWidth,
-                      maxWidth: rightContentWidth,
-                      child: SizedBox(
-                        width: rightContentWidth,
-                        child: _ChatPaneVisibility(
-                          hidden: rightHidden,
-                          child: AnimatedSlide(
-                            duration: paneDuration,
-                            curve: Curves.easeInOutCubic,
-                            offset: rightHidden
-                                ? const Offset(0.08, 0)
-                                : Offset.zero,
-                            child: ClipRect(
-                              child: _buildHdPadWorkspacePane(
-                                backgroundActive: backgroundActive,
-                                visualProfile: visualProfile,
-                              ),
+                          }
+                        },
+                        onDragEnd: () {
+                          setState(_resetHdPadPaneDragState);
+                          _persistHdPadPanePreferences();
+                        },
+                      ),
+              ),
+              AnimatedContainer(
+                duration: paneDuration,
+                curve: paneCurve,
+                width: layout.rightWidth,
+                child: ClipRect(
+                  child: OverflowBox(
+                    alignment: Alignment.centerRight,
+                    minWidth: expandedLayout.rightWidth,
+                    maxWidth: expandedLayout.rightWidth,
+                    child: SizedBox(
+                      width: expandedLayout.rightWidth,
+                      child: IgnorePointer(
+                        ignoring: _hdPadRightPaneCollapsed,
+                        child: AnimatedSlide(
+                          duration: const Duration(milliseconds: 280),
+                          curve: Curves.easeInOutCubic,
+                          offset: _hdPadRightPaneCollapsed
+                              ? const Offset(0.08, 0)
+                              : Offset.zero,
+                          child: _buildPaneSurface(
+                            translucent: backgroundActive,
+                            visualProfile: visualProfile,
+                            showBorder: false,
+                            showShadow: false,
+                            child: _buildHdPadWorkspacePane(
+                              backgroundActive: backgroundActive,
+                              visualProfile: visualProfile,
                             ),
                           ),
                         ),
@@ -2079,15 +1969,18 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                     ),
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         );
       },
     );
   }
 
-  ChatKeyboardLayoutMetrics _resolveKeyboardLayout(MediaQueryData mediaQuery) {
+  @override
+  Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
+    final isHdPadLandscape = _isHdPadLandscapeForMediaQuery(mediaQuery);
     final bottomInset = mediaQuery.viewInsets.bottom;
     final viewPaddingBottom = mediaQuery.viewPadding.bottom;
     final activeMessageListInputFocused = _isMessageListInputFocusedForMode(
@@ -2102,11 +1995,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                 activeMessageListInputFocused,
             bottomInset: bottomInset,
           );
-    // A keyboard owned by sidebar search must not move the chat greeting.
-    // Feeding zero also clears its motion state before focus returns to chat.
-    _emptyGreetingKeyboardLiftTracker.update(
-      shouldLiftComposerForKeyboard ? bottomInset : 0,
-    );
     final composerKeyboardMetrics = _composerKeyboardMetricsTracker.update(
       shouldLiftComposerForKeyboard: shouldLiftComposerForKeyboard,
       bottomInset: bottomInset,
@@ -2119,205 +2007,180 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
         (_popupMenuBottomOffset() + inputBottomPadding + keyboardSpacer + 6)
             .toDouble();
 
-    return (
-      bottomInset: bottomInset,
-      composerBottomOffset: inputBottomPadding + keyboardSpacer,
-      composerReservedInset: _resolveNormalSurfaceComposerInset(
-        inputBottomPadding: inputBottomPadding,
-        keyboardSpacer: keyboardSpacer,
-      ),
-      commandPanelBottomOffset: commandPanelBottomOffset,
-      inputBottomPadding: inputBottomPadding,
-      keyboardSpacer: keyboardSpacer,
-      liftEmptyGreeting: _emptyGreetingKeyboardLiftTracker.shouldLift,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) => _buildAdaptiveChatPage(
-        context,
-        isChatWorkspace: isChatWorkspaceViewport(
-          Size(
-            constraints.maxWidth - MediaQuery.viewPaddingOf(context).horizontal,
-            constraints.maxHeight,
-          ),
-        ),
-        availableWidth:
-            constraints.maxWidth - MediaQuery.viewPaddingOf(context).horizontal,
-      ),
-    );
-  }
-
-  Widget _buildAdaptiveChatPage(
-    BuildContext context, {
-    required bool isChatWorkspace,
-    required double availableWidth,
-  }) {
-    final workspaceVisible =
-        isChatWorkspace &&
-        _currentPadLayout(
-              availableWidth:
-                  availableWidth - _kHdPadShellHorizontalPadding * 2,
-            ).rightWidth >
-            0;
-    final chatPage = ChatKeyboardLayout(
-      changes: _chatKeyboardLayoutChanges,
-      resolve: _resolveKeyboardLayout,
-      child: ValueListenableBuilder<AppBackgroundConfig>(
-        valueListenable: AppBackgroundService.notifier,
-        builder: (context, backgroundConfig, _) {
-          final backgroundActive = backgroundConfig.isActive;
-          return ValueListenableBuilder<AppBackgroundVisualProfile>(
-            valueListenable: AppBackgroundService.visualProfileNotifier,
-            builder: (context, visualProfile, _) {
-              final handlesBackLocally =
-                  _isFirstUseTourActive ||
-                  _conversationModelSelectorHandle != null ||
-                  (workspaceVisible && _workspaceBrowserCanGoUp);
-              return PopScope(
-                // Predictive back requires the framework to declare whether it can
-                // pop before the gesture starts. At the root, let Android own the
-                // gesture so it can animate the app window back to the launcher.
-                canPop: !handlesBackLocally,
-                onPopInvokedWithResult: (didPop, _) {
-                  if (didPop) return;
-                  if (_isFirstUseTourActive) {
-                    _handleFirstUseTourBack();
-                    return;
+    final chatPage = ValueListenableBuilder<AppBackgroundConfig>(
+      valueListenable: AppBackgroundService.notifier,
+      builder: (context, backgroundConfig, _) {
+        final backgroundActive = backgroundConfig.isActive;
+        return ValueListenableBuilder<AppBackgroundVisualProfile>(
+          valueListenable: AppBackgroundService.visualProfileNotifier,
+          builder: (context, visualProfile, _) {
+            final handlesBackLocally =
+                _isFirstUseTourActive ||
+                _conversationModelSelectorHandle != null ||
+                (isHdPadLandscape &&
+                    !_hdPadRightPaneCollapsed &&
+                    _workspaceBrowserCanGoUp);
+            return PopScope(
+              // Predictive back requires the framework to declare whether it can
+              // pop before the gesture starts. At the root, let Android own the
+              // gesture so it can animate the app window back to the launcher.
+              canPop: !handlesBackLocally,
+              onPopInvokedWithResult: (didPop, _) {
+                if (didPop) return;
+                if (_isFirstUseTourActive) {
+                  _handleFirstUseTourBack();
+                  return;
+                }
+                // 模型选择器是 OverlayEntry，不在 Navigator 栈里，由页面先关闭。
+                if (_conversationModelSelectorHandle != null) {
+                  unawaited(_conversationModelSelectorHandle?.dismiss());
+                  return;
+                }
+                if (isHdPadLandscape &&
+                    !_hdPadRightPaneCollapsed &&
+                    _workspaceBrowserCanGoUp) {
+                  if (_shouldUseRemoteCodexWorkspace()) {
+                    _hdPadRemoteWorkspaceBrowserKey.currentState
+                        ?.openParentDirectory();
+                  } else {
+                    _hdPadWorkspaceBrowserKey.currentState
+                        ?.openParentDirectory();
                   }
-                  // 模型选择器是 OverlayEntry，不在 Navigator 栈里，由页面先关闭。
-                  if (_conversationModelSelectorHandle != null) {
-                    unawaited(_conversationModelSelectorHandle?.dismiss());
-                    return;
-                  }
-                  if (_embeddedDrawerKey.currentState?.handleBackIfNeeded() ==
-                      true) {
-                    return;
-                  }
-                  if (workspaceVisible && _workspaceBrowserCanGoUp) {
-                    if (_shouldUseRemoteCodexWorkspace()) {
-                      _hdPadRemoteWorkspaceBrowserKey.currentState
-                          ?.openParentDirectory();
-                    } else {
-                      _hdPadWorkspaceBrowserKey.currentState
-                          ?.openParentDirectory();
-                    }
-                    return;
-                  }
-                  if (_isWorkspaceSurface && _workspaceBrowserCanGoUp) {
-                    return;
-                  }
-                },
-                child: Scaffold(
-                  backgroundColor: Colors.transparent,
-                  resizeToAvoidBottomInset: false,
-                  // Conversation history lives on the home route. Keep the
-                  // system edge free for predictive back; the workspace remains
-                  // the second page of the horizontal PageView below.
-                  drawerEnableOpenDragGesture: false,
-                  body: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      Positioned.fill(
-                        child: backgroundActive
-                            ? AppBackgroundLayer(
-                                config: backgroundConfig,
-                                fallbackColor:
-                                    context.omniPalette.previewFallback,
-                                layerKey: const ValueKey(
-                                  'chat-page-background',
-                                ),
-                              )
-                            : ColoredBox(
-                                color: context.omniPalette.pageBackground,
-                              ),
+                  return;
+                }
+                if (_isWorkspaceSurface && _workspaceBrowserCanGoUp) {
+                  return;
+                }
+              },
+              child: Scaffold(
+                key: _scaffoldKey,
+                backgroundColor: Colors.transparent,
+                resizeToAvoidBottomInset: false,
+                // 锚点面板展开时关闭抽屉的边缘侧滑，避免轻滑误触发 home_drawer。
+                drawerEnableOpenDragGesture: !_messageAnchorExpanded,
+                drawer: isHdPadLandscape
+                    ? null
+                    : HomeDrawer(
+                        key: _drawerKey,
+                        newConversationMode: _conversationModeForPageMode(
+                          _activeMode,
+                        ),
+                        onSearchFocusChanged:
+                            _handleHomeDrawerSearchFocusChanged,
+                        searchFieldKey: _drawerSearchFieldKey,
                       ),
-                      SafeArea(
-                        child: ClipRect(
-                          child: Listener(
-                            behavior: HitTestBehavior.translucent,
-                            onPointerDown: (event) {
-                              unawaited(_handleOutsideTap(event.position));
-                            },
-                            child: isChatWorkspace
-                                ? _buildAdaptiveWorkspaceShell(
-                                    backgroundConfig: backgroundConfig,
-                                    visualProfile: visualProfile,
-                                    backgroundActive: backgroundActive,
-                                  )
-                                : LayoutBuilder(
-                                    builder: (context, constraints) {
-                                      return _buildChatPaneShell(
-                                        layoutContext: context,
-                                        constraints: constraints,
-                                        backgroundConfig: backgroundConfig,
-                                        visualProfile: visualProfile,
-                                        backgroundActive: backgroundActive,
-                                        conversationBody: ClipRect(
-                                          child:
-                                              NotificationListener<
-                                                ScrollNotification
-                                              >(
-                                                onNotification:
-                                                    _handleModePageScrollNotification,
-                                                child: PageView(
-                                                  controller:
-                                                      _modePageController,
-                                                  onPageChanged:
-                                                      _handleModePageChanged,
-                                                  children: [
-                                                    _buildModeMessagePage(
-                                                      _primaryChatMessagePageMode,
-                                                      backgroundConfig,
-                                                      visualProfile,
+                onDrawerChanged: isHdPadLandscape
+                    ? null
+                    : _handleHomeDrawerChanged,
+                body: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Positioned.fill(
+                      child: backgroundActive
+                          ? AppBackgroundLayer(
+                              config: backgroundConfig,
+                              fallbackColor:
+                                  context.omniPalette.previewFallback,
+                              layerKey: const ValueKey('chat-page-background'),
+                            )
+                          : ColoredBox(
+                              color: context.omniPalette.pageBackground,
+                            ),
+                    ),
+                    SafeArea(
+                      child: ClipRect(
+                        child: Listener(
+                          behavior: HitTestBehavior.translucent,
+                          onPointerDown: (event) {
+                            unawaited(_handleOutsideTap(event.position));
+                            if (!isHdPadLandscape) {
+                              _handlePagePointerDown(event);
+                            }
+                          },
+                          onPointerMove: isHdPadLandscape
+                              ? null
+                              : _handlePagePointerMove,
+                          onPointerUp: isHdPadLandscape
+                              ? null
+                              : _handlePagePointerUp,
+                          onPointerCancel: isHdPadLandscape
+                              ? null
+                              : _handlePagePointerCancel,
+                          child: isHdPadLandscape
+                              ? _buildHdPadLandscapeShell(
+                                  backgroundConfig: backgroundConfig,
+                                  visualProfile: visualProfile,
+                                  backgroundActive: backgroundActive,
+                                  inputBottomPadding: inputBottomPadding,
+                                  keyboardSpacer: keyboardSpacer,
+                                  commandPanelBottomOffset:
+                                      commandPanelBottomOffset,
+                                )
+                              : LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    return _buildChatPaneShell(
+                                      layoutContext: context,
+                                      constraints: constraints,
+                                      backgroundConfig: backgroundConfig,
+                                      visualProfile: visualProfile,
+                                      backgroundActive: backgroundActive,
+                                      inputBottomPadding: inputBottomPadding,
+                                      keyboardSpacer: keyboardSpacer,
+                                      commandPanelBottomOffset:
+                                          commandPanelBottomOffset,
+                                      conversationBody: ClipRect(
+                                        child: NotificationListener<ScrollNotification>(
+                                          onNotification:
+                                              _handleModePageScrollNotification,
+                                          child: PageView(
+                                            controller: _modePageController,
+                                            onPageChanged:
+                                                _handleModePageChanged,
+                                            children: [
+                                              _buildModeMessagePage(
+                                                _primaryChatMessagePageMode,
+                                                backgroundConfig,
+                                                visualProfile,
+                                                bottomOverlayInset:
+                                                    _resolveNormalSurfaceComposerInset(
+                                                      inputBottomPadding:
+                                                          inputBottomPadding,
+                                                      keyboardSpacer:
+                                                          keyboardSpacer,
                                                     ),
-                                                    _buildWorkspaceSurfacePage(),
-                                                  ],
-                                                ),
                                               ),
+                                              _buildWorkspaceSurfacePage(),
+                                            ],
+                                          ),
                                         ),
-                                        hideWorkspaceOverlays:
-                                            _isWorkspaceSurface,
-                                        showMenuButton: true,
-                                        showSurfaceSwitcher: true,
-                                      );
-                                    },
-                                  ),
-                          ),
+                                      ),
+                                      hideWorkspaceOverlays:
+                                          _isWorkspaceSurface,
+                                      showMenuButton: true,
+                                      showSurfaceSwitcher: true,
+                                      onMenuTap: () {
+                                        _dismissChatInputFocus();
+                                        _scaffoldKey.currentState?.openDrawer();
+                                      },
+                                    );
+                                  },
+                                ),
                         ),
                       ),
-                      ChatMessageAnchorSystemBarsScrim(
-                        expanded: _messageAnchorExpanded,
-                      ),
-                    ],
-                  ),
+                    ),
+                    ChatMessageAnchorSystemBarsScrim(
+                      expanded: _messageAnchorExpanded,
+                    ),
+                  ],
                 ),
-              );
-            },
-          );
-        },
-      ),
+              ),
+            );
+          },
+        );
+      },
     );
     if (!_isFirstUseTourActive) {
-      return CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.keyL, control: true): () =>
-              _requestComposerFocus(),
-          if (isChatWorkspace) ...{
-            const SingleActivator(LogicalKeyboardKey.keyB, control: true):
-                _toggleHdPadLeftPaneCollapsed,
-            const SingleActivator(LogicalKeyboardKey.keyE, control: true):
-                _toggleHdPadRightPaneCollapsed,
-          },
-        },
-        child: Focus(
-          focusNode: _pageShortcutsFocusNode,
-          autofocus: true,
-          child: chatPage,
-        ),
-      );
+      return chatPage;
     }
     return Stack(
       fit: StackFit.expand,

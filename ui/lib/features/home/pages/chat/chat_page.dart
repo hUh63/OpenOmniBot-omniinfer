@@ -86,9 +86,6 @@ import 'widgets/chat_widgets.dart';
 import 'widgets/chat_browser_overlay.dart';
 import 'widgets/chat_message_anchor_bar.dart';
 import 'widgets/chat_tool_activity_strip.dart';
-import 'widgets/chat_keyboard_layout.dart';
-import 'widgets/chat_message_viewport.dart';
-import 'widgets/chat_pane_resize_handle.dart';
 import 'widgets/chat_spotlight_tour.dart';
 import 'package:ui/widgets/app_update_dialog.dart';
 import 'package:ui/widgets/app_background_widgets.dart';
@@ -118,9 +115,6 @@ enum ChatPageMode { normal, openclaw, agent }
 enum _SlashCommandPanelRoute { root, effort, agentModel }
 
 const String _kRemoteCodexModeAgentId = 'codex-remote';
-
-/// 宽屏分栏时外壳左右各留的内边距（与聊天页两栏布局一致）。
-const double _kHdPadShellHorizontalPadding = 4;
 const String _kXiaowanAcpAgentId = 'xiaowan-acp';
 
 class ChatPage extends StatefulWidget {
@@ -342,9 +336,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   /// 面板弹出来、把旧文本当成用户刚敲的内容。
   bool _isApplyingDraft = false;
   bool _isSurfacePageScrolling = false;
-  double? _hdPadLastLayoutWidth;
-  /// IME/输入区高度变化的监听源：只让消费布局的子树重建，页面本身不重建。
-  final ValueNotifier<int> _chatKeyboardLayoutChanges = ValueNotifier<int>(0);
   final HdPadPaneLayoutResolver _hdPadPaneLayoutResolver =
       const HdPadPaneLayoutResolver();
   double? _hdPadLeftPaneWidth;
@@ -725,20 +716,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     _isHdPadPaneDragging = false;
     _hdPadPaneDragStartWidth = null;
     _hdPadPaneDragDelta = 0;
-  }
-
-  HdPadPaneLayout _currentPadLayout({double? availableWidth}) {
-    return _hdPadPaneLayoutResolver.resolve(
-      availableWidth ??
-          _hdPadLastLayoutWidth ??
-          MediaQuery.sizeOf(context).width -
-              MediaQuery.viewPaddingOf(context).horizontal -
-              _kHdPadShellHorizontalPadding * 2,
-      preferredLeftWidth: _hdPadLeftPaneWidth,
-      preferredRightWidth: _hdPadRightPaneWidth,
-      collapseLeftPane: _hdPadLeftPaneCollapsed,
-      collapseRightPane: _hdPadRightPaneCollapsed,
-    );
   }
 
   void _handleEmbeddedDrawerThreadTargetSelected(

@@ -70,9 +70,6 @@ const List<ChatSurfaceMode> kVisibleChatSurfaceModes = <ChatSurfaceMode>[
 
 /// 聊天页面 AppBar
 class ChatAppBar extends StatelessWidget {
-  /// 宽屏分栏布局下菜单需要主动取得焦点（键盘快捷键直接可用，
-  /// 否则要和会话面板抢焦点）。
-  final bool usePadLayout;
   final VoidCallback onMenuTap;
   final VoidCallback? onPetTap;
   final bool isPetOpening;
@@ -119,7 +116,6 @@ class ChatAppBar extends StatelessWidget {
   const ChatAppBar({
     super.key,
     required this.onMenuTap,
-    this.usePadLayout = false,
     this.onPetTap,
     this.isPetOpening = false,
     this.isPetShowing = false,
