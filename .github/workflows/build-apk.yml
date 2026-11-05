@@ -113,45 +113,38 @@ jobs:
       - name: Publish APK to a release (CDN delivery)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3-omniinfer-v6.5.11
+          tag_name: v0.6.3-omniinfer-v6.5.12
           # Without this the tag lands on the default branch's HEAD instead of the
           # commit this build actually checked out.
           target_commitish: ${{ github.sha }}
-          name: "OmniInfer 版 · 四 tab 主界面 / 历史分片读 / 第三方 Agent 卸载 / targetSdk 37 (v0.6.3-omniinfer-v6.5.11)"
+          name: "OmniInfer 版 · 统一转场 / 原生用量统计 / 抽屉重构 (v0.6.3-omniinfer-v6.5.12)"
           prerelease: true
           draft: false
           body: |
-            本轮 (v6.5.11)：15 个提交，主线是「合并上游 0.7 的主界面与导航重构」「历史展示加内存上限」
-            「第三方 Agent 可控卸载」，以及 targetSdk 37 适配。全部改动只过编译门，未做真机回归。
+            本轮 (v6.5.12)：9 个提交，主线是「合并上游 0.7 的导航与抽屉重构」「用量统计改为原生聚合」，
+            以及几处启动与线程优化。全部改动只过编译门，未做真机回归。
 
-            一、主界面与导航（对齐上游 0.7）
-            - 首页改为四 tab（首页 / Agents / 轨迹 / 设置），聊天页改为 push 打开；原抽屉内的入口全部保留，
-              设置页能力未减。
-            - 引入 FlClash 导航与玻璃组件族（含 liquid glass shader 与许可证声明），首批页面接入玻璃化外观。
+            一、导航与转场（对齐上游 0.7）
+            - 全站统一页面转场（OmniPage / OmniPageRoute），移除自定义预测性返回、屏幕圆角通道与那批动画
+              资源；返回手势恢复系统原生行为，容器的展开动画与跟手拖动保留。
+            - 终端恢复官方 Material3 导航（上版已移除 Miuix），本轮把导航宿主与转场一起对齐。
 
-            二、历史与内存
-            - 历史展示改为「片读 + 展示投影」：SQL 层把超过 32KB 的 summary/payloadJson 换成空串并返回字节数，
-              每批 16 行、合计上限 100 条 / 1MB；超限正文流式复制到 offloads 目录，作为附件打开。
-              超长会话不再撑爆 CursorWindow，翻历史也不再 O(n²)。
-            - 删除会话时连带清理 offloads 目录，避免附件孤儿堆积。
-            - 键集游标与「实际消费行数」语义保持不变，老的分页行为没有回退。
+            二、用量统计与运行记录
+            - 活跃度与 token 图表改由原生聚合：SQL 里按「一条用户消息 = 一次交互」和「模型 × 周」出桶，
+              Flutter 只接收有界的图表数据，不再把整张表跨通道搬运。用量统计页、运行记录详情页随之
+              换成上游新版。
+            - 定时任务编辑弹窗改用统一的设置类弹层与分段选择器（一次性 / 每日重复的语义未变）。
 
-            三、第三方 Agent 卸载
-            - 设置页新增卸载入口（二次确认），只删除本应用托管安装的包；外部安装的残留只提示、不删除，
-              卸载失败只探测不重试，避免反复破坏用户设备。
+            三、首页抽屉
+            - 抽屉拆成外壳 + 首页内容 + 会话列表 + 搜索 + 头尾 + 图片预览 + 多选 + 行内菜单一组文件，
+              统一到同一版本；嵌入模式、首页 tab、聊天页的刷新与搜索焦点钩子都保留。
+            - 会话长按菜单改为「把按下的那行作为浮动预览」，替代原来的纯标题。
+            - 新增抽屉宠物入口及其悬浮窗权限说明。
 
-            四、Android 17（targetSdk 37）
-            - 新增 ACCESS_LOCAL_NETWORK 权限链路（MCP / Agent / webchat 各请求点）；未授权时只宣告回环地址，
-              不再给出连不上的局域网 IP。
-            - 语音朗读改为持有前台服务租约：后台朗读不会被系统回收；拿不到租约时仍按原逻辑在进程内播放，
-              朗读不会失败。通知栏「停止朗读」与系统回收都会结束当前条目。
-
-            五、发布与稳定性
-            - 密钥存储改为 fail-closed（加密不可用不再降级写明文）；冷启动不再在主线程做 IO；OkHttp 不再在
-              构造期建连接池。
-            - proguard 改为 -keep class { <init>(...); <fields>; }，避免 R8 删类 / 合并模型导致 release 版
-              Gson 反序列化失败。
-            - 终端恢复 Material3 导航并移除 Miuix 依赖（JVM 目标回落 17）。
+            四、其它
+            - 语音设置读取配置从主线程移到 IO（首次读取还会解密）。
+            - 个人上下文（personal）包未引入：它依赖本仓没有的日历工具与 na-cloud 账号体系，硬合会让该
+              模块无法编译。
 
             安装后如遇异常，请反馈具体操作路径。
           files: apk-out/*.apk
