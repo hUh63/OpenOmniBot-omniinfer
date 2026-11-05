@@ -21,7 +21,7 @@ class OmniSegmentedSlider<T> extends StatelessWidget {
     super.key,
     required this.value,
     required this.options,
-    required this.onChanged,
+    this.onChanged,
     this.position,
     this.keyPrefix = 'omni-segment-option',
     this.height = 44,
@@ -30,7 +30,7 @@ class OmniSegmentedSlider<T> extends StatelessWidget {
 
   final T value;
   final List<OmniSegmentedOption<T>> options;
-  final ValueChanged<T> onChanged;
+  final ValueChanged<T>? onChanged;
   final double? position;
   final String keyPrefix;
   final double height;
@@ -141,7 +141,7 @@ class OmniSegmentedSlider<T> extends StatelessWidget {
                                 '$keyPrefix-${option.id ?? option.value.toString()}',
                               ),
                               borderRadius: BorderRadius.circular(height / 2),
-                              onTap: () => onChanged(option.value),
+                              onTap: () => onChanged?.call(option.value),
                               child: Center(
                                 child: AnimatedScale(
                                   duration: const Duration(milliseconds: 180),

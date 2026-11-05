@@ -170,6 +170,9 @@ class ChatInputArea extends StatefulWidget {
   onAgentPermissionModeChanged;
   final bool useIndependentSendButton;
 
+  /// 极简输入态：只保留输入框与发送按钮（chat 页浮层里的紧凑形态）。
+  final bool minimalComposer;
+
   const ChatInputArea({
     super.key,
     required this.controller,
@@ -208,6 +211,7 @@ class ChatInputArea extends StatefulWidget {
     this.agentPermissionModes = AgentPermissionMode.values,
     this.onAgentPermissionModeChanged,
     this.useIndependentSendButton = true,
+    this.minimalComposer = false,
   });
 
   @override

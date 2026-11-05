@@ -191,8 +191,10 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
 
     final contextUsageRatio = widget.contextUsageRatio;
     final rightActions = <Widget>[
-      if (contextUsageRatio != null ||
-          widget.onLongPressContextUsageRing != null) ...[
+      // 极简输入态（chat 页浮层）不展示上下文用量环与扩展配置入口。
+      if (!widget.minimalComposer &&
+          (contextUsageRatio != null ||
+              widget.onLongPressContextUsageRing != null)) ...[
         _ContextUsageRingButton(
           ratio: contextUsageRatio,
           tooltipMessage: widget.contextUsageTooltipMessage,

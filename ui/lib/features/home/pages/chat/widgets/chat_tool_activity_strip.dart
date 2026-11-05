@@ -1344,7 +1344,7 @@ class _CommandEffortSlider extends StatelessWidget {
     value: selectedValue ?? '',
     child: OmniSegmentedSlider<String>(
       keyPrefix: 'command-effort',
-      value: selectedValue,
+      value: selectedValue ?? (options.isEmpty ? '' : options.first),
       height: 22,
       fontSize: 8.2,
       options: [
