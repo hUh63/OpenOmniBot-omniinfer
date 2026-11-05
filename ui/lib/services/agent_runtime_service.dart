@@ -804,6 +804,7 @@ String _agentCatalogIdentity(AcpAgentProfile agent) {
 }
 
 String? selectAgentRequestModel({
+  required AgentRuntimeStatus status,
   required String? overrideModel,
   required String? activeModel,
   required bool activeModelSourceMatches,

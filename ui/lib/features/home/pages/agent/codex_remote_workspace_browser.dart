@@ -27,7 +27,7 @@ class CodexRemoteWorkspaceBrowser extends StatefulWidget {
   const CodexRemoteWorkspaceBrowser({
     super.key,
     required this.workspacePath,
-    this.agentId = 'codex-remote',
+    this.agentId,
     this.allowFileMutations = true,
     this.remoteBridgeUrl = '',
     this.remoteBridgeToken = '',
@@ -40,8 +40,8 @@ class CodexRemoteWorkspaceBrowser extends StatefulWidget {
 
   final String workspacePath;
 
-  /// 该工作区归属的 Agent（na-cloud / codex-remote 等）。
-  final String agentId;
+  /// 该工作区归属的 Agent（na-cloud / codex-remote 等）；为空表示沿用默认。
+  final String? agentId;
 
   /// 是否允许在工作区里做写操作（新建/重命名/删除）。
   final bool allowFileMutations;
