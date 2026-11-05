@@ -5,6 +5,7 @@ ConversationThreadTarget _newThreadTargetForConversationMode(
 ) {
   return ConversationThreadTarget.newConversation(
     mode: mode,
+    agentId: _kXiaowanAcpAgentId,
     requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
   );
 }
@@ -25,12 +26,43 @@ ConversationThreadTarget _newAgentThreadTarget({
   return ConversationThreadTarget.newConversation(
     mode: ConversationMode.agent,
     requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
-    agentId: agentId,
+    agentId:
+        agentId ??
+        (agentRuntime == 'remote'
+            ? _kRemoteCodexModeAgentId
+            : _kXiaowanAcpAgentId),
     agentRuntime: agentRuntime,
   );
 }
 
 mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
+  // UI-only preservation while the existing conversation initializer resets
+  // an unsubmitted target. The request id prevents an older initialization
+  // from restoring its composer into a newer conversation.
+  int? _composerPreservationRequestId;
+
+  @override
+  void onConversationReset(ConversationMode mode) {
+    final preserveComposer =
+        _composerPreservationRequestId == _conversationTargetRequestId &&
+        _pageModeForConversationMode(mode) == _activeConversationMode;
+    if (!preserveComposer) {
+      super.onConversationReset(mode);
+      return;
+    }
+    // Read immediately before the synchronous reset, not before its async
+    // initialization: the user may have edited text or attachments meanwhile.
+    final composerValue = _messageController.value;
+    final composerAttachments = List<ChatInputAttachment>.of(
+      _pendingAttachments,
+    );
+    super.onConversationReset(mode);
+    final state = _modeState(_activeConversationMode);
+    state.draftMessage = composerValue.text;
+    state.pendingAttachments.addAll(composerAttachments);
+    _messageController.value = composerValue;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -44,6 +76,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     });
 
     _runtimeCoordinator.ensureInitialized();
+    _lastAgentEventProjection = _runtimeCoordinator.latestAgentEventProjection;
     _runtimeCoordinator.addListener(_handleRuntimeCoordinatorChanged);
     HomeGreetingSettingsService.notifier.addListener(
       _handleHomeGreetingSettingsChanged,
@@ -54,7 +87,36 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     unawaited(AppUpdateService.initialize());
     _conversationListChangedSubscription = AssistsMessageService
         .conversationListChangedStream
-        .listen((_) {
+        .listen((event) {
+          if (event['reason'] == 'na_history_owner_changed') {
+            final activeNa =
+                _activeMode == ChatPageMode.agent &&
+                (_activeAcpAgentId == 'na-cloud' ||
+                    _currentConversation?.agentId == 'na-cloud');
+            final cachedNa =
+                _modeState(ChatPageMode.agent).currentConversation?.agentId ==
+                    'na-cloud' ||
+                (_activeAgentThreadId?.startsWith('na:') ?? false);
+            // Invalidate history/snapshot awaits before any later callback can
+            // restore the account that just left this device.
+            _beginConversationTargetRequest();
+            invalidateConversationLifecycle();
+            _runtimeCoordinator.discardNaHistoryViews();
+            if (activeNa || cachedNa)
+              _resetLocalConversationState(ChatPageMode.agent);
+            if (activeNa) {
+              _messageController.clear();
+              _pendingAttachments.clear();
+              unawaited(
+                _applyConversationThreadTarget(
+                  _newAgentThreadTarget(
+                    agentId: 'na-cloud',
+                    agentRuntime: 'na',
+                  ),
+                ),
+              );
+            }
+          }
           unawaited(_handleExternalConversationListChanged());
         });
     _conversationMessagesChangedSubscription = AssistsMessageService
@@ -65,17 +127,8 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _browserSessionSnapshotChangedSubscription = AssistsMessageService
         .browserSessionSnapshotChangedStream
         .listen(_handleBrowserSessionSnapshotChanged);
-    // 事件流一旦出错或关闭，reducer 再也收不到终态事件：思考中 / 停止按钮会永远停在
-    // 原地（表现为「AI 一直回复、点了也没反应」），而且没有任何自愈入口。至少要复位
-    // 「正在回复」的状态，让用户能重新发送。
-    _agentEventSubscription = AgentRuntimeService.events.listen(
-      _handleAgentRuntimeEvent,
-      onError: _handleAgentEventStreamFailure,
-      onDone: _handleAgentEventStreamDone,
-    );
     _omniLinkEventSubscription = OmniLinkPluginService.events.listen(
       _handleOmniLinkEvent,
-      onError: (Object error) => debugPrint('[OmniLink] event stream failed: $error'),
     );
     unawaited(_refreshAgentRuntimeStatus());
 
@@ -86,55 +139,28 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     unawaited(bootstrapFuture);
   }
 
-  void _handleAgentEventStreamFailure(Object error) {
-    debugPrint('[Agent] event stream failed: $error');
-    if (!mounted) return;
-    // 事件流断了就再也等不到终态事件，本轮只能按「已结束」收尾，否则 UI 永久转圈。
-    setState(() {
-      _modeState(_activeMode).isAiResponding = false;
-      _isDeepThinking = false;
-    });
-    _resubscribeAgentEvents();
-  }
-
-  void _handleAgentEventStreamDone() {
-    debugPrint('[Agent] event stream closed by the native side');
-    if (!mounted) return;
-    setState(() {
-      _modeState(_activeMode).isAiResponding = false;
-      _isDeepThinking = false;
-    });
-    _resubscribeAgentEvents();
-  }
-
-  /// 原生把事件流关掉之后不会自己回来：只复位「正在回复」而不重订，本页后续所有
-  /// 回复都收不到（用户必须退出重进聊天页）。这里退避重订，避免原生抖动时打转。
-  void _resubscribeAgentEvents() {
-    if (!mounted) return;
-    _agentEventRetryTimer?.cancel();
-    _agentEventRetryTimer = Timer(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      _agentEventSubscription?.cancel();
-      _agentEventSubscription = AgentRuntimeService.events.listen(
-        _handleAgentRuntimeEvent,
-        onError: _handleAgentEventStreamFailure,
-        onDone: _handleAgentEventStreamDone,
-      );
-    });
-  }
-
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final mediaQuery = MediaQuery.maybeOf(context);
-    if (mediaQuery != null) {
-      final isHdPadLandscape = _isHdPadLandscapeForMediaQuery(mediaQuery);
-      if (_wasHdPadLandscape == true && !isHdPadLandscape) {
+    final viewportSize = MediaQuery.maybeSizeOf(context);
+    if (viewportSize != null) {
+      final safeWidth =
+          viewportSize.width -
+          (MediaQuery.maybeViewPaddingOf(context)?.horizontal ?? 0);
+      final isChatWorkspace = isChatWorkspaceViewport(
+        Size(safeWidth, viewportSize.height),
+      );
+      if (_wasChatWorkspace == true && !isChatWorkspace) {
         _embeddedDrawerKey.currentState?.unfocusSearch();
-        _drawerKey.currentState?.unfocusSearch();
+        if (_isHdPadPaneDragging) {
+          _resetHdPadPaneDragState();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _persistHdPadPanePreferences();
+          });
+        }
       }
-      _wasHdPadLandscape = isHdPadLandscape;
-      if (isHdPadLandscape && _activeSurfaceMode == ChatSurfaceMode.workspace) {
+      _wasChatWorkspace = isChatWorkspace;
+      if (isChatWorkspace && _activeSurfaceMode == ChatSurfaceMode.workspace) {
         _activeSurfaceMode = ChatSurfaceMode.normal;
       }
     }
@@ -157,21 +183,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         '${oldWidget.threadTarget} -> ${widget.threadTarget}',
       );
       unawaited(_reloadConversationForCurrentTarget());
-    }
-  }
-
-  @override
-  void didChangeMetrics() {
-    super.didChangeMetrics();
-    _syncEmptyGreetingKeyboardLiftFromView();
-  }
-
-  void _syncEmptyGreetingKeyboardLiftFromView() {
-    if (!mounted) return;
-    final view = View.of(context);
-    final bottomInset = view.viewInsets.bottom / view.devicePixelRatio;
-    if (_emptyGreetingKeyboardLiftTracker.update(bottomInset)) {
-      setState(() {});
     }
   }
 
@@ -231,7 +242,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return normalizedLatestTarget;
     }
 
-    return ConversationThreadTarget.newConversation(mode: resolvedMode);
+    return _newThreadTargetForConversationMode(resolvedMode);
   }
 
   ConversationThreadTarget? _normalizeVisibleThreadTarget(
@@ -243,35 +254,65 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     if (target.mode == ConversationMode.openclaw) {
       return null;
     }
+    if (target.isRemoteCodexSessionTarget || target.agentRuntime == 'remote') {
+      return target.copyWith(agentId: _kRemoteCodexModeAgentId);
+    }
+    if (target.isNewConversation) {
+      final agentId = target.agentRuntime == 'remote'
+          ? _kRemoteCodexModeAgentId
+          : target.mode == ConversationMode.normal ||
+                target.mode == ConversationMode.chatOnly
+          ? _kXiaowanAcpAgentId
+          : (target.agentId?.trim().isNotEmpty == true
+                ? target.agentId!
+                : _kXiaowanAcpAgentId);
+      return target.copyWith(agentId: agentId);
+    }
     return target;
   }
 
   @override
   Future<void> _bootstrapConversationThread() async {
-    final requestId = _beginConversationTargetRequest();
-    await _loadOpenClawConfig();
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
-    await _loadTerminalEnvironmentVariables();
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
-    final target = await _resolveConversationThreadTarget(widget.threadTarget);
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
-    await _applyConversationThreadTarget(
-      target,
-      syncPage: false,
-      requestId: requestId,
+    final requestId = _beginConversationTargetRequest(
+      isHistoryLoading: widget.threadTarget?.isNewConversation != true,
     );
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
-    unawaited(_loadNormalChatModelContext());
-    unawaited(_refreshLiveBrowserSessionSnapshot(syncRuntime: true));
+    try {
+      await _loadOpenClawConfig();
+      if (!_isConversationTargetRequestCurrent(requestId)) return;
+      await _loadTerminalEnvironmentVariables();
+      if (!_isConversationTargetRequestCurrent(requestId)) return;
+      final target = await _resolveConversationThreadTarget(
+        widget.threadTarget,
+      );
+      if (!_isConversationTargetRequestCurrent(requestId)) return;
+      await _applyConversationThreadTarget(
+        target,
+        syncPage: false,
+        requestId: requestId,
+      );
+      if (!_isConversationTargetRequestCurrent(requestId)) return;
+      unawaited(_loadNormalChatModelContext());
+      unawaited(_refreshLiveBrowserSessionSnapshot(syncRuntime: true));
+    } finally {
+      _finishConversationHistoryLoad(requestId);
+    }
   }
 
   @override
   Future<void> _reloadConversationForCurrentTarget() async {
-    final requestId = _beginConversationTargetRequest();
-    final target = await _resolveConversationThreadTarget(widget.threadTarget);
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
-    await _applyConversationThreadTarget(target, requestId: requestId);
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
+    final requestId = _beginConversationTargetRequest(
+      isHistoryLoading: widget.threadTarget?.isNewConversation != true,
+    );
+    try {
+      final target = await _resolveConversationThreadTarget(
+        widget.threadTarget,
+      );
+      if (!_isConversationTargetRequestCurrent(requestId)) return;
+      await _applyConversationThreadTarget(target, requestId: requestId);
+      if (!_isConversationTargetRequestCurrent(requestId)) return;
+    } finally {
+      _finishConversationHistoryLoad(requestId);
+    }
   }
 
   @override
@@ -281,76 +322,120 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     bool preserveComposer = false,
     int? requestId,
   }) async {
-    final activeRequestId = requestId ?? _beginConversationTargetRequest();
+    final activeRequestId =
+        requestId ??
+        _beginConversationTargetRequest(
+          isHistoryLoading: !target.isNewConversation,
+        );
     bool isStaleRequest() =>
         !_isConversationTargetRequestCurrent(activeRequestId);
-    invalidateConversationLifecycle();
-    final lifecycleToken = captureConversationLifecycleToken();
-    final effectiveTarget = await _overrideTargetWithSharedDraftIfNeeded(
-      target,
-    );
-    if (isStaleRequest()) return;
-    final targetMode = _pageModeForConversationMode(effectiveTarget.mode);
-    // Capture after initialization so input typed during the switch survives
-    // the existing conversation reset below (including its attachment reset).
-    final composerValue = preserveComposer ? _messageController.value : null;
-    final composerAttachments = preserveComposer
-        ? List<ChatInputAttachment>.of(_pendingAttachments)
-        : null;
-    _storeDraftForActiveConversationMode();
-    if (effectiveTarget.isNewConversation && !preserveComposer) {
-      _modeState(targetMode).draftMessage = '';
-      _modeState(targetMode).pendingAttachments.clear();
-    }
-    if (isStaleRequest()) return;
-    setState(() {
-      _resolvedThreadTarget = effectiveTarget;
-      _activeConversationMode = targetMode;
-      _activeSurfaceMode = _surfaceForConversationMode(effectiveTarget.mode);
-      _showSlashCommandPanel = false;
-      _showModelMentionPanel = false;
-      _activeModelMentionToken = null;
-      _openClawPanelExpanded = false;
-      _isBrowserOverlayVisible = false;
-      _isSurfacePageScrolling = false;
-    });
-    // A new Harness target without a conversationId is a new conversation.
-    // The previous conversation remains persisted in history and is not
-    // implicitly inherited by the new Harness.
-    _resetLocalConversationState(targetMode);
-    if (composerValue != null) {
-      _modeState(targetMode).draftMessage = composerValue.text;
-      _modeState(targetMode).pendingAttachments.addAll(composerAttachments!);
-    }
-    _restoreLocalAgentThreadIdFromTarget(effectiveTarget);
-    if (_shouldSyncExistingLocalAgentTarget(effectiveTarget)) {
-      unawaited(
-        _syncExistingLocalAgentTarget(effectiveTarget, activeRequestId),
-      );
-    }
-    _applyDraftForConversationMode(targetMode);
-    if (effectiveTarget.isRemoteCodexSessionTarget) {
-      final loaded = await _prepareRemoteCodexSessionTarget(effectiveTarget);
-      // Failed session admission must not continue as an initialized chat.
-      // In particular, do not request configuration or dispatch initial input.
-      if (!loaded) return;
-    } else {
-      await initializeConversation(lifecycleToken: lifecycleToken);
-    }
-    if (isStaleRequest()) return;
-    if (_activeConversationMode == ChatPageMode.agent) {
-      await _refreshAgentCommandPreferences();
+    try {
+      invalidateConversationLifecycle();
+      final lifecycleToken = captureConversationLifecycleToken();
+      final effectiveTarget = _normalizeVisibleThreadTarget(
+        await _overrideTargetWithSharedDraftIfNeeded(target),
+      )!;
       if (isStaleRequest()) return;
-    }
-    await _applyStagedSharedDraftIfNeeded(effectiveTarget);
-    if (isStaleRequest()) return;
-    await _sendInitialMessageIfNeeded(effectiveTarget);
-    if (isStaleRequest()) return;
-    await _persistVisibleThreadTargetIfNeeded();
-    unawaited(_syncVisibleChatConversation());
-    if (isStaleRequest()) return;
-    if (syncPage) {
-      _jumpToCurrentModePage(animate: false);
+      final targetMode = _pageModeForConversationMode(effectiveTarget.mode);
+      // Carry the current composer across the first synchronous target reset.
+      // onConversationReset preserves newer edits made during initialization.
+      final composerValue = preserveComposer ? _messageController.value : null;
+      final composerAttachments = preserveComposer
+          ? List<ChatInputAttachment>.of(_pendingAttachments)
+          : null;
+      _storeDraftForActiveConversationMode();
+      if (effectiveTarget.isNewConversation && !preserveComposer) {
+        _modeState(targetMode).draftMessage = '';
+        _modeState(targetMode).pendingAttachments.clear();
+      }
+      if (isStaleRequest()) return;
+      setState(() {
+        _resolvedThreadTarget = effectiveTarget;
+        _activeConversationMode = targetMode;
+        _activeSurfaceMode = _surfaceForConversationMode(effectiveTarget.mode);
+        _showSlashCommandPanel = false;
+        _showModelMentionPanel = false;
+        _activeModelMentionToken = null;
+        _openClawPanelExpanded = false;
+        _isBrowserOverlayVisible = false;
+        _isSurfacePageScrolling = false;
+      });
+      // A new Harness target without a conversationId is a new conversation.
+      // The previous conversation remains persisted in history and is not
+      // implicitly inherited by the new Harness.
+      _resetLocalConversationState(targetMode);
+      if (composerValue != null) {
+        _modeState(targetMode).draftMessage = composerValue.text;
+        _modeState(targetMode).pendingAttachments.addAll(composerAttachments!);
+      }
+      _restoreLocalAgentThreadIdFromTarget(effectiveTarget);
+      final agentHistorySync =
+          _shouldSyncExistingLocalAgentTarget(effectiveTarget)
+          ? _syncExistingLocalAgentTarget(effectiveTarget, activeRequestId)
+          : null;
+      if (!preserveComposer) {
+        _applyDraftForConversationMode(targetMode);
+      }
+      if (preserveComposer) {
+        _composerPreservationRequestId = activeRequestId;
+      }
+      try {
+        if (effectiveTarget.isRemoteCodexSessionTarget) {
+          await _prepareRemoteCodexSessionTarget(effectiveTarget);
+        } else {
+          await initializeConversation(lifecycleToken: lifecycleToken);
+        }
+      } finally {
+        if (_composerPreservationRequestId == activeRequestId) {
+          _composerPreservationRequestId = null;
+        }
+      }
+      if (isStaleRequest()) return;
+      // Local history can be empty while an existing cloud session is hydrating.
+      // Already available messages can be shown without waiting for metadata sync.
+      if (agentHistorySync != null && _messages.isEmpty) {
+        await agentHistorySync;
+        if (isStaleRequest()) return;
+      }
+      _finishConversationHistoryLoad(activeRequestId);
+      if (_activeConversationMode == ChatPageMode.agent) {
+        await _refreshAgentCommandPreferences();
+        if (isStaleRequest()) return;
+      }
+      unawaited(_refreshAgentRuntimeStatus());
+      await _applyStagedSharedDraftIfNeeded(effectiveTarget);
+      if (isStaleRequest()) return;
+      await _sendInitialMessageIfNeeded(effectiveTarget);
+      if (isStaleRequest()) return;
+      await _persistVisibleThreadTargetIfNeeded();
+      unawaited(_syncVisibleChatConversation());
+      if (isStaleRequest()) return;
+      if (syncPage) {
+        _jumpToCurrentModePage(animate: false);
+      }
+      if (effectiveTarget.isNewConversation &&
+          (effectiveTarget.initialMessage?.trim().isEmpty ?? true) &&
+          !widget.showFirstUseTour) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_isConversationTargetRequestCurrent(activeRequestId) ||
+              ModalRoute.of(context)?.isCurrent != true ||
+              widget.showFirstUseTour ||
+              _resolvedThreadTarget?.isNewConversation != true ||
+              _currentConversationId != null ||
+              _messages.isNotEmpty ||
+              _isAiResponding ||
+              _sendMessageInFlightTargetIds.contains(activeRequestId) ||
+              _isWorkspaceSurface ||
+              _isBrowserOverlayVisible ||
+              _isPopupVisible) {
+            return;
+          }
+          _requestComposerFocus(showKeyboard: true);
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      }
+    } finally {
+      _finishConversationHistoryLoad(activeRequestId);
     }
   }
 
@@ -364,27 +449,12 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return;
     }
     final requestKey = target.requestKey ?? message;
-    if (_consumedInitialMessageRequests.contains(requestKey)) return;
+    if (!_consumedInitialMessageRequests.add(requestKey)) return;
     // This method is invoked by _applyConversationThreadTarget while the
     // bootstrap Future is still running. The conversation has already been
     // initialized above, so waiting for that same Future inside _sendMessage
     // would deadlock the initial prompt (notably OmniFlow enhancement).
-    //
-    // 只有「这一轮真的开始了」才把 requestKey 记为已消费。原来在调用前就 add：
-    // _sendMessage 里任何一条早退（同一 target 已有发送在飞 / 正在回复 / 模型未配置 /
-    // Harness 切换未完成）都会让这条初始消息永久丢失，且再进同一深链也会被去重掉。
-    final wasBusy = isAiResponding || _currentDispatchTurnId != null;
-    final messageCountBefore = _messages.length;
     await _sendMessage(text: message, waitForBootstrap: false);
-    final started = (!wasBusy &&
-            (isAiResponding || _currentDispatchTurnId != null)) ||
-        _messages.length != messageCountBefore;
-    if (!started) return;
-    _consumedInitialMessageRequests.add(requestKey);
-    // 只增不减的集合要封顶（这些 key 按深链请求生成，长期使用会一直累积）。
-    if (_consumedInitialMessageRequests.length > 64) {
-      _consumedInitialMessageRequests.remove(_consumedInitialMessageRequests.first);
-    }
   }
 
   void _restoreLocalAgentThreadIdFromTarget(ConversationThreadTarget target) {
@@ -416,11 +486,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     }
     try {
       AgentRuntimeStatus? status;
-      try {
-        status = await AgentRuntimeService.status();
-      } catch (_) {
-        status = null;
-      }
       final requestedAgentId = target.agentId?.trim() ?? '';
       final response = await AgentRuntimeService.readSession(
         conversationId: conversationId,
@@ -429,9 +494,14 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         conversationMode: target.mode.storageValue,
       );
       try {
-        status = await AgentRuntimeService.status();
+        final responseAgentId = (response['agentId'] ?? requestedAgentId)
+            .toString()
+            .trim();
+        if (responseAgentId.isNotEmpty) {
+          status = await AgentRuntimeService.status(agentId: responseAgentId);
+        }
       } catch (_) {
-        // Keep the status snapshot from before session restoration.
+        // Session ownership does not depend on optional status metadata.
       }
       if (!mounted || !_isConversationTargetRequestCurrent(requestId)) {
         return;
@@ -459,11 +529,10 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
           _resolvedThreadTarget = currentTarget?.copyWith(
             agentId: resolvedAgentId,
             agentSessionId: threadId.isEmpty ? null : threadId,
-            agentRuntime: 'local',
+            agentRuntime: resolvedAgentId == 'na-cloud' ? 'na' : 'local',
           );
-          final conversation = _modeState(
-            ChatPageMode.agent,
-          ).currentConversation;
+          final conversation = _modeState(ChatPageMode.agent)
+              .currentConversation;
           if (conversation?.id == conversationId) {
             final updatedConversation = conversation!.copyWith(
               agentId: resolvedAgentId,
@@ -480,6 +549,31 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
           _agentRuntimeStatus = status;
         }
       });
+      if (resolvedAgentId == 'na-cloud' &&
+          _remoteCodexThreadResponseHasTurns(response)) {
+        final runtime = _runtimeForMode(ChatPageMode.agent);
+        final responding = runtime?.isAiResponding ?? false;
+        final merged = _mergeRemoteCodexSnapshotMessages(
+          snapshotMessages: _remoteCodexMessagesFromThreadResponse(response),
+          existingMessages: List<ChatMessageModel>.from(
+            runtime?.messages ?? _modeState(ChatPageMode.agent).messages,
+          ),
+          activeTaskId: runtime?.activeRunId,
+          isAiResponding: responding,
+        );
+        _syncRuntimeSnapshotForMode(
+          ChatPageMode.agent,
+          messages: merged,
+          preserveLiveStreamingState: responding,
+        );
+        if (!responding) {
+          await _runtimeCoordinator.persistRuntimeConversation(
+            conversationId: conversationId,
+            mode: kChatRuntimeModeAgent,
+            persistMessages: true,
+          );
+        }
+      }
       unawaited(_loadAgentCatalog());
       unawaited(_loadAgentModelOptionsWhenReady(force: true));
       unawaited(_persistVisibleThreadTargetIfNeeded());
@@ -530,14 +624,22 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return;
     }
 
-    // 只需要这一条会话的元数据：单条查询，不要为一条记录拉整张表。
-    final conversation = await ConversationService.getConversationById(
-      conversationId,
+    final conversations = await ConversationService.getAllConversations(
       includeArchived: true,
-      mode: _conversationModeForPageMode(mode),
     );
     if (!mounted || !isConversationLifecycleTokenCurrent(lifecycleToken)) {
       return;
+    }
+
+    ConversationModel? conversation;
+    try {
+      conversation = conversations.firstWhere(
+        (item) =>
+            item.id == conversationId &&
+            item.mode == _conversationModeForPageMode(mode),
+      );
+    } catch (_) {
+      conversation = null;
     }
 
     // The metadata read may overlap the current ACP turn. Select the current
@@ -547,20 +649,13 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       mode: _modeKey(mode),
     );
     var resolvedConversation = runtime?.conversation ?? conversation;
-    final runtimeMessages = runtime?.messages.isNotEmpty == true
-        ? List<ChatMessageModel>.from(runtime!.messages)
-        : null;
-    var hasMoreFromFirstPage = false;
-    var scannedFromFirstPage = 0;
-    final loadedFromFirstPage = runtimeMessages == null;
+    var historyPage = runtime?.historyPage;
+    final historyRevision = runtime?.historyPageRevision ?? 0;
     List<ChatMessageModel> resolvedMessages;
-    if (runtimeMessages != null) {
-      resolvedMessages = runtimeMessages;
+    if (runtime?.messages.isNotEmpty == true) {
+      resolvedMessages = List<ChatMessageModel>.from(runtime!.messages);
     } else {
-      // 与 loadConversation 用同一套分页语义：只取最近一页，向上滚动时再按
-      // messageOffset 往前追加。这里原来是一次性拉整段消息，长会话（上千条）
-      // 首次进入某个 mode 时会把全部消息序列化过来再解析。
-      final firstPage =
+      final page =
           await ConversationHistoryService.getConversationMessagesPaged(
             conversationId,
             mode: _conversationModeForPageMode(mode),
@@ -568,9 +663,8 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
             offset: 0,
             expectedMessageCount: resolvedConversation?.messageCount,
           );
-      resolvedMessages = firstPage.messages;
-      hasMoreFromFirstPage = firstPage.hasMore;
-      scannedFromFirstPage = firstPage.scanned;
+      resolvedMessages = page.messages;
+      historyPage = (hasMore: page.hasMore, nextOffset: page.nextOffset);
     }
     if (!mounted || !isConversationLifecycleTokenCurrent(lifecycleToken)) {
       return;
@@ -580,9 +674,15 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       conversationId: conversationId,
       mode: _modeKey(mode),
     );
+    if ((runtime?.historyPageRevision ?? 0) != historyRevision) return;
     if (runtime?.messages.isNotEmpty == true) {
-      resolvedMessages = List<ChatMessageModel>.from(runtime!.messages);
+      final knownIds = runtime!.messages.map((message) => message.id).toSet();
+      resolvedMessages = <ChatMessageModel>[
+        ...runtime.messages,
+        ...resolvedMessages.where((message) => knownIds.add(message.id)),
+      ];
       resolvedConversation = runtime.conversation ?? resolvedConversation;
+      historyPage = runtime.historyPage ?? historyPage;
     }
 
     _modeState(mode).currentConversationId = conversationId;
@@ -590,14 +690,18 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _modeState(mode).messages
       ..clear()
       ..addAll(resolvedMessages);
-    if (runtime == null && loadedFromFirstPage) {
-      // 首屏是分页结果：把「还有更多」和已加载条数一起落到这个 mode 的状态上，
-      // 否则向上滚动时拿不到 offset、会停在第一页。offset 用 SQL 消费行数
-      // （scanned），不是过滤后的消息条数。
-      _modeState(mode).hasMoreMessages =
-          hasMoreFromFirstPage && scannedFromFirstPage > 0;
-      _modeState(mode).messageOffset = scannedFromFirstPage;
-    }
+    final selectedPage =
+        historyPage ??
+        (
+          hasMore: !isEphemeralConversation(
+            conversationId,
+            _conversationModeForPageMode(mode),
+          ),
+          nextOffset: 0,
+        );
+    _modeState(mode).hasMoreMessages = selectedPage.hasMore;
+    _modeState(mode).messageOffset = selectedPage.nextOffset;
+    _modeState(mode).isLoadingMore = false;
 
     if (runtime == null) {
       _runtimeCoordinator.ensureRuntime(
@@ -615,6 +719,12 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       conversation: resolvedConversation,
       messages: resolvedMessages,
     );
+    onConversationHistoryPageLoaded(
+      _conversationModeForPageMode(mode),
+      conversationId,
+      hasMore: selectedPage.hasMore,
+      nextOffset: selectedPage.nextOffset,
+    );
   }
 
   @override
@@ -624,14 +734,12 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       return;
     }
     _resolvedThreadTarget = visibleTarget;
-    // Startup navigation must remember remote session identity as well. Remote
-    // history remains owned by ACP; only the existing navigation target is saved.
-    await ConversationHistoryService.saveLastVisibleThreadTarget(visibleTarget);
     if (visibleTarget.isRemoteCodexSessionTarget ||
         (_activeConversationMode == ChatPageMode.agent &&
             _isRemoteCodexRuntimeActiveForMode(ChatPageMode.agent))) {
       return;
     }
+    await ConversationHistoryService.saveLastVisibleThreadTarget(visibleTarget);
     await ConversationHistoryService.saveCurrentConversationTarget(
       visibleTarget,
       mode: visibleTarget.mode,
@@ -662,49 +770,14 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         return;
       }
 
-      // 唤起宠物前检查：无障碍权限 + 悬浮窗权限
-      final a11yPermission = PermissionData(
-        id: kAccessibilityPermissionId,
-        iconPath: 'assets/home/chat/permission_hand.svg',
-        iconWidth: 32,
-        iconHeight: 32,
-        name: Localizations.localeOf(context).languageCode == 'en'
-            ? 'Accessibility Permission'
-            : '无障碍权限',
-        description: Localizations.localeOf(context).languageCode == 'en'
-            ? 'Required to observe the screen and manage the pet overlay'
-            : '读取页面并管理宠物悬浮窗需要此权限',
-        onAuthorize: () async {
-          try {
-            await spePermission.invokeMethod<void>(
-              'openAndroidGuiAccessibilitySettings',
-            );
-          } on PlatformException {
-            // Keep the permission disabled; the user can retry afterwards.
-          }
-        },
-        checkAuthorization: () async {
-          try {
-            return await spePermission.invokeMethod<bool>(
-                  'isAndroidGuiAccessibilityReady',
-                ) ??
-                false;
-          } on PlatformException {
-            return false;
-          }
-        },
-      );
       final overlaySpecs = PermissionRegistry.getPermissionsByLevel(
         brand: 'other',
         level: PermissionLevel.overlayDisplay,
       );
-      final permissionDataList = <PermissionData>[
-        a11yPermission,
-        ...PermissionService.specsToPermissionData(
-          overlaySpecs,
-          context: context,
-        ),
-      ];
+      final permissionDataList = PermissionService.specsToPermissionData(
+        overlaySpecs,
+        context: context,
+      );
       await PermissionService.checkPermissions(permissionDataList);
       if (!mounted) {
         return;
@@ -717,39 +790,13 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         throw StateError('Overlay permission is not registered');
       }
 
-      // 唤起宠物需要「无障碍 + 悬浮窗」两项权限。把所有缺失项放进同一个引导弹层，
-      // 避免用户只看到其中一项、授权后仍然无法唤起。
-      final missingPermissions = permissionDataList
-          .where((permission) => !permission.notifier.value)
-          .toList(growable: false);
-      if (missingPermissions.isNotEmpty) {
+      if (!overlayPermission.notifier.value) {
         _setPetOverlayOpening(false);
-        final authorized = await PermissionPromptSheet.show(
+        final shouldShowPet = await PetOverlayPermissionSheet.show(
           context,
-          permissions: missingPermissions,
-          title: Localizations.localeOf(context).languageCode == 'en'
-              ? 'Bringing up the pet needs these permissions'
-              : '唤起宠物需要以下权限',
-          actionLabel: Localizations.localeOf(context).languageCode == 'en'
-              ? 'Continue'
-              : '继续唤起',
-          actionKey: const ValueKey('pet-permission-continue'),
+          permission: overlayPermission,
         );
-        if (!mounted || !authorized) {
-          return;
-        }
-        await PermissionService.checkPermissions(permissionDataList);
-        final stillMissing = permissionDataList
-            .where((permission) => !permission.notifier.value)
-            .toList(growable: false);
-        if (stillMissing.isNotEmpty) {
-          if (!mounted) {
-            return;
-          }
-          showToast(
-            LegacyTextLocalizer.localize('请先开启缺失的权限'),
-            type: ToastType.error,
-          );
+        if (!mounted || !shouldShowPet) {
           return;
         }
         _setPetOverlayOpening(true);
@@ -806,6 +853,9 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
 
   @override
   void dispose() {
+    for (final mode in _unboundConfigurationSessions.keys.toList()) {
+      _releaseUnboundConfigurationSession(mode);
+    }
     unawaited(_clearVisibleChatConversation());
     unawaited(_conversationModelSelectorHandle?.dismiss());
     _conversationModelSelectorHandle = null;
@@ -832,34 +882,18 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     _agentMessageScrollController.dispose();
     _modePageController.dispose();
     _inputFocusNode.dispose();
+    _pageShortcutsFocusNode.dispose();
+    _chatKeyboardLayoutChanges.dispose();
     _openClawBaseUrlController.dispose();
     _openClawTokenController.dispose();
     _openClawUserIdController.dispose();
     this._stopRemoteCodexSessionSync();
-    _agentEventSubscription?.cancel();
-    _agentEventRetryTimer?.cancel();
     _omniLinkEventSubscription?.cancel();
     super.dispose();
   }
 
   void _handleOmniLinkEvent(Map<String, dynamic> event) {
     if (!mounted) {
-      return;
-    }
-    // 协作事件可能属于别的会话。原实现完全不看归属，直接 insert 到「当前可见列表」并按
-    // 当前会话落库 —— 既会把消息串到错误的会话里，也会让本该收到它的会话永远看不到。
-    // 现在：明确带了别的 conversationId 就丢弃（宁可少显示，也不能串台）。
-    final eventConversationId = int.tryParse(
-      event['conversationId']?.toString().trim() ?? '',
-    );
-    final currentConversationId = _currentConversationId;
-    if (eventConversationId != null &&
-        currentConversationId != null &&
-        eventConversationId != currentConversationId) {
-      debugPrint(
-        '[OmniLink] drop event for conversation $eventConversationId '
-        '(active: $currentConversationId)',
-      );
       return;
     }
     final kind = event['kind']?.toString();
@@ -915,22 +949,13 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       _messages.insert(0, chatMessage);
     });
     final conversationId = _currentConversationId;
-    final runtime = _runtimeCoordinator.runtimeFor(
-      conversationId: conversationId ?? 0,
-      mode: _modeKey(_activeMode),
-    );
-    // 正在跑的回合里不要用「页面列表」当来源落库：那会和 reducer 的流式快照抢同一条
-    // 历史序列（expectedHistoryRevision 必然对不上，异常还会被 unawaited 吞掉）。
-    final liveTurn = runtime?.hasInFlightTask == true;
     if (conversationId != null &&
-        !liveTurn &&
         !isEphemeralConversation(conversationId, activeConversationModeValue)) {
       unawaited(
         _runtimeCoordinator.persistConversationMessageSnapshot(
           conversationId: conversationId,
           mode: _modeKey(_activeMode),
-          messages: [chatMessage],
-          expectedHistoryRevision: runtime?.historyRevision ?? 0,
+          messages: List<ChatMessageModel>.from(_messages),
           conversation: _currentConversation,
         ),
       );
@@ -1074,7 +1099,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     if (_inputFocusNode.hasFocus) {
       _armComposerLiftIntent();
     }
-    setState(() {});
+    _chatKeyboardLayoutChanges.value++;
   }
 
   void _handleHomeGreetingSettingsChanged() {
@@ -1204,15 +1229,11 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         : ChatPageMode.normal;
     await _ensureConversationModeReady(targetConversationMode);
     if (isStaleRequest()) return;
-    // 上面这个 await 期间用户可能还在打字：切模式前再快照一次，把这段间隙的内容
-    // 并回旧模式的草稿槽；否则紧接着的 _applyDraftForConversationMode 会整体覆盖掉它。
-    // 快照 → 恢复 → 切模式三件事必须在同一段同步代码里完成（中间不能再有 await）。
-    _storeDraftForActiveConversationMode();
-    _applyDraftForConversationMode(targetConversationMode);
     setState(() {
       _activeSurfaceMode = ChatSurfaceMode.normal;
       _activeConversationMode = targetConversationMode;
     });
+    _applyDraftForConversationMode(targetConversationMode);
     await _persistVisibleThreadTargetIfNeeded();
     unawaited(_syncVisibleChatConversation());
     if (isStaleRequest()) return;
@@ -1236,25 +1257,11 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
 
   @override
   void _applyDraftForConversationMode(ChatPageMode mode) {
-    // 时序要点（这里被三处调用，必须自洽）：
-    // 1. 取值与赋值放在同一段同步代码里：中间只要有一次 await，用户在间隙里
-    //    敲的字就会被下面的赋值整体覆盖。
-    // 2. 用 _isApplyingDraft 把它标成「程序化变更」，否则 TextEditingController
-    //    的监听器会把恢复出来的草稿当成用户输入（slash 面板弹出来、@ 提及被
-    //    重新解析、自动保存把旧模式的内容写到新模式）。
-    // 3. 光标落在文本末尾；draft 为空时也显式给 (0,0)，避免沿用上一个模式的
-    //    选区导致 Sliver 崩溃（TextSelection 超出文本长度会抛断言）。
     final draft = _modeState(mode).draftMessage;
-    final offset = draft.length;
-    _isApplyingDraft = true;
-    try {
-      _messageController.value = TextEditingValue(
-        text: draft,
-        selection: TextSelection.collapsed(offset: offset),
-      );
-    } finally {
-      _isApplyingDraft = false;
-    }
+    _messageController.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
   }
 
   Future<ConversationThreadTarget> _overrideTargetWithSharedDraftIfNeeded(
@@ -1267,6 +1274,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     if (staged != null && staged.hasContent) {
       return ConversationThreadTarget.newConversation(
         mode: ConversationMode.agent,
+        agentId: _kXiaowanAcpAgentId,
         fromNativeRoute: true,
         requestKey: staged.requestKey,
       );
@@ -1281,6 +1289,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         DateTime.now().millisecondsSinceEpoch + 5000;
     return ConversationThreadTarget.newConversation(
       mode: ConversationMode.agent,
+      agentId: _kXiaowanAcpAgentId,
       fromNativeRoute: true,
       requestKey: payload.requestKey,
     );

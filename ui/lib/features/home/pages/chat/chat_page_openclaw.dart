@@ -72,9 +72,6 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
 
   @override
   void _handleSlashCommandInput() {
-    // 恢复草稿/切换模式时会程序化改写输入框，那不是用户输入：
-    // 不能据此弹 slash 面板或重新解析 @ 提及。
-    if (_isApplyingDraft) return;
     if (_editingUserMessageId != null) {
       if (!mounted ||
           (!_showSlashCommandPanel &&
@@ -171,17 +168,14 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
   @override
   Future<void> _handleOutsideTap(Offset position) async {
     final insideInputArea = _isPointerInside(_inputAreaKey, position);
-    final insideToolActivityStrip = _isPointerInside(
-      _toolActivityStripKey,
+    final insideInputAuxiliarySurface =
+        _isPointerInside(_firstUseTourModelAnchorKey, position) ||
+        _isPointerInside(_openClawPanelKey, position) ||
+        _isPointerInside(_slashCommandStripKey, position);
+    final insideHomeDrawerSearch = _isPointerInside(
+      _embeddedDrawerSearchFieldKey,
       position,
     );
-    final insideInputAuxiliarySurface =
-        _isPointerInside(_openClawPanelKey, position) ||
-        _isPointerInside(_slashCommandStripKey, position) ||
-        insideToolActivityStrip;
-    final insideHomeDrawerSearch =
-        _isPointerInside(_embeddedDrawerSearchFieldKey, position) ||
-        _isPointerInside(_drawerSearchFieldKey, position);
     if (!insideInputArea &&
         !insideInputAuxiliarySurface &&
         !insideHomeDrawerSearch &&
@@ -197,14 +191,6 @@ mixin _ChatPageOpenClawMixin on _ChatPageStateBase {
         await SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
       }
       _suppressNextOutsideTapKeyboardHide = false;
-    }
-    // 工具活动列表展开后,点击 strip 之外的任何位置都应该收起它——包括输入框
-    // (输入框 tap 同时拿到焦点 + 让 strip 收起,不再走"先关 strip 再点一次"
-    // 的两步流程)。strip 自己的命中区域不算 outside,避免 toggle 自己把自己关掉。
-    if (_isToolActivityExpanded && !insideToolActivityStrip && mounted) {
-      setState(() {
-        _modeState(_activeMode).toolActivityExpanded = false;
-      });
     }
     if (!_showSlashCommandPanel &&
         !_showModelMentionPanel &&

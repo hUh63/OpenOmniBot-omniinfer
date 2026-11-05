@@ -1,23 +1,19 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
-import 'package:ui/models/chat_link_preview.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/agent_event_reducer.dart';
+import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/services/agent_identity.dart';
 import 'package:ui/services/agent_message_kinds.dart';
-import 'package:ui/services/agent_tool_call_parser.dart';
 import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
-import 'package:ui/services/link_preview_service.dart';
 import 'package:ui/services/voice_playback_coordinator.dart';
 import 'package:ui/services/agent_stream_meta.dart';
-import 'package:ui/services/agent_diff_parser.dart';
 
 part 'chat_runtime_internal_support.dart';
 part 'chat_runtime_state.dart';
@@ -27,7 +23,7 @@ part 'chat_runtime_external_message_support.dart';
 part 'chat_runtime_message_support.dart';
 part 'chat_runtime_streaming_support.dart';
 part 'chat_runtime_thinking_support.dart';
-part 'chat_runtime_tool_support.dart';
+part 'chat_runtime_agent_event_support.dart';
 
 const String kChatRuntimeModeNormal = 'normal';
 const String kChatRuntimeModeOpenClaw = 'openclaw';
@@ -83,15 +79,21 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   /// 每个会话运行时的最后使用时间（毫秒），用于超限时按 LRU 回收。
   final Map<String, int> _runtimeLastTouchedAt = <String, int>{};
 
-  /// 常驻的会话运行时上限。
-  ///
-  /// runtime 与页面解耦（后台 turn 要继续跑），但原来 _runtimes 只增不减：每浏览一个会话
-  /// 就常驻一份完整消息列表 + 十来个 map，长会话还带历史，内存随「访问过的会话数 × 历史
-  /// 长度」增长，页面 dispose 也不释放。超过上限时按最久未用淘汰（只淘汰无在飞任务、
-  /// 非临时会话的），被淘汰的会话下次进入会重新从 DB 分页装载。
+  /// 常驻的会话运行时上限。runtime 与页面解耦（后台 turn 要继续跑），但
+  /// 不设上限时 _runtimes 只增不减：每浏览一个会话就常驻一份完整消息列表
+  /// 与十来个 map，页面 dispose 也不释放。超限时按最久未用淘汰，只淘汰无
+  /// 在飞任务、非临时会话的；被淘汰的会话下次进入会重新从 DB 分页装载。
   static const int _kMaxRuntimeStates = 8;
+  final Set<int> _hiddenNaHistoryViews = <int>{};
 
   bool _initialized = false;
+  ChatAgentEventProjection? _latestAgentEventProjection;
+
+  /// Presentation of the last event already consumed by the shared reducer.
+  /// Views observe this through the existing ChangeNotifier; they never own
+  /// the ACP subscription or reduce an event a second time.
+  ChatAgentEventProjection? get latestAgentEventProjection =>
+      _latestAgentEventProjection;
 
   bool get _isEnglish => LegacyTextLocalizer.isEnglish;
 
@@ -103,9 +105,16 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     unawaited(VoicePlaybackCoordinator.instance.ensureInitialized());
 
     AssistsMessageService.initialize();
+    AssistsMessageService.conversationListChangedStream.listen((event) {
+      if (event['reason'] == 'na_history_owner_changed')
+        discardNaHistoryViews();
+    });
     AssistsMessageService.addOnExternalUserMessageAppendedCallback(
       _handleExternalUserMessageAppended,
     );
+    // The coordinator outlives Home and Chat routes. Returning to the list
+    // must not stop projection/persistence of an already admitted ACP turn.
+    AgentRuntimeService.events.listen(_handleAgentRuntimeEvent);
   }
 
   ChatConversationRuntimeState? runtimeFor({
@@ -113,6 +122,35 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     required String mode,
   }) {
     return _runtimes[_runtimeKey(conversationId: conversationId, mode: mode)];
+  }
+
+  /// Evict display caches, never durable messages. Pending ACP responses lose
+  /// their local view binding; logging back in reloads the native Conversation.
+  void discardNaHistoryViews() {
+    final views = _runtimes.values
+        .where(
+          (runtime) =>
+              runtime.conversation?.agentId == 'na-cloud' ||
+              (runtime.activeAcpSessionId?.startsWith('na:') ?? false) ||
+              runtime.knownAcpSessionIds.any((id) => id.startsWith('na:')),
+        )
+        .toList();
+    for (final runtime in views) {
+      _hiddenNaHistoryViews.add(runtime.conversationId);
+      runtime.persistenceGeneration++;
+      discardConversationRuntime(
+        conversationId: runtime.conversationId,
+        mode: runtime.mode,
+      );
+    }
+  }
+
+  // Only a fresh native Conversation load may readmit an evicted local view.
+  // Streaming events and delayed snapshots cannot make it visible again.
+  void restoreNaHistoryView(ConversationModel conversation) {
+    if (conversation.agentId == 'na-cloud') {
+      _hiddenNaHistoryViews.remove(conversation.id);
+    }
   }
 
   /// Conversation ids with live work in the shared ACP projection.
@@ -163,6 +201,16 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           runtime.lastAgentTurnId == normalizedTurnId ||
           runtime.activeAcpTurnId == normalizedTurnId) {
         return mode;
+      }
+    }
+    // Restored session metadata is a fallback. A cached mode must never
+    // shadow the mode that currently owns the official session or turn.
+    if (normalizedSessionId.isNotEmpty) {
+      for (final runtime in _runtimes.values) {
+        if (runtime.conversationId == conversationId &&
+            runtime.knownAcpSessionIds.contains(normalizedSessionId)) {
+          return runtime.mode;
+        }
       }
     }
     return null;
@@ -345,9 +393,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
       conversationId: conversationId,
       mode: mode,
     );
-    if (existingRuntime?.historyEditPending == true) {
-      throw StateError('Conversation history edit is still being committed');
-    }
     final alreadyStarted =
         existingBinding?.conversationId == conversationId &&
         existingBinding?.mode == mode &&
@@ -390,15 +435,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         )) {
       return false;
     }
-    return bindConversationAcpSession(conversationId: conversationId,
-        mode: mode, sessionId: normalizedSessionId);
-  }
-
-  /// Selecting an existing session establishes observation before any prompt.
-  bool bindConversationAcpSession({required int conversationId,
-      required String mode, required String sessionId}) {
-    final normalizedSessionId = sessionId.trim();
-    if (normalizedSessionId.isEmpty) return false;
     final runtime = runtimeFor(conversationId: conversationId, mode: mode);
     if (runtime == null) return false;
     final currentSessionId = runtime.activeAcpSessionId?.trim() ?? '';
@@ -615,7 +651,35 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     String mode = kChatRuntimeModeAgent,
     ConversationModel? conversation,
   }) {
+    final result = _applyAgentEvent(
+      conversationId: conversationId,
+      event: event,
+      mode: mode,
+      conversation: conversation,
+    );
+    if (result.handled) notifyListeners();
+    return result;
+  }
+
+  AgentReduceResult _applyAgentEvent({
+    required int conversationId,
+    required Map<String, dynamic> event,
+    required String mode,
+    ConversationModel? conversation,
+  }) {
     ensureInitialized();
+    if (_hiddenNaHistoryViews.contains(conversationId)) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
+    final incomingSession = acpEventSessionId(event);
+    if (incomingSession?.startsWith('na:') == true &&
+        AssistsMessageService.hasNaHistoryOwnerSnapshot &&
+        (AssistsMessageService.visibleNaOwnerPrefix == null ||
+            !incomingSession!.startsWith(
+              AssistsMessageService.visibleNaOwnerPrefix!,
+            ))) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
     final runtime = ensureRuntime(
       conversationId: conversationId,
       mode: mode,
@@ -653,7 +717,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
       sessionId: eventSessionId,
       turnId: eventTurnId,
       allowCompletedTurnMetadata: carriesFinalTurnUsage,
-      allowHistoryUpsert: acpEventIsItemUpsert(event),
       allowSessionAdmission: allowsHostSessionAdmission,
     )) {
       return const AgentReduceResult(handled: false, affectsActiveTurn: false);
@@ -672,16 +735,9 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         : activeAcpTurnBefore.isEmpty
         ? runtime.isAiResponding && dispatchTurnBefore.isNotEmpty
         : activeAcpTurnBefore == eventTurnId;
-    final activeRunBeforeUpdate = runtime.activeRunId;
     final result = _agentEventReducer
         .reduce(runtime: runtime, event: event)
         .copyWith(affectsActiveTurn: affectsActiveTurn);
-    // A v2 state notification reaches the same completion owner as a v1
-    // PromptResponse. Release the corresponding dispatch binding as well.
-    if (result.handled && affectsActiveTurn && result.method == 'session/prompt' &&
-        activeRunBeforeUpdate != null && !runtime.isAiResponding) {
-      _taskBindings.remove(activeRunBeforeUpdate);
-    }
     if (result.handled) {
       _annotateAgentMessages(runtime, event, result);
       _notifyAcpVoicePlayback(runtime, event, result);
@@ -699,7 +755,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           );
         }
       }
-      notifyListeners();
       if (!isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
         schedulePersistRuntimeConversation(
           conversationId: conversationId,
@@ -843,32 +898,23 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         update?['entryId'],
         update?['messageId'],
       ]);
-      // 每条 delta 都会走到这里。原来先 where(...) 造一个完整候选列表再取第一条，
-      // 长会话（上千条消息）每个 delta 都是 O(n) 的全表扫描加一次列表分配。
-      // messages 是「最新在前」，直接线性找第一条匹配即可（正常情况几步命中）。
-      ChatMessageModel? firstAssistantWhere(
-        bool Function(ChatMessageModel message) test,
-      ) {
-        for (final message in runtime.messages) {
-          if (message.type != 1 || message.user != 2) continue;
-          if (taskId != null &&
-              message.streamMeta?['parentTaskId']?.toString() != taskId) {
-            continue;
-          }
-          if (test(message)) return message;
-        }
-        return null;
-      }
-
+      final candidates = runtime.messages.where(
+        (message) =>
+            message.type == 1 &&
+            message.user == 2 &&
+            (taskId == null ||
+                message.streamMeta?['parentTaskId']?.toString() == taskId),
+      );
       if (itemId != null) {
-        assistantMessage = firstAssistantWhere(
+        assistantMessage = candidates.cast<ChatMessageModel?>().firstWhere(
           (message) =>
-              message.id == itemId ||
+              message!.id == itemId ||
               message.id.contains(itemId) ||
               message.streamMeta?['entryId']?.toString() == itemId,
+          orElse: () => null,
         );
       }
-      assistantMessage ??= firstAssistantWhere((_) => true);
+      assistantMessage ??= candidates.isEmpty ? null : candidates.first;
       final assistantText = assistantMessage?.text?.trim() ?? '';
       if (assistantMessage == null || assistantText.isEmpty) {
         return;
@@ -1089,6 +1135,8 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     _runtimes.clear();
     _taskBindings.clear();
     _ephemeralRuntimeKeys.clear();
+    _hiddenNaHistoryViews.clear();
+    _latestAgentEventProjection = null;
   }
 
   void clearConversationRuntimeSession({
@@ -1185,7 +1233,9 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
       (_, binding) =>
           binding.conversationId == conversationId && binding.mode == mode,
     );
-    _runtimeLastTouchedAt.remove(_runtimeKey(conversationId: conversationId, mode: mode));
+    _runtimeLastTouchedAt.remove(
+      _runtimeKey(conversationId: conversationId, mode: mode),
+    );
     final removed = _runtimes.remove(
       _runtimeKey(conversationId: conversationId, mode: mode),
     );

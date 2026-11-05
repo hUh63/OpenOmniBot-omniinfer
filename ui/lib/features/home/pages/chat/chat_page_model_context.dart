@@ -74,9 +74,8 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
       return;
     }
 
-    final normalConversationId = _modeState(
-      ChatPageMode.normal,
-    ).currentConversationId;
+    final normalConversationId = _modeState(ChatPageMode.normal)
+        .currentConversationId;
     if (shouldClearPersisted && normalConversationId != null) {
       await ConversationModelOverrideService.clearOverride(
         normalConversationId,
@@ -120,15 +119,10 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
       });
       return;
     }
-    // 捕获调用时刻的会话目标代际号：快速连续切会话时，上一个会话的 model override
-    // 读盘可能后返回并覆盖当前会话的模型 chip / 思考强度（进而让下一次发送带上
-    // 错误的 provider profile）。同 mixin 的其它路径都做了这个校验，这里补齐。
-    final requestId = _conversationTargetRequestId;
     final results = await Future.wait<dynamic>([
       ConversationModelOverrideService.getOverride(conversationId),
       ConversationReasoningEffortService.getEffort(conversationId),
     ]);
-    if (!_isConversationTargetRequestCurrent(requestId)) return;
     final override = results[0] as ConversationModelOverride?;
     final reasoningEffort = results[1] as String?;
     if (!mounted) return;
@@ -241,9 +235,8 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
       providerProfileId: providerProfileId,
       modelId: modelId,
     );
-    final normalConversationId = _modeState(
-      ChatPageMode.normal,
-    ).currentConversationId;
+    final normalConversationId = _modeState(ChatPageMode.normal)
+        .currentConversationId;
 
     if (normalConversationId == null) {
       if (!mounted) return;
@@ -296,9 +289,8 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
     if (normalizedEffort == null || _activeMode != ChatPageMode.normal) {
       return;
     }
-    final normalConversationId = _modeState(
-      ChatPageMode.normal,
-    ).currentConversationId;
+    final normalConversationId = _modeState(ChatPageMode.normal)
+        .currentConversationId;
     if (normalConversationId == null) {
       if (!mounted) return;
       setState(() {
@@ -330,9 +322,8 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
     if (!hasOverride) {
       return;
     }
-    final normalConversationId = _modeState(
-      ChatPageMode.normal,
-    ).currentConversationId;
+    final normalConversationId = _modeState(ChatPageMode.normal)
+        .currentConversationId;
     if (normalConversationId != null) {
       await ConversationModelOverrideService.clearOverride(
         normalConversationId,
@@ -455,6 +446,7 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
       // 已经打开或正在等待目录刷新，不重开。
       return;
     }
+    final targetGeneration = _conversationTargetRequestId;
     try {
       if (_showSlashCommandPanel ||
           _showModelMentionPanel ||
@@ -500,14 +492,15 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
             );
       final handle = showOverlayGlassPopup<ConversationModelSelection>(
         context: context,
+        sourceContext: anchorContext,
         anchor: anchorRect,
         builder: (handle) => ConversationModelSelectorContent(
           width: popupWidth,
           maxHeight: popupMaxHeight,
           loadLiveProviders: true,
           currentSelection: currentSelection,
-          footer: TextButton.icon(
-            onPressed: () async {
+          footer: OmniMenuItem(
+            onTap: () async {
               await handle.dismiss();
               if (!mounted) return;
               await GoRouterManager.pushForResult<void>(
@@ -515,8 +508,8 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
               );
               if (mounted) await _loadNormalChatModelContext();
             },
-            icon: const Icon(Icons.settings_outlined, size: 16),
-            label: Text(LegacyTextLocalizer.localize('配置模型连接')),
+            leading: const Icon(Icons.settings_outlined),
+            label: LegacyTextLocalizer.localize('配置模型连接'),
           ),
           // 软键盘"确定"提交搜索时:先打开 popup 的"一次性键盘隐藏豁免",再 unfocus
           // —— 这样 IME 塌陷不会被 DismissOverlayOnKeyboardHide 当作"用户想关 popup"
@@ -525,8 +518,7 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
             handle.keepOpenOnNextKeyboardHide();
             FocusManager.instance.primaryFocus?.unfocus();
           },
-          // dismiss 内部会立刻 complete future,让下面 await 的逻辑并行起跑;
-          // 收起动画在后台跑完,UI 更响应。
+          // Restore the source before applying a selection that may rebuild it.
           onSelect: (selection) => unawaited(handle.dismiss(selection)),
         ),
       );
@@ -536,7 +528,10 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
 
       try {
         final selected = await handle.future;
-        if (selected == null) {
+        await handle.closed;
+        if (!mounted ||
+            targetGeneration != _conversationTargetRequestId ||
+            selected == null) {
           return;
         }
         await _applyDispatchSceneModelSelection(
@@ -613,9 +608,6 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
         return;
       if (selectionMode == ChatPageMode.agent) {
         _activeAgentModelId = modelId;
-      }
-      if (selectionMode == ChatPageMode.agent && !updateExistingSession) {
-        await AgentRuntimeService.disconnect();
       }
       await _loadNormalChatModelContext();
       if (_activeMode == ChatPageMode.agent) {
@@ -742,13 +734,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: isCurrentProvider
-              ? (context.isDarkTheme
-                    ? Color.lerp(
-                        palette.surfaceSecondary.withValues(alpha: 0.46),
-                        palette.accentPrimary,
-                        0.14,
-                      )!
-                    : const Color(0xFF2C7FEB).withValues(alpha: 0.10))
+              ? palette.surfaceSecondary
               : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
         ),
@@ -761,9 +747,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 12,
-                  color: context.isDarkTheme
-                      ? palette.textSecondary
-                      : const Color(0xFF64748B),
+                  color: palette.textSecondary,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -772,9 +756,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
               '$modelCount',
               style: TextStyle(
                 fontSize: 11,
-                color: context.isDarkTheme
-                    ? palette.textTertiary
-                    : const Color(0xFF9AA4B6),
+                color: palette.textTertiary,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -783,9 +765,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
               Icon(
                 Icons.check_circle_rounded,
                 size: 13,
-                color: context.isDarkTheme
-                    ? palette.accentPrimary
-                    : const Color(0xFF2C7FEB),
+                color: palette.accentPrimary,
               ),
             ],
           ],
@@ -820,11 +800,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: selected
-                  ? (context.isDarkTheme
-                        ? palette.segmentThumb
-                        : const Color(0xFFEAF3FF))
-                  : Colors.transparent,
+              color: selected ? palette.surfaceSecondary : Colors.transparent,
               borderRadius: BorderRadius.circular(12),
             ),
             child: Row(
@@ -836,9 +812,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13,
-                      color: context.isDarkTheme
-                          ? palette.textPrimary
-                          : const Color(0xFF1F2937),
+                      color: palette.textPrimary,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -847,9 +821,7 @@ class _ChatModelMentionPanelState extends State<_ChatModelMentionPanel> {
                   Icon(
                     Icons.check_rounded,
                     size: 15,
-                    color: context.isDarkTheme
-                        ? palette.accentPrimary
-                        : const Color(0xFF2C7FEB),
+                    color: palette.accentPrimary,
                   ),
               ],
             ),

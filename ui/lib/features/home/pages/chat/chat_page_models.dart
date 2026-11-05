@@ -12,13 +12,6 @@ import 'package:ui/models/conversation_model.dart';
 import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/services/agent_message_kinds.dart';
 
-/// Durable local Conversation ids are positive; remote-only projections use
-/// negative ids. A configured Bridge must never change an existing owner.
-bool usesRemoteCodexEventProjection({
-  required bool remoteConfigured,
-  required int? conversationId,
-}) => remoteConfigured && (conversationId == null || conversationId < 0);
-
 enum ThinkingStage {
   thinking(1),
   toolCall(2),
@@ -1078,12 +1071,12 @@ class BrowserUserscriptSummary {
 
   factory BrowserUserscriptSummary.fromMap(Map<dynamic, dynamic> raw) {
     return BrowserUserscriptSummary(
-      installedScripts: _browserMapList(
-        raw['installedScripts'],
-      ).map(BrowserUserscriptItem.fromMap).toList(growable: false),
-      currentPageMenuCommands: _browserMapList(
-        raw['currentPageMenuCommands'],
-      ).map(BrowserUserscriptMenuCommand.fromMap).toList(growable: false),
+      installedScripts: _browserMapList(raw['installedScripts'])
+          .map(BrowserUserscriptItem.fromMap)
+          .toList(growable: false),
+      currentPageMenuCommands: _browserMapList(raw['currentPageMenuCommands'])
+          .map(BrowserUserscriptMenuCommand.fromMap)
+          .toList(growable: false),
       pendingInstall: raw['pendingInstall'] == null
           ? null
           : BrowserUserscriptInstallPreview.fromMap(
@@ -1130,10 +1123,6 @@ class ChatBrowserSessionSnapshot {
     this.pendingDialog,
     this.permissionPrompt,
     this.userscriptSummary = const BrowserUserscriptSummary(),
-    this.aiControlEnabled = true,
-    this.lastAiAction = '',
-    this.lastAiActionAt = 0,
-    this.lastAiActionMutatesPage = false,
   });
 
   final bool available;
@@ -1163,25 +1152,6 @@ class ChatBrowserSessionSnapshot {
   final BrowserDialogPrompt? pendingDialog;
   final BrowserPermissionPrompt? permissionPrompt;
   final BrowserUserscriptSummary userscriptSummary;
-
-  /// AI 此刻是否被允许改变页面状态。用户一在浏览器里动手就会变成 false，
-  /// 面板上可以显式切回。
-  final bool aiControlEnabled;
-
-  /// AI 最近一次动作的描述，用于「AI 正在控制浏览器 · 点击…」这类提示。
-  final String lastAiAction;
-  final int lastAiActionAt;
-
-  /// 上一条 AI 动作是否真的改了页面（只读的读页面动作不该把面板弹出来）。
-  final bool lastAiActionMutatesPage;
-
-  /// AI 卡在需要人来处理的环节（原生弹窗、权限、外部打开、风控）。这种时候必须把
-  /// 浏览器面板摆出来，不能因为用户之前关过就一直藏着。
-  bool get needsUserAttention =>
-      pendingDialog != null ||
-      permissionPrompt != null ||
-      externalOpenPrompt != null ||
-      riskChallengeDetected;
 
   bool matchesWorkspace(String? candidateWorkspaceId) {
     final normalizedCandidate = candidateWorkspaceId?.trim() ?? '';
@@ -1219,10 +1189,6 @@ class ChatBrowserSessionSnapshot {
     BrowserDialogPrompt? pendingDialog,
     BrowserPermissionPrompt? permissionPrompt,
     BrowserUserscriptSummary? userscriptSummary,
-    bool? aiControlEnabled,
-    String? lastAiAction,
-    int? lastAiActionAt,
-    bool? lastAiActionMutatesPage,
   }) {
     return ChatBrowserSessionSnapshot(
       available: available ?? this.available,
@@ -1254,11 +1220,6 @@ class ChatBrowserSessionSnapshot {
       pendingDialog: pendingDialog ?? this.pendingDialog,
       permissionPrompt: permissionPrompt ?? this.permissionPrompt,
       userscriptSummary: userscriptSummary ?? this.userscriptSummary,
-      aiControlEnabled: aiControlEnabled ?? this.aiControlEnabled,
-      lastAiAction: lastAiAction ?? this.lastAiAction,
-      lastAiActionAt: lastAiActionAt ?? this.lastAiActionAt,
-      lastAiActionMutatesPage:
-          lastAiActionMutatesPage ?? this.lastAiActionMutatesPage,
     );
   }
 
@@ -1314,21 +1275,21 @@ class ChatBrowserSessionSnapshot {
       recommendedNextAction: normalized['recommendedNextAction']?.toString(),
       throttleDelayMs: _browserInt(normalized['throttleDelayMs']),
       activeDownloadCount: _browserInt(normalized['activeDownloadCount']) ?? 0,
-      tabs: _browserMapList(
-        normalized['tabs'],
-      ).map(AgentBrowserTab.fromMap).toList(growable: false),
-      bookmarks: _browserMapList(
-        normalized['bookmarks'],
-      ).map(AgentBrowserHistoryEntry.fromMap).toList(growable: false),
-      history: _browserMapList(
-        normalized['history'],
-      ).map(AgentBrowserHistoryEntry.fromMap).toList(growable: false),
-      sessionHistory: _browserMapList(
-        normalized['sessionHistory'],
-      ).map(AgentBrowserHistoryEntry.fromMap).toList(growable: false),
-      downloads: _browserMapList(
-        normalized['downloads'],
-      ).map(BrowserDownloadItem.fromMap).toList(growable: false),
+      tabs: _browserMapList(normalized['tabs'])
+          .map(AgentBrowserTab.fromMap)
+          .toList(growable: false),
+      bookmarks: _browserMapList(normalized['bookmarks'])
+          .map(AgentBrowserHistoryEntry.fromMap)
+          .toList(growable: false),
+      history: _browserMapList(normalized['history'])
+          .map(AgentBrowserHistoryEntry.fromMap)
+          .toList(growable: false),
+      sessionHistory: _browserMapList(normalized['sessionHistory'])
+          .map(AgentBrowserHistoryEntry.fromMap)
+          .toList(growable: false),
+      downloads: _browserMapList(normalized['downloads'])
+          .map(BrowserDownloadItem.fromMap)
+          .toList(growable: false),
       downloadSummary: BrowserDownloadSummary.fromMap(
         _browserMap(normalized['downloadSummary']),
       ),
@@ -1350,14 +1311,6 @@ class ChatBrowserSessionSnapshot {
       userscriptSummary: BrowserUserscriptSummary.fromMap(
         _browserMap(normalized['userscriptSummary']),
       ),
-      // 旧版本快照没有这几个字段：缺省视为「AI 可以控制」，避免一升级就显示已暂停。
-      aiControlEnabled: normalized['aiControlEnabled'] == null
-          ? true
-          : _browserBool(normalized['aiControlEnabled']),
-      lastAiAction: _browserString(normalized['lastAiAction']),
-      lastAiActionAt: _browserInt(normalized['lastAiActionAt']) ?? 0,
-      lastAiActionMutatesPage:
-          _browserBool(normalized['lastAiActionMutatesPage']),
     );
   }
 
@@ -1482,8 +1435,7 @@ class HdPadPaneLayout {
   final double rightWidth;
 }
 
-const double kHdPadMinShortestSide = 600;
-const double kHdPadMinLandscapeWidth = 960;
+const double kChatWorkspaceMinWidth = 720;
 const double kChatKeyboardComposerClearance = 10.0;
 const double kChatComposerEdgeInset = 24.0;
 
@@ -1545,23 +1497,24 @@ double resolveChatComposerKeyboardSpacer({
   return normalizedBottomInset + closingClearance;
 }
 
-bool isHdPadLandscapeViewport(Size size) {
-  return size.width > size.height &&
-      size.shortestSide >= kHdPadMinShortestSide &&
-      size.width >= kHdPadMinLandscapeWidth;
+bool isChatWorkspaceViewport(Size size) {
+  // Choose columns from available width; short windows and the IME do not
+  // change the layout merely by reducing height.
+  return size.width.isFinite && size.width >= kChatWorkspaceMinWidth;
 }
 
 class HdPadPaneLayoutResolver {
   const HdPadPaneLayoutResolver();
 
-  static const double dividerHitWidth = 12;
+  static const double dividerHitWidth = 24;
   static const double defaultLeftWidth = 260;
   static const double minLeftWidth = 220;
   static const double maxLeftWidth = 360;
   static const double defaultRightWidth = 300;
   static const double minRightWidth = 240;
   static const double maxRightWidth = 420;
-  static const double minCenterWidth = 320;
+  static const double minCenterWidth = 420;
+  static const double threePaneMinWidth = 1120;
 
   HdPadPaneLayout resolve(
     double totalWidth, {
@@ -1570,13 +1523,18 @@ class HdPadPaneLayoutResolver {
     bool collapseLeftPane = false,
     bool collapseRightPane = false,
   }) {
-    final showLeftPane = !collapseLeftPane;
-    final showRightPane = !collapseRightPane;
+    final width = totalWidth.isFinite ? math.max(0.0, totalWidth) : 0.0;
+    // Narrow windows keep the transcript usable. The workspace can replace
+    // the conversation sidebar explicitly, without changing either owner.
+    final showLeftPane =
+        !collapseLeftPane &&
+        width >= minLeftWidth + minCenterWidth + dividerHitWidth;
+    final showRightPane =
+        !collapseRightPane &&
+        width >= minRightWidth + minCenterWidth + dividerHitWidth &&
+        (!showLeftPane || width >= threePaneMinWidth);
     final dividerCount = (showLeftPane ? 1 : 0) + (showRightPane ? 1 : 0);
-    final availableWidth = math.max(
-      0,
-      totalWidth - dividerHitWidth * dividerCount,
-    );
+    final availableWidth = math.max(0, width - dividerHitWidth * dividerCount);
 
     var leftWidth = showLeftPane
         ? (preferredLeftWidth ?? defaultLeftWidth)

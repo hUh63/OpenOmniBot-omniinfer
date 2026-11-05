@@ -173,19 +173,21 @@ List<AgentRunTimelineEntry> buildAgentRunTimelineEntries(
       .toSet();
   final emittedTaskIds = <String>{};
   final entries = <AgentRunTimelineEntry>[];
-
-  // 先单遍把「候选消息」按 taskId 分组。原来每个新 taskId 都要对整份消息
-  // 列表过滤一次（O(N × 轮次数)），长会话每次新增一张卡片、每翻一屏都要在
-  // UI 线程重算几十万次字符串比较，这是长会话掉帧的主因。
-  final taskMessagesByTaskId = <String, List<ChatMessageModel>>{};
+  // Index once: loading another history page must not rescan the entire
+  // transcript for every turn (including turns with no visible group).
+  final messagesByTask = <String, List<ChatMessageModel>>{};
+  final taskIds = <String?>[];
   for (final message in renderMessages) {
-    if (!_isAgentRunCandidateMessage(message)) continue;
-    final messageTaskId = agentRunId(message);
-    if (messageTaskId == null) continue;
-    (taskMessagesByTaskId[messageTaskId] ??= <ChatMessageModel>[]).add(message);
+    final taskId = agentRunId(message);
+    taskIds.add(taskId);
+    if (taskId != null) {
+      (messagesByTask[taskId] ??= []).add(message);
+    }
   }
+  final groups = <String, AgentRunTimelineGroup?>{};
 
-  for (final message in renderMessages) {
+  for (var index = 0; index < renderMessages.length; index++) {
+    final message = renderMessages[index];
     // Artifact metadata is already carried by the corresponding tool card and
     // powers the activity strip above the composer. Rendering the reducer's
     // standalone compatibility card as well puts a large duplicate file card
@@ -193,7 +195,7 @@ List<AgentRunTimelineEntry> buildAgentRunTimelineEntries(
     if (_cardType(message) == 'artifact_card') {
       continue;
     }
-    final taskId = agentRunId(message);
+    final taskId = taskIds[index];
     if (taskId == null) {
       entries.add(AgentRunTimelineEntry.message(message));
       continue;
@@ -205,11 +207,14 @@ List<AgentRunTimelineEntry> buildAgentRunTimelineEntries(
       continue;
     }
 
-    final group = _buildTimelineGroup(
-      taskMessagesByTaskId[taskId] ?? const <ChatMessageModel>[],
-      taskId: taskId,
-      isActive: normalizedActiveTaskIds.contains(taskId),
-      conversationAgentId: conversationAgentId,
+    final group = groups.putIfAbsent(
+      taskId,
+      () => _buildTimelineGroup(
+        messagesByTask[taskId]!,
+        taskId: taskId,
+        isActive: normalizedActiveTaskIds.contains(taskId),
+        conversationAgentId: conversationAgentId,
+      ),
     );
     if (group == null) {
       entries.add(AgentRunTimelineEntry.message(message));
@@ -579,10 +584,7 @@ AgentRunTimelineGroup? _buildTimelineGroup(
   String? conversationAgentId,
 }) {
   final taskMessages = _stabilizeTaskMessagesNewestFirst(
-    messages
-        .where((message) => agentRunId(message) == taskId)
-        .where(_isAgentRunCandidateMessage)
-        .toList(growable: false),
+    messages.where(_isAgentRunCandidateMessage).toList(growable: false),
   );
   if (taskMessages.isEmpty) {
     return null;

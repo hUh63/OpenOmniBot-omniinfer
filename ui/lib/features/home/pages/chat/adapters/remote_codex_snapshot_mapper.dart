@@ -1,98 +1,5 @@
 part of '../chat_page.dart';
 
-String _remoteCodexThreadContentSignature(Map<String, dynamic> response) {
-  final thread = _asAgentMap(response['thread']) ?? response;
-  final turns = _remoteCodexTurnsFromThreadResponse(response);
-  final buffer = StringBuffer()
-    ..write(_asAgentString(thread['id'] ?? response['threadId']) ?? '')
-    ..write('|');
-  if (turns == null) {
-    buffer
-      ..write(
-        _remoteCodexTimeValueMs(thread['updatedAt'] ?? thread['updated_at']) ??
-            '',
-      )
-      ..write('|')
-      ..write(_asAgentString(thread['preview'] ?? response['preview']) ?? '');
-    return buffer.toString();
-  }
-  for (var turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
-    final turn = _asAgentMap(turns[turnIndex]);
-    if (turn == null) {
-      continue;
-    }
-    buffer
-      ..write(_remoteCodexTurnIdAt(turns, turnIndex) ?? '')
-      ..write(':')
-      ..write(_remoteCodexStatusText(turn['status'] ?? turn['state']) ?? '')
-      ..write(':')
-      ..write(
-        _remoteCodexTimeValueMs(turn['startedAt'] ?? turn['started_at']) ?? '',
-      )
-      ..write(':')
-      ..write(
-        _remoteCodexTimeValueMs(turn['completedAt'] ?? turn['completed_at']) ??
-            '',
-      )
-      ..write('|');
-    final rawItems = _remoteCodexHistoricalItemsFromTurn(turn);
-    for (var itemIndex = 0; itemIndex < rawItems.length; itemIndex += 1) {
-      final item = rawItems[itemIndex];
-      buffer
-        ..write(_asAgentString(item['id']) ?? '$turnIndex-$itemIndex')
-        ..write(',')
-        ..write(_asAgentString(item['type']) ?? '')
-        ..write(',')
-        ..write(_remoteCodexStatusText(item['status'] ?? item['state']) ?? '')
-        ..write(',')
-        ..write(
-          _remoteCodexExtractText(
-            item['summary'] ??
-                item['text'] ??
-                item['message'] ??
-                item['content'] ??
-                item['output'] ??
-                item['command'] ??
-                item['cmd'] ??
-                item['path'],
-          ).hashCode,
-        )
-        ..write(';');
-    }
-  }
-  return buffer.toString();
-}
-
-String _remoteCodexSnapshotSignature({
-  required String threadId,
-  required List<ChatMessageModel> messages,
-  required ConversationModel conversation,
-  required bool isAiResponding,
-  required String? activeTaskId,
-}) {
-  final buffer = StringBuffer()
-    ..write(threadId)
-    ..write('|')
-    ..write(conversation.updatedAt)
-    ..write('|')
-    ..write(isAiResponding ? '1' : '0')
-    ..write('|')
-    ..write(activeTaskId ?? '')
-    ..write('|')
-    ..write(messages.length);
-  for (final message in messages) {
-    final attachments = message.content?['attachments'];
-    buffer
-      ..write('|')
-      ..write(message.id)
-      ..write(':')
-      ..write(message.text?.hashCode ?? message.cardData?.hashCode ?? 0)
-      ..write(':')
-      ..write(attachments == null ? 0 : _safeAgentJson(attachments).hashCode);
-  }
-  return buffer.toString();
-}
-
 List<ChatMessageModel> _mergeRemoteCodexSnapshotMessages({
   required List<ChatMessageModel> snapshotMessages,
   required List<ChatMessageModel> existingMessages,
@@ -116,10 +23,22 @@ List<ChatMessageModel> _mergeRemoteCodexSnapshotMessages({
     snapshotUserTextCounts: _remoteUserMessageTextCounts(snapshotMessages),
   );
   final snapshotTaskIds = _remoteSnapshotTaskIds(snapshotMessages);
+  // A later authoritative terminal snapshot may settle a remote turn after
+  // the phone's prompt transport failed. Retire only that turn's local error
+  // placeholder; a running/incomplete snapshot cannot erase the failure.
+  final settledTaskIds = <String>{
+    for (final message in snapshotMessages)
+      if (const {
+            'end_turn',
+            'cancelled',
+          }.contains(message.streamMeta?['stopReason']) &&
+          _messageTaskId(message) != null)
+        _messageTaskId(message)!,
+  };
   final mergedById = <String, ChatMessageModel>{};
   for (final snapshot in snapshotMessages) {
     final existing = existingById[snapshot.id];
-    mergedById[snapshot.id] = canonicalizeAgentHistoryMessage(
+    var merged = canonicalizeAgentHistoryMessage(
       existing != null &&
               _shouldPreferExistingRemoteMessage(
                 existing: existing,
@@ -130,9 +49,34 @@ List<ChatMessageModel> _mergeRemoteCodexSnapshotMessages({
           ? existing
           : snapshot,
     );
+    // Some servers store uploaded attachments as text references. Preserve the
+    // submitted content for this exact user-message ID when metadata is absent.
+    final localAttachments = existing?.content?['attachments'];
+    final remoteAttachments = snapshot.content?['attachments'];
+    if (existing?.user == 1 &&
+        existing?.type == 1 &&
+        snapshot.user == 1 &&
+        snapshot.type == 1 &&
+        localAttachments is List &&
+        localAttachments.isNotEmpty &&
+        (remoteAttachments is! List || remoteAttachments.isEmpty)) {
+      merged = merged.copyWith(
+        content: {
+          ...?merged.content,
+          'text': existing!.text ?? '',
+          'attachments': localAttachments,
+        },
+      );
+    }
+    mergedById[snapshot.id] = merged;
   }
   for (final existing in existingMessages) {
     if (snapshotById.containsKey(existing.id)) {
+      continue;
+    }
+    if (isAgentTurnFailureMessage(existing) &&
+        settledTaskIds.contains(_messageTaskId(existing)) &&
+        !(isAiResponding && _messageBelongsToTask(existing, activeTaskId))) {
       continue;
     }
     if (existing.type == 1 && existing.user == 1) {
@@ -427,6 +371,7 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
     return const <ChatMessageModel>[];
   }
   final chronological = <ChatMessageModel>[];
+  final terminalReasons = <String, String>{};
   final effectiveActiveTurnId =
       activeTurnId ??
       (active ? _remoteCodexLatestTurnIdFromThreadResponse(response) : null);
@@ -438,6 +383,10 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
     }
     final turnId =
         _remoteCodexTurnIdAt(rawTurns, turnIndex) ?? 'turn-$turnIndex';
+    final stopReason = _asAgentString(turn['stopReason']);
+    if (const {'end_turn', 'cancelled', 'error'}.contains(stopReason)) {
+      terminalReasons[turnId] = stopReason!;
+    }
     final isActiveTurn =
         active &&
         ((effectiveActiveTurnId != null && turnId == effectiveActiveTurnId) ||
@@ -446,7 +395,10 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
     final turnStartedAt =
         _remoteCodexTimeValueMs(turn['startedAt'] ?? turn['started_at']) ??
         DateTime.now().millisecondsSinceEpoch;
-    final rawItems = _remoteCodexHistoricalItemsFromTurn(turn);
+    final rawItems = (turn['items'] as List? ?? const [])
+        .map(_asAgentMap)
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
     if (rawItems.isEmpty) {
       continue;
     }
@@ -469,28 +421,22 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
             itemIndex,
       );
       if (itemType == 'userMessage') {
-        final userContent = _remoteCodexExtractUserMessageContent(
-          item['content'] ??
-              item['text'] ??
-              item['message'] ??
-              item['input'] ??
-              item['text_elements'] ??
-              item['parts'],
-        );
-        if (userContent.text.trim().isEmpty &&
-            userContent.attachments.isEmpty) {
-          continue;
-        }
+        // The host session/load boundary already imported legacy content and images.
+        final text = item['content'] as String? ?? '';
+        final attachments = item['attachments'] as List? ?? const [];
+        if (text.trim().isEmpty && attachments.isEmpty) continue;
+        // Adapters can retain the host's submitted message identity. This
+        // also covers retries where user and prompt ids are unrelated.
+        final messageId =
+            _asAgentString(item['hostMessageId']) ?? '$itemId-agent-user';
         final content = <String, dynamic>{
-          'text': userContent.text,
-          'id': '$itemId-agent-user',
+          'text': text,
+          'id': messageId,
+          if (attachments.isNotEmpty) 'attachments': attachments,
         };
-        if (userContent.attachments.isNotEmpty) {
-          content['attachments'] = userContent.attachments;
-        }
         chronological.add(
           ChatMessageModel(
-            id: '$itemId-agent-user',
+            id: messageId,
             type: 1,
             user: 1,
             content: content,
@@ -749,13 +695,23 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
           toolInfo.toolType,
           itemType: itemType,
         );
-        final cardId = '$itemId-agent-$toolKind';
+        // ACP snapshots retain the same session/tool identity as live updates.
+        // Legacy snapshots without that identity keep their existing entry id.
+        final identity = AgentToolIdentity.fromMaps(raw: item);
+        final cardId = identity.cardId(
+          suffix: toolKind,
+          fallback: '$itemId-agent-$toolKind',
+        );
         final itemActivity = _remoteCodexActivityFromValue(
           item['status'] ?? item['state'],
         );
         final isRunning = isActiveTurn && itemActivity?.active != false;
         final normalizedStatus = toolInfo.status == 'running' && !isRunning
-            ? 'success'
+            ? switch (stopReason) {
+                'cancelled' => 'cancelled',
+                'error' => 'error',
+                _ => 'success',
+              }
             : toolInfo.status;
         final status = isRunning ? 'running' : normalizedStatus;
         final toolTitle = toolInfo.toolTitle;
@@ -811,6 +767,12 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
           'displayName': toolInfo.displayName,
           'toolTitle': toolTitle,
           'cardId': cardId,
+          if (identity.hasAcpIdentity) ...{
+            'sessionId': identity.sessionId,
+            'turnId': identity.turnId ?? turnId,
+            'toolCallId': identity.toolCallId,
+            'toolKey': identity.toolKey,
+          },
           'toolType': toolInfo.toolType,
           if (toolInfo.serverName != null) 'serverName': toolInfo.serverName,
           'status': status,
@@ -860,7 +822,14 @@ List<ChatMessageModel> _remoteCodexMessagesFromThreadResponse(
       )
       .map(
         (message) => _withAcpAgentIdentity(
-          message,
+          terminalReasons.containsKey(_messageTaskId(message))
+              ? message.copyWith(
+                  streamMeta: {
+                    ...?message.streamMeta,
+                    'stopReason': terminalReasons[_messageTaskId(message)],
+                  },
+                )
+              : message,
           agentId: agentId,
           agentName: agentName,
         ),

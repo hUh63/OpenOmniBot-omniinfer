@@ -1,12 +1,14 @@
 import 'dart:async';
 
+import 'package:ui/widgets/flclash/popup.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/settings_ui.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/widgets/glass_popup.dart';
 import 'package:ui/widgets/conversation_model_selector.dart';
 import 'package:ui/services/model_provider_config_service.dart';
-import 'package:ui/widgets/omni_glass.dart';
 import 'package:ui/theme/theme_context.dart';
 
 /// Labels are presentation only; IDs, values and types remain ACP-owned.
@@ -41,12 +43,11 @@ List<Map<String, dynamic>> acpConfigOptions(Map<String, dynamic> response) =>
         .map((option) => Map<String, dynamic>.from(option))
         .toList();
 
-typedef AcpConfigWriter =
-    Future<Map<String, dynamic>> Function(
-      String sessionId,
-      String configId,
-      Object value,
-    );
+typedef AcpConfigWriter = Future<Map<String, dynamic>> Function(
+  String sessionId,
+  String configId,
+  Object value,
+);
 
 class AcpConfigButton extends StatefulWidget {
   const AcpConfigButton({
@@ -57,6 +58,8 @@ class AcpConfigButton extends StatefulWidget {
     required this.isRunning,
     this.onVisibilityChanged,
     this.configureModel,
+    this.presentationIdentity,
+    this.modelLabel,
   });
   final Future<Map<String, dynamic>> Function() load;
   final Future<Map<String, dynamic>> Function()? refresh;
@@ -64,18 +67,68 @@ class AcpConfigButton extends StatefulWidget {
   final bool isRunning;
   final ValueChanged<bool>? onVisibilityChanged;
   final Future<void> Function(BuildContext anchorContext)? configureModel;
+  final Object? presentationIdentity;
+
+  /// Actual selection supplied by the conversation/runtime owner. An absent
+  /// value is shown as “Model”, never as an invented automatic selection.
+  final String? modelLabel;
 
   @override
-  State<AcpConfigButton> createState() => _AcpConfigButtonState();
+  State<AcpConfigButton> createState() => AcpConfigButtonState();
 }
 
-class _AcpConfigButtonState extends State<AcpConfigButton> {
+class AcpConfigButtonState extends State<AcpConfigButton> {
   OverlayGlassPopupHandle<void>? _popup;
+  String? _returnedModelLabel;
+  bool _openingSharedSelector = false;
+
+  Future<Map<String, dynamic>> _projectConfigResponse(
+    Future<Map<String, dynamic>> response,
+    Object? identity,
+  ) async {
+    final result = await response;
+    if (!mounted || identity != widget.presentationIdentity) return result;
+    for (final option in acpConfigOptions(result)) {
+      if (option['category'] != 'model' && option['id'] != 'model') continue;
+      final value = option['currentValue']?.toString().trim() ?? '';
+      if (value.isEmpty) continue;
+      final choices = <Map>[];
+      for (final item
+          in (option['options'] as List? ?? const []).whereType<Map>()) {
+        if (item['options'] is List) {
+          choices.addAll((item['options'] as List).whereType<Map>());
+        } else {
+          choices.add(item);
+        }
+      }
+      final current = choices
+          .where((item) => item['value']?.toString() == value)
+          .firstOrNull;
+      final label = current?['name']?.toString().trim();
+      setState(
+        () => _returnedModelLabel = label?.isNotEmpty == true ? label : value,
+      );
+      break;
+    }
+    return result;
+  }
 
   @override
   void didUpdateWidget(covariant AcpConfigButton oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.isRunning != oldWidget.isRunning) unawaited(_popup?.dismiss());
+    if (widget.modelLabel != oldWidget.modelLabel ||
+        widget.presentationIdentity != oldWidget.presentationIdentity) {
+      _returnedModelLabel = null;
+    }
+    if (widget.isRunning != oldWidget.isRunning ||
+        widget.presentationIdentity != oldWidget.presentationIdentity) {
+      final popup = _popup;
+      // didUpdateWidget runs during build; dismissing the overlay immediately
+      // can notify an animation outside the current build subtree.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(popup?.dismiss());
+      });
+    }
   }
 
   @override
@@ -84,27 +137,44 @@ class _AcpConfigButtonState extends State<AcpConfigButton> {
     super.dispose();
   }
 
-  Future<void> _open(BuildContext anchorContext) async {
-    if (_popup != null) return;
+  Future<void> open(
+    BuildContext anchorContext, {
+    bool preferBelow = false,
+  }) async {
+    if (_popup != null || _openingSharedSelector) return;
     final anchor = glassPopupAnchorFromContext(anchorContext);
     if (anchor == null) return;
+    final identity = widget.presentationIdentity;
     final handle = showOverlayGlassPopup<void>(
       context: context,
+      sourceContext: anchorContext,
       anchor: anchor,
-      preferBelow: false,
-      transitionDuration: Duration.zero,
-      reverseTransitionDuration: Duration.zero,
+      preferBelow: preferBelow,
       builder: (_) => AcpConfigPanel(
-        load: widget.load,
-        refresh: widget.refresh,
-        write: widget.write,
+        load: () => _projectConfigResponse(widget.load(), identity),
+        refresh: widget.refresh == null
+            ? null
+            : () => _projectConfigResponse(widget.refresh!(), identity),
+        write: (session, option, value) => _projectConfigResponse(
+          widget.write(session, option, value),
+          identity,
+        ),
         readOnly: widget.isRunning,
         configureModel: widget.configureModel == null
             ? null
             : () async {
-                await _popup?.dismiss();
-                if (mounted && anchorContext.mounted) {
-                  await widget.configureModel!(anchorContext);
+                if (_openingSharedSelector) return;
+                _openingSharedSelector = true;
+                try {
+                  await _popup?.dismiss();
+                  if (mounted &&
+                      anchorContext.mounted &&
+                      identity == widget.presentationIdentity) {
+                    await widget.configureModel!(anchorContext);
+                  }
+                } finally {
+                  _openingSharedSelector = false;
+                  if (mounted) widget.onVisibilityChanged?.call(false);
                 }
               },
       ),
@@ -113,36 +183,72 @@ class _AcpConfigButtonState extends State<AcpConfigButton> {
     widget.onVisibilityChanged?.call(true);
     try {
       await handle.future;
+      await handle.closed;
     } finally {
       if (_popup == handle) _popup = null;
-      if (mounted) widget.onVisibilityChanged?.call(false);
+      if (mounted && !_openingSharedSelector) {
+        widget.onVisibilityChanged?.call(false);
+      }
     }
   }
 
   @override
-  Widget build(BuildContext context) => TextFieldTapRegion(
-    child: Builder(
-      builder: (anchor) => Tooltip(
-        message: Localizations.localeOf(context).languageCode == 'en'
-            ? 'Model & settings'
-            : '模型与参数',
-        child: InkWell(
-          key: const ValueKey('chat-acp-config-button'),
-          borderRadius: BorderRadius.circular(8),
-          onTap: () => _open(anchor),
-          child: SizedBox(
-            width: 28,
-            height: 28,
-            child: Icon(
-              LucideIcons.slidersHorizontal,
-              size: 20,
-              color: context.omniPalette.accentPrimary,
+  Widget build(BuildContext context) {
+    final english = Localizations.localeOf(context).languageCode == 'en';
+    final rawLabel = (_returnedModelLabel ?? widget.modelLabel ?? '').trim();
+    // Provider prefixes are redundant in this narrow control; the complete
+    // value remains available to accessibility and in the configuration panel.
+    final label = rawLabel.isEmpty
+        ? (english ? 'Model' : '模型')
+        : rawLabel.split('/').last;
+    final palette = context.omniPalette;
+    return TextFieldTapRegion(
+      child: FlClashPopupSource(
+        glass: false,
+        color: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        builder: (anchor) => Tooltip(
+          message: rawLabel.isEmpty
+              ? (english ? 'Model & settings' : '模型与参数')
+              : (english ? 'Model & settings: $rawLabel' : '模型与参数：$rawLabel'),
+          child: InkWell(
+            key: const ValueKey('chat-acp-config-button'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => open(anchor),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 144, minHeight: 36),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: palette.textSecondary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 3),
+                    Icon(
+                      LucideIcons.chevronDown,
+                      size: 13,
+                      color: palette.textSecondary,
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Shows every declared option, including unfamiliar options, without inventing defaults.
@@ -245,21 +351,19 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
     final label = acpConfigLabel(option, english: _english);
     final value = option['currentValue'];
     final palette = context.omniPalette;
-    final textStyle = TextStyle(
-      fontSize: 13,
-      fontWeight: FontWeight.w500,
-      color: palette.textPrimary,
-    );
     if (option['type'] == 'boolean') {
-      return SwitchListTile.adaptive(
-        key: ValueKey('acp-config-$id'),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-        dense: true,
-        visualDensity: VisualDensity.compact,
-        activeTrackColor: palette.accentPrimary,
-        title: Text(label, style: textStyle),
-        value: value == true,
-        onChanged: enabled ? (next) => _save(id, next) : null,
+      return MergeSemantics(
+        child: OmniMenuItem(
+          key: ValueKey('acp-config-$id'),
+          enabled: enabled,
+          onTap: enabled ? () => _save(id, value != true) : null,
+          label: label,
+          trailing: OmniSettingsSwitch(
+            value: value == true,
+            enabled: enabled,
+            onToggle: (next) => _save(id, next),
+          ),
+        ),
       );
     }
     final values = <Map>[];
@@ -281,64 +385,48 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
     final expanded = expandable && _expandedId == id;
     final isThought =
         option['category'] == 'thought_level' || id == 'reasoning_effort';
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        InkWell(
-          key: ValueKey('acp-config-$id'),
-          borderRadius: BorderRadius.circular(12),
-          onTap: !_loading && !_saving && expandable
-              ? () {
-                  if (option['category'] == 'model' &&
-                      widget.configureModel != null) {
-                    if (!widget.readOnly) unawaited(widget.configureModel!());
-                    return;
-                  }
-                  setState(() => _expandedId = expanded ? null : id);
-                  if (!expanded && option['category'] == 'model')
-                    unawaited(_load(refresh: true));
-                }
-              : null,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
-            child: Row(
-              children: [
-                Icon(
-                  isThought
-                      ? LucideIcons.brain
-                      : option['category'] == 'model'
-                      ? LucideIcons.sparkles
-                      : LucideIcons.slidersHorizontal,
-                  size: 16,
-                  color: palette.textSecondary,
-                ),
-                const SizedBox(width: 9),
-                Expanded(child: Text(label, style: textStyle)),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    currentLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: palette.textSecondary,
-                    ),
-                  ),
-                ),
-                if (expandable) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    LucideIcons.chevronRight,
-                    size: 14,
-                    color: palette.textTertiary,
-                  ),
-                ],
-              ],
+    return OmniMenuItem(
+      key: ValueKey('acp-config-$id'),
+      enabled: !_loading && !_saving && expandable,
+      onTap: !_loading && !_saving && expandable
+          ? () {
+              if (option['category'] == 'model' &&
+                  widget.configureModel != null) {
+                if (!widget.readOnly) unawaited(widget.configureModel!());
+                return;
+              }
+              setState(() => _expandedId = expanded ? null : id);
+              if (!expanded && option['category'] == 'model') {
+                unawaited(_load(refresh: true));
+              }
+            }
+          : null,
+      child: Row(
+        children: [
+          Icon(
+            isThought
+                ? LucideIcons.brain
+                : option['category'] == 'model'
+                ? LucideIcons.sparkles
+                : LucideIcons.slidersHorizontal,
+          ),
+          const SizedBox(width: OmniMenuStyle.iconGap),
+          Expanded(child: Text(label)),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              currentLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: palette.textSecondary),
             ),
           ),
-        ),
-      ],
+          if (expandable) ...[
+            const SizedBox(width: 4),
+            Icon(LucideIcons.chevronRight, color: palette.textTertiary),
+          ],
+        ],
+      ),
     );
   }
 
@@ -380,35 +468,11 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
         onSelectValue: _loading || _saving || widget.readOnly
             ? null
             : (value) => _save(selected['id'].toString(), value),
-        header: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 7, 10, 3),
-          child: InkWell(
-            key: const ValueKey('acp-config-back'),
-            borderRadius: BorderRadius.circular(10),
-            onTap: () => setState(() => _expandedId = null),
-            child: SizedBox(
-              height: 34,
-              child: Row(
-                children: [
-                  const SizedBox(
-                    width: 34,
-                    child: Icon(Icons.chevron_left_rounded, size: 20),
-                  ),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      acpConfigLabel(selected, english: _english),
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: palette.textPrimary,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+        header: OmniMenuItem(
+          key: const ValueKey('acp-config-back'),
+          onTap: () => setState(() => _expandedId = null),
+          leading: const Icon(Icons.chevron_left_rounded),
+          label: acpConfigLabel(selected, english: _english),
         ),
         footer: Column(
           mainAxisSize: MainAxisSize.min,
@@ -429,9 +493,8 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
         ),
       );
     }
-    return OmniGlassPanel(
+    return OmniMenuSurface(
       width: 280,
-      borderRadius: BorderRadius.circular(18),
       child: Material(
         color: Colors.transparent,
         child: ConstrainedBox(
@@ -443,7 +506,7 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
                     .clamp(150, 420),
           ),
           child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+            padding: EdgeInsets.zero,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -518,28 +581,24 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
                           option['category'] == 'thought_level' ||
                           option['id'] == 'reasoning_effort',
                     ))
-                  ListTile(
+                  OmniMenuItem(
                     key: const ValueKey('acp-reasoning-model-default'),
-                    dense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    leading: Icon(
-                      LucideIcons.brain,
-                      size: 16,
-                      color: palette.textSecondary,
-                    ),
-                    title: Text(
-                      _english ? 'Reasoning effort' : '思考强度',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: palette.textPrimary,
-                      ),
-                    ),
-                    trailing: Text(
-                      _english ? 'Model default' : '模型默认',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: palette.textSecondary,
-                      ),
+                    onTap: null,
+                    child: Row(
+                      children: [
+                        const Icon(LucideIcons.brain),
+                        const SizedBox(width: OmniMenuStyle.iconGap),
+                        Expanded(
+                          child: Text(_english ? 'Reasoning effort' : '思考强度'),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            _english ? 'Model default' : '模型默认',
+                            style: TextStyle(color: palette.textSecondary),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 if (_error != null)
@@ -555,14 +614,17 @@ class _AcpConfigPanelState extends State<AcpConfigPanel> {
                   ),
                 if ((_error != null || _options.isEmpty) &&
                     widget.configureModel != null)
-                  TextButton(
-                    onPressed: widget.readOnly ? null : widget.configureModel,
-                    child: Text(_english ? 'Choose model' : '选择模型'),
+                  OmniMenuItem(
+                    enabled: !widget.readOnly,
+                    onTap: widget.readOnly ? null : widget.configureModel,
+                    leading: const Icon(LucideIcons.sparkles),
+                    label: _english ? 'Choose model' : '选择模型',
                   ),
                 if (_error != null && _options.isEmpty)
-                  TextButton(
-                    onPressed: _load,
-                    child: Text(_english ? 'Reload' : '重新加载'),
+                  OmniMenuItem(
+                    onTap: _load,
+                    leading: const Icon(LucideIcons.refreshCw),
+                    label: _english ? 'Reload' : '重新加载',
                   ),
               ],
             ),

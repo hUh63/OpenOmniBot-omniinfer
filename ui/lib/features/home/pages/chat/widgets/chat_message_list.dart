@@ -45,9 +45,11 @@ class ChatMessageList extends StatefulWidget {
   final bool hasMore;
   final Set<String> activeAgentTurnIds;
   final bool useAcpPresentation;
+
+  /// Pure chat keeps reasoning and answers while hiding execution UI. Apply
+  /// this at the timeline cache boundary so the observable source stays live.
+  final bool hideToolCards;
   final String? activeAcpAgentId;
-  final Set<String>? expandedAgentRunTaskIds;
-  final ValueChanged<Set<String>>? onExpandedAgentRunTaskIdsChanged;
   final AppBackgroundVisualProfile visualProfile;
   final AppBackgroundConfig appearanceConfig;
   final bool showEmptyGreeting;
@@ -76,9 +78,8 @@ class ChatMessageList extends StatefulWidget {
     this.hasMore = false,
     this.activeAgentTurnIds = const <String>{},
     this.useAcpPresentation = false,
+    this.hideToolCards = false,
     this.activeAcpAgentId,
-    this.expandedAgentRunTaskIds,
-    this.onExpandedAgentRunTaskIdsChanged,
     this.visualProfile = AppBackgroundVisualProfile.defaultProfile,
     this.appearanceConfig = AppBackgroundConfig.defaults,
     this.showEmptyGreeting = true,
@@ -135,49 +136,27 @@ class _ChatLatestEdgeScrollPhysics extends ClampingScrollPhysics {
 }
 
 class _ChatMessageListState extends State<ChatMessageList> {
-  static const Duration _kAgentRunToggleAutoStickSuppression = Duration(
-    milliseconds: 420,
-  );
   bool _stickToBottomScheduled = false;
   bool _autoStickToLatest = true;
   bool _outerScrollWasUserDriven = false;
   bool _isAutoLoadingHistory = false;
-  final Set<String> _localExpandedAgentRunTaskIds = <String>{};
   static const double _latestEdgeTolerance = 48.0;
   static const double _manualLatestAttachTolerance = 2.0;
   static const double _historyLoadTriggerExtent = 180.0;
   ObservableChatMessageList? _observableMessages;
-  DateTime? _autoStickSuppressedUntil;
   List<AgentRunTimelineEntry>? _timelineEntriesCache;
   ObservableChatMessageList? _timelineCacheSource;
   int _timelineCacheStructureRevision = -1;
   Set<String>? _timelineCacheActiveTaskIds;
   String? _timelineCacheAgentId;
-  /// messageId → 下标。分组行原来对组内每条消息各做一次 List.indexWhere（线性），
-  /// 即每帧 O(消息总数 × 组内条数)。流式内容更新不改结构，所以按 structureRevision
-  /// 失效即可。
-  Map<String, int>? _messageIndexCache;
-  ObservableChatMessageList? _messageIndexCacheSource;
-  int _messageIndexCacheRevision = -1;
+  bool? _timelineCacheHideToolCards;
+  bool _timelineHasVisibleMessages = false;
   final Map<String, GlobalKey> _entryRowKeys = <String, GlobalKey>{};
   int _navigatorJumpSerial = 0;
   bool _navigatorJumpUserInterrupted = false;
   static const String _kListEntryKeyPrefix = 'chat-timeline-entry:';
-
-  Set<String> get _expandedAgentRunTaskIds =>
-      widget.expandedAgentRunTaskIds ?? _localExpandedAgentRunTaskIds;
-
-  bool get _isAutoStickTemporarilySuppressed {
-    final suppressedUntil = _autoStickSuppressedUntil;
-    if (suppressedUntil == null) {
-      return false;
-    }
-    if (DateTime.now().isBefore(suppressedUntil)) {
-      return true;
-    }
-    _autoStickSuppressedUntil = null;
-    return false;
-  }
+  static const _forwardSliverKey = ValueKey('chat-timeline-forward');
+  String? _historyAnchorEntryKey;
 
   @override
   void initState() {
@@ -198,17 +177,14 @@ class _ChatMessageListState extends State<ChatMessageList> {
     final scrollControllerChanged =
         oldWidget.scrollController != widget.scrollController;
     if (scrollControllerChanged) {
+      _historyAnchorEntryKey = null;
       _navigatorJumpSerial++;
       _autoStickToLatest = true;
       _outerScrollWasUserDriven = false;
-      _autoStickSuppressedUntil = null;
       _scheduleStickToLatest();
       return;
     }
     if (_autoStickToLatest) {
-      return;
-    }
-    if (_isAutoStickTemporarilySuppressed) {
       return;
     }
     if (_isNearLatest(null, _manualLatestAttachTolerance)) {
@@ -262,7 +238,7 @@ class _ChatMessageListState extends State<ChatMessageList> {
   void _scheduleStickToBottom() => _scheduleStickToLatest();
 
   void _scheduleStickToLatest() {
-    if (!_autoStickToLatest || _isAutoStickTemporarilySuppressed) {
+    if (!_autoStickToLatest) {
       return;
     }
     if (_stickToBottomScheduled) {
@@ -301,6 +277,7 @@ class _ChatMessageListState extends State<ChatMessageList> {
     }
     _observableMessages?.removeListener(_handleObservableMessagesChanged);
     _observableMessages = nextObservable;
+    _timelineEntriesCache = null;
     _observableMessages?.addListener(_handleObservableMessagesChanged);
   }
 
@@ -308,7 +285,6 @@ class _ChatMessageListState extends State<ChatMessageList> {
     if (!mounted) {
       return;
     }
-    _collapseCancelledAgentRuns();
     // 流式追加文本这类 content 级变更由每行的 ValueListenableBuilder 精确
     // 刷新，这里不再整表 setState（否则每个 chunk 都会重跑时间线分组和
     // 全部可见行的 itemBuilder）。结构变化仍走完整重建。
@@ -320,7 +296,6 @@ class _ChatMessageListState extends State<ChatMessageList> {
       // was already visible: a list that is exactly back at the latest edge
       // must reattach before the new layout pushes that footer out of view.
       if (!_autoStickToLatest &&
-          !_isAutoStickTemporarilySuppressed &&
           _isNearLatest(null, _manualLatestAttachTolerance)) {
         _autoStickToLatest = true;
       }
@@ -330,135 +305,13 @@ class _ChatMessageListState extends State<ChatMessageList> {
     setState(() {});
   }
 
-  void _collapseCancelledAgentRuns() {
-    final collapsedTaskIds = _cancelledAgentRunTaskIds(
-      _expandedAgentRunTaskIds,
-    );
-    if (collapsedTaskIds.isEmpty) {
-      return;
-    }
-    final nextExpandedTaskIds = Set<String>.from(_expandedAgentRunTaskIds)
-      ..removeAll(collapsedTaskIds);
-    if (widget.expandedAgentRunTaskIds != null) {
-      widget.onExpandedAgentRunTaskIdsChanged?.call(nextExpandedTaskIds);
-      return;
-    }
-    _localExpandedAgentRunTaskIds
-      ..clear()
-      ..addAll(nextExpandedTaskIds);
-    widget.onExpandedAgentRunTaskIdsChanged?.call(nextExpandedTaskIds);
-  }
-
-  Set<String> _cancelledAgentRunTaskIds(Set<String> expandedTaskIds) {
-    if (expandedTaskIds.isEmpty) {
-      return const <String>{};
-    }
-    final normalizedExpandedTaskIds = expandedTaskIds
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .toSet();
-    if (normalizedExpandedTaskIds.isEmpty) {
-      return const <String>{};
-    }
-    final collapsedTaskIds = <String>{};
-    final messages = _observableMessages ?? widget.messages;
-    for (final message in messages) {
-      final taskId = agentRunParentTaskId(message);
-      if (taskId == null || !normalizedExpandedTaskIds.contains(taskId)) {
-        continue;
-      }
-      if (_isCancelledAgentRunMessage(message)) {
-        collapsedTaskIds.add(taskId);
-      }
-    }
-    return collapsedTaskIds;
-  }
-
-  bool _isCancelledAgentRunMessage(ChatMessageModel message) {
-    return message.type == 1 &&
-        message.user == 2 &&
-        isCancelledTaskText(message);
-  }
-
   void _handleParentScrollHandoff() {
     _autoStickToLatest = false;
     _outerScrollWasUserDriven = false;
   }
 
-  void _suspendAutoStickForAgentRunToggle() {
-    _autoStickToLatest = false;
-    _outerScrollWasUserDriven = false;
-    _autoStickSuppressedUntil = DateTime.now().add(
-      _kAgentRunToggleAutoStickSuppression,
-    );
-  }
-
-  void _toggleAgentRunGroup(String taskId) {
-    final normalizedTaskId = taskId.trim();
-    if (normalizedTaskId.isEmpty) {
-      return;
-    }
-    _suspendAutoStickForAgentRunToggle();
-    final nextExpandedTaskIds = Set<String>.from(_expandedAgentRunTaskIds);
-    final wasExpanded = nextExpandedTaskIds.contains(normalizedTaskId);
-    if (wasExpanded) {
-      nextExpandedTaskIds.remove(normalizedTaskId);
-    } else {
-      nextExpandedTaskIds.add(normalizedTaskId);
-    }
-    if (widget.expandedAgentRunTaskIds != null) {
-      widget.onExpandedAgentRunTaskIdsChanged?.call(nextExpandedTaskIds);
-    } else {
-      setState(() {
-        _localExpandedAgentRunTaskIds
-          ..clear()
-          ..addAll(nextExpandedTaskIds);
-      });
-      widget.onExpandedAgentRunTaskIdsChanged?.call(nextExpandedTaskIds);
-    }
-    if (!wasExpanded) {
-      // Expanding a run increases its height below the header. When the run
-      // is near the latest edge, the newly revealed reasoning can otherwise
-      // land underneath the composer and look like it was not restored at
-      // all. Scroll the whole run into view after the expansion animation has
-      // laid out, without changing the user's position when they are reading
-      // an older part of the conversation.
-      final wasNearLatest = _isNearLatest(null);
-      if (wasNearLatest) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          unawaited(_animateToEntryKey('agent-run-$normalizedTaskId'));
-        });
-      }
-    }
-  }
-
   double _distanceToOldest(ScrollMetrics metrics) {
     return (metrics.pixels - metrics.minScrollExtent).abs();
-  }
-
-  ScrollPosition? _closestAttachedPosition({
-    required double pixels,
-    required double minScrollExtent,
-    required double maxScrollExtent,
-  }) {
-    final positions = _attachedPositions();
-    if (positions.isEmpty) {
-      return null;
-    }
-    ScrollPosition? bestMatch;
-    var bestScore = double.infinity;
-    for (final position in positions) {
-      final score =
-          (position.pixels - pixels).abs() +
-          (position.minScrollExtent - minScrollExtent).abs() +
-          (position.maxScrollExtent - maxScrollExtent).abs();
-      if (score < bestScore) {
-        bestScore = score;
-        bestMatch = position;
-      }
-    }
-    return bestMatch;
   }
 
   void _maybeLoadOlderMessages(ScrollMetrics metrics) {
@@ -469,53 +322,21 @@ class _ChatMessageListState extends State<ChatMessageList> {
       return;
     }
     _isAutoLoadingHistory = true;
-    unawaited(
-      _loadOlderMessagesAndPreserveViewport(
-        anchorPixels: metrics.pixels,
-        anchorMinScrollExtent: metrics.minScrollExtent,
-        anchorMaxScrollExtent: metrics.maxScrollExtent,
-      ),
-    );
+    unawaited(_loadOlderMessages());
   }
 
-  Future<void> _loadOlderMessagesAndPreserveViewport({
-    required double anchorPixels,
-    required double anchorMinScrollExtent,
-    required double anchorMaxScrollExtent,
-  }) async {
+  Future<void> _loadOlderMessages() async {
     try {
       await widget.onLoadMore!.call();
       if (!mounted) return;
+      // The leading sliver grows away from a stable origin, so pagination
+      // needs no extent estimate or post-layout jump to preserve the viewport.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) {
-          _isAutoLoadingHistory = false;
-          return;
-        }
-        final position = _closestAttachedPosition(
-          pixels: anchorPixels,
-          minScrollExtent: anchorMinScrollExtent,
-          maxScrollExtent: anchorMaxScrollExtent,
-        );
-        if (position == null) {
-          _isAutoLoadingHistory = false;
-          return;
-        }
-        final extentDelta = position.maxScrollExtent - anchorMaxScrollExtent;
-        if (extentDelta.abs() >= 0.5) {
-          final targetOffset = (anchorPixels + extentDelta).clamp(
-            position.minScrollExtent,
-            position.maxScrollExtent,
-          );
-          if ((position.pixels - targetOffset).abs() >= 0.5) {
-            position.jumpTo(targetOffset);
-          }
-        }
         _isAutoLoadingHistory = false;
       });
     } catch (_) {
-      // 这个 Future 是被 unawaited 丢掉的：这里 rethrow 会变成无人接收的
-      // 异步错误（release 下被当崩溃上报）。标志已复位，安静收场即可。
       _isAutoLoadingHistory = false;
+      rethrow;
     }
   }
 
@@ -604,8 +425,8 @@ class _ChatMessageListState extends State<ChatMessageList> {
         duration: const Duration(milliseconds: 340),
         curve: _kJumpSettleCurve,
       );
-      // 落点校验：ensureVisible 中途被打断（历史分页的视口保持 jumpTo、
-      // 流式内容撑高行等）会停在半路，补一次短修正。
+      // 落点校验：流式内容撑高行等布局变化可能打断 ensureVisible，
+      // 导致动画停在半路，补一次短修正。
       if (!cancelled()) {
         await WidgetsBinding.instance.endOfFrame;
         final verifyContext = _entryRowKeys[entryKey]?.currentContext;
@@ -687,33 +508,32 @@ class _ChatMessageListState extends State<ChatMessageList> {
     return false;
   }
 
-  Map<String, int> _messageIndexMap(ObservableChatMessageList messages) {
-    final cached = _messageIndexCache;
-    if (cached != null &&
-        identical(_messageIndexCacheSource, messages) &&
-        _messageIndexCacheRevision == messages.structureRevision) {
-      return cached;
-    }
-    final map = <String, int>{};
-    for (var index = 0; index < messages.length; index++) {
-      // putIfAbsent 与 indexWhere 的「取第一个匹配」语义一致。
-      map.putIfAbsent(messages[index].id, () => index);
-    }
-    _messageIndexCache = map;
-    _messageIndexCacheSource = messages;
-    _messageIndexCacheRevision = messages.structureRevision;
-    return map;
-  }
-
   ValueListenable<ChatMessageModel>? _messageListenableFor(
     ObservableChatMessageList messages,
     String messageId,
   ) {
-    final index = _messageIndexMap(messages)[messageId];
+    final index = _messageIndexFor(messages, messageId);
     if (index == null) {
       return null;
     }
     return messages.listenableAt(index);
+  }
+
+  ObservableChatMessageList? _indexedMessages;
+  int _indexedStructureRevision = -1;
+  final Map<String, int> _messageIndices = {};
+
+  int? _messageIndexFor(ObservableChatMessageList messages, String id) {
+    if (!identical(_indexedMessages, messages) ||
+        _indexedStructureRevision != messages.structureRevision) {
+      _messageIndices.clear();
+      for (var index = 0; index < messages.length; index++) {
+        _messageIndices.putIfAbsent(messages[index].id, () => index);
+      }
+      _indexedMessages = messages;
+      _indexedStructureRevision = messages.structureRevision;
+    }
+    return _messageIndices[id];
   }
 
   List<Listenable> _groupMessageListenablesFor(
@@ -740,34 +560,46 @@ class _ChatMessageListState extends State<ChatMessageList> {
   List<AgentRunTimelineEntry> _resolveTimelineEntries(
     List<ChatMessageModel> messageSource,
   ) {
+    List<AgentRunTimelineEntry> buildEntries() {
+      final visibleMessages = widget.hideToolCards
+          ? messageSource
+                .where((message) {
+                  final type = message.cardData?['type']?.toString();
+                  return type != 'agent_tool_summary' &&
+                      type != 'agent_request';
+                })
+                .toList(growable: false)
+          : List<ChatMessageModel>.from(messageSource);
+      _timelineHasVisibleMessages = visibleMessages.isNotEmpty;
+      return buildAgentRunTimelineEntries(
+        visibleMessages,
+        activeTaskIds: widget.activeAgentTurnIds,
+        conversationAgentId: widget.activeAcpAgentId,
+      );
+    }
+
     final observable = messageSource is ObservableChatMessageList
         ? messageSource
         : null;
     if (observable == null) {
-      return buildAgentRunTimelineEntries(
-        List<ChatMessageModel>.from(messageSource),
-        activeTaskIds: widget.activeAgentTurnIds,
-        conversationAgentId: widget.activeAcpAgentId,
-      );
+      return buildEntries();
     }
     final cached = _timelineEntriesCache;
     if (cached != null &&
         identical(_timelineCacheSource, observable) &&
         _timelineCacheStructureRevision == observable.structureRevision &&
         setEquals(_timelineCacheActiveTaskIds, widget.activeAgentTurnIds) &&
-        _timelineCacheAgentId == widget.activeAcpAgentId) {
+        _timelineCacheAgentId == widget.activeAcpAgentId &&
+        _timelineCacheHideToolCards == widget.hideToolCards) {
       return cached;
     }
-    final entries = buildAgentRunTimelineEntries(
-      List<ChatMessageModel>.from(observable),
-      activeTaskIds: widget.activeAgentTurnIds,
-      conversationAgentId: widget.activeAcpAgentId,
-    );
+    final entries = buildEntries();
     _timelineEntriesCache = entries;
     _timelineCacheSource = observable;
     _timelineCacheStructureRevision = observable.structureRevision;
     _timelineCacheActiveTaskIds = Set<String>.from(widget.activeAgentTurnIds);
     _timelineCacheAgentId = widget.activeAcpAgentId;
+    _timelineCacheHideToolCards = widget.hideToolCards;
     return entries;
   }
 
@@ -775,24 +607,11 @@ class _ChatMessageListState extends State<ChatMessageList> {
     ObservableChatMessageList messages,
     AgentRunTimelineGroup group,
   ) {
-    // 只为「这一组」建索引：原来的写法在流式输出的每一帧都为整个会话
-    // 重建一次 {id: message}（上千条时每帧一次大分配），与上面的
-    // structureRevision 缓存优化正好相反。
-    final groupIds = <String>{
-      for (final segment in group.segmentsOldestFirst)
-        for (final message in segment.messages) message.id,
-    };
-    if (groupIds.isEmpty) {
-      return group.withRefreshedMessages(const <String, ChatMessageModel>{});
-    }
-    final lookup = <String, ChatMessageModel>{};
-    for (final message in messages) {
-      if (groupIds.contains(message.id)) {
-        lookup[message.id] = message;
-        if (lookup.length == groupIds.length) break;
-      }
-    }
-    return group.withRefreshedMessages(lookup);
+    return group.withRefreshedMessages(<String, ChatMessageModel>{
+      for (final message in group.allMessagesOldestFirst)
+        if (_messageIndexFor(messages, message.id) case final int index)
+          message.id: messages[index],
+    });
   }
 
   Widget _buildTimelineListRow({
@@ -818,8 +637,6 @@ class _ChatMessageListState extends State<ChatMessageList> {
         onRequestAuthorize: widget.onRequestAuthorize,
         onUserMessageLongPressStart: widget.onUserMessageLongPressStart,
         onStreamingTextLayoutChanged: null,
-        onToggleAgentRunGroup: _toggleAgentRunGroup,
-        expandedAgentRunTaskIds: _expandedAgentRunTaskIds,
         useAcpPresentation: widget.useAcpPresentation,
         visualProfile: widget.visualProfile,
         appearanceConfig: widget.appearanceConfig,
@@ -871,67 +688,79 @@ class _ChatMessageListState extends State<ChatMessageList> {
 
   @override
   Widget build(BuildContext context) {
-    final reservedBottomInset = widget.bottomOverlayInset
-        .clamp(0.0, double.infinity)
-        .toDouble();
     final pageBackgroundColor =
         !widget.appearanceConfig.isActive && context.isDarkTheme
         ? context.omniPalette.pageBackground
         : null;
 
+    final messageSource = _observableMessages ?? widget.messages;
+    final timelineEntries = _resolveTimelineEntries(messageSource);
     final Widget content;
-    if (widget.messages.isEmpty) {
+    if (!_timelineHasVisibleMessages) {
+      _historyAnchorEntryKey = null;
       final usePaletteText =
           !widget.appearanceConfig.isActive &&
           widget.appearanceConfig.chatTextColorMode !=
               AppBackgroundTextColorMode.custom;
+      final greeting = ChatEmptyGreeting(
+        primaryTextColor: usePaletteText
+            ? context.omniPalette.textPrimary
+            : widget.visualProfile.primaryTextColor,
+        secondaryTextColor: usePaletteText
+            ? context.omniPalette.textSecondary
+            : widget.visualProfile.secondaryTextColor,
+        accentColor: context.omniPalette.accentPrimary,
+        quickPrompts: widget.emptyGreetingQuickPrompts,
+        pinnedQuickPromptIds: widget.emptyGreetingPinnedQuickPromptIds,
+        onQuickPromptSelected: widget.onQuickPromptSelected,
+        agentName: widget.emptyGreetingAgentName,
+        agentWorkspaceName: widget.emptyGreetingAgentWorkspaceName,
+        onAgentWorkspaceTap: widget.onEmptyGreetingAgentWorkspaceTap,
+      );
       content = widget.showEmptyGreeting
           ? GestureDetector(
               onVerticalDragUpdate: (_) {},
               behavior: HitTestBehavior.opaque,
-              child: AnimatedAlign(
-                duration: const Duration(milliseconds: 280),
-                curve: Curves.easeInOutCubic,
-                alignment: widget.liftEmptyGreeting
-                    ? const Alignment(-1, -1)
-                    : const Alignment(0, -0.18),
-                child: ChatEmptyGreeting(
-                  primaryTextColor: usePaletteText
-                      ? context.omniPalette.textPrimary
-                      : widget.visualProfile.primaryTextColor,
-                  secondaryTextColor: usePaletteText
-                      ? context.omniPalette.textSecondary
-                      : widget.visualProfile.secondaryTextColor,
-                  accentColor: context.omniPalette.accentPrimary,
-                  quickPrompts: widget.emptyGreetingQuickPrompts,
-                  pinnedQuickPromptIds:
-                      widget.emptyGreetingPinnedQuickPromptIds,
-                  onQuickPromptSelected: widget.onQuickPromptSelected,
-                  agentName: widget.emptyGreetingAgentName,
-                  agentWorkspaceName: widget.emptyGreetingAgentWorkspaceName,
-                  onAgentWorkspaceTap: widget.onEmptyGreetingAgentWorkspaceTap,
+              child: Builder(
+                builder: (context) => AnimatedAlign(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeInOutCubic,
+                  alignment:
+                      (ChatMessageViewport.maybeOf(context)
+                              ?.liftEmptyGreeting ??
+                          widget.liftEmptyGreeting)
+                      ? const Alignment(-1, -1)
+                      : const Alignment(0, -0.18),
+                  // A landscape Pad with an IME can leave less than one
+                  // greeting's height above the composer. Keep every prompt
+                  // reachable without overflowing or reducing text size.
+                  child: SingleChildScrollView(primary: false, child: greeting),
                 ),
               ),
             )
           : const SizedBox.expand();
       if (pageBackgroundColor == null) {
-        return Padding(
-          padding: EdgeInsets.only(bottom: reservedBottomInset),
-          child: content,
-        );
+        return _padForViewport(content);
       }
       return ColoredBox(
         color: pageBackgroundColor,
-        child: Padding(
-          padding: EdgeInsets.only(bottom: reservedBottomInset),
-          child: content,
-        ),
+        child: _padForViewport(content),
       );
     }
 
     String? latestUserMessageId;
-    final messageSource = _observableMessages ?? widget.messages;
-    final timelineEntries = _resolveTimelineEntries(messageSource);
+    final rowIndices = <String, int>{
+      for (var index = 0; index < timelineEntries.length; index++)
+        timelineEntries[index].key: index,
+    };
+    // Keep the original oldest row at scroll offset zero. Newly fetched
+    // history grows upwards in its own lazy sliver instead of shifting every
+    // existing child index and forcing layout through the whole inserted page.
+    final anchorIndex =
+        rowIndices[_historyAnchorEntryKey] ?? (timelineEntries.length - 1);
+    _historyAnchorEntryKey = anchorIndex >= 0
+        ? timelineEntries[anchorIndex].key
+        : null;
     _pruneEntryRowKeys(timelineEntries);
     for (final item in messageSource) {
       if (item.user == 1) {
@@ -939,54 +768,69 @@ class _ChatMessageListState extends State<ChatMessageList> {
         break;
       }
     }
-    // findChildIndexCallback 对每个可见子项各回调一次，原来每次都要
-    // indexWhere 全表线性扫描（长会话 = 每帧 O(n × 可见数) → 掉帧）。
-    // 预先建一张 key→dataIndex 的表，让回调变成 O(1)。
-    final entryIndexByKey = <String, int>{
-      for (var i = 0; i < timelineEntries.length; i++)
-        timelineEntries[i].key: i,
-    };
-    Widget listView = ListView.builder(
+    Widget buildTimelineRow(BuildContext context, int dataIndex) {
+      final entry = timelineEntries[dataIndex];
+      final needTopPadding =
+          dataIndex == timelineEntries.length - 1 && !entry.isUserMessage;
+      return KeyedSubtree(
+        key: _listKeyForEntry(entry.key),
+        child: KeyedSubtree(
+          key: _rowKeyForEntry(entry.key),
+          child: _buildTimelineListRow(
+            messageSource: messageSource,
+            entry: entry,
+            latestUserMessageId: latestUserMessageId,
+            padding: EdgeInsets.only(top: needTopPadding ? 24.0 : 0.0),
+          ),
+        ),
+      );
+    }
+
+    SliverChildBuilderDelegate delegate({required bool history}) {
+      int dataIndex(int index) =>
+          history ? anchorIndex + 1 + index : anchorIndex - index;
+      return SliverChildBuilderDelegate(
+        (context, index) => buildTimelineRow(context, dataIndex(index)),
+        childCount: history
+            ? timelineEntries.length - anchorIndex - 1
+            : anchorIndex + 1,
+        semanticIndexCallback: (_, index) =>
+            timelineEntries.length - 1 - dataIndex(index),
+        findChildIndexCallback: (key) {
+          if (key is! ValueKey<String> ||
+              !key.value.startsWith(_kListEntryKeyPrefix)) {
+            return null;
+          }
+          final index =
+              rowIndices[key.value.substring(_kListEntryKeyPrefix.length)];
+          if (index == null) return null;
+          if (history) {
+            return index > anchorIndex ? index - anchorIndex - 1 : null;
+          }
+          return index <= anchorIndex ? anchorIndex - index : null;
+        },
+      );
+    }
+
+    final listView = CustomScrollView(
       controller: widget.scrollController,
-      reverse: false,
+      center: _forwardSliverKey,
+      semanticChildCount: timelineEntries.length,
       physics: _ChatLatestEdgeScrollPhysics(
-        shouldStickToLatest: () =>
-            _autoStickToLatest && !_isAutoStickTemporarilySuppressed,
+        shouldStickToLatest: () => _autoStickToLatest,
       ),
       clipBehavior: Clip.hardEdge,
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-      itemCount: timelineEntries.length,
-      findChildIndexCallback: (key) {
-        if (key is! ValueKey<String> ||
-            !key.value.startsWith(_kListEntryKeyPrefix)) {
-          return null;
-        }
-        final entryKey = key.value.substring(_kListEntryKeyPrefix.length);
-        final dataIndex = entryIndexByKey[entryKey];
-        return dataIndex == null ? null : timelineEntries.length - 1 - dataIndex;
-      },
-      itemBuilder: (context, index) {
-        final dataIndex = timelineEntries.length - 1 - index;
-        final entry = timelineEntries[dataIndex];
-        final isOldestEntry = dataIndex == timelineEntries.length - 1;
-        final needTopPadding = isOldestEntry && !entry.isUserMessage;
-        // The list child uses a local ValueKey so sliver reordering does not
-        // reparent a GlobalKey during a live ACP shape change. The nested
-        // GlobalKey is only an already-laid-out scroll anchor; keeping those
-        // identities separate avoids the framework's child == _child race.
-        return KeyedSubtree(
-          key: _listKeyForEntry(entry.key),
-          child: KeyedSubtree(
-            key: _rowKeyForEntry(entry.key),
-            child: _buildTimelineListRow(
-              messageSource: messageSource,
-              entry: entry,
-              latestUserMessageId: latestUserMessageId,
-              padding: EdgeInsets.only(top: needTopPadding ? 24.0 : 0.0),
-            ),
-          ),
-        );
-      },
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          sliver: SliverList(delegate: delegate(history: true)),
+        ),
+        SliverPadding(
+          key: _forwardSliverKey,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          sliver: SliverList(delegate: delegate(history: false)),
+        ),
+      ],
     );
     content = ClipRect(
       child: Align(
@@ -1010,16 +854,26 @@ class _ChatMessageListState extends State<ChatMessageList> {
       onFocusChange: widget.onInternalInputFocusChanged,
       child: content,
     );
-    final paddedContent = Padding(
-      padding: EdgeInsets.only(bottom: reservedBottomInset),
-      child: focusedContent,
-    );
+    final paddedContent = _padForViewport(focusedContent);
 
     if (pageBackgroundColor == null) {
       return paddedContent;
     }
     return ColoredBox(color: pageBackgroundColor, child: paddedContent);
   }
+
+  Widget _padForViewport(Widget child) => Builder(
+    builder: (context) => Padding(
+      padding: EdgeInsets.only(
+        bottom:
+            (ChatMessageViewport.maybeOf(context)?.bottomOverlayInset ??
+                    widget.bottomOverlayInset)
+                .clamp(0.0, double.infinity)
+                .toDouble(),
+      ),
+      child: child,
+    ),
+  );
 }
 
 class _ChatTimelineListRow extends StatelessWidget {
@@ -1037,8 +891,6 @@ class _ChatTimelineListRow extends StatelessWidget {
     this.onRequestAuthorize,
     this.onUserMessageLongPressStart,
     this.onStreamingTextLayoutChanged,
-    required this.onToggleAgentRunGroup,
-    required this.expandedAgentRunTaskIds,
     required this.useAcpPresentation,
     required this.visualProfile,
     required this.appearanceConfig,
@@ -1057,8 +909,6 @@ class _ChatTimelineListRow extends StatelessWidget {
   final void Function(ChatMessageModel message, LongPressStartDetails details)?
   onUserMessageLongPressStart;
   final VoidCallback? onStreamingTextLayoutChanged;
-  final void Function(String taskId) onToggleAgentRunGroup;
-  final Set<String> expandedAgentRunTaskIds;
   final bool useAcpPresentation;
   final AppBackgroundVisualProfile visualProfile;
   final AppBackgroundConfig appearanceConfig;
@@ -1074,8 +924,6 @@ class _ChatTimelineListRow extends StatelessWidget {
       child: AgentRunGroupMessage(
         group: group,
         useAcpPresentation: useAcpPresentation,
-        expanded: expandedAgentRunTaskIds.contains(group.taskId),
-        onToggleExpanded: () => onToggleAgentRunGroup(group.taskId),
         onBeforeTaskExecute: onBeforeTaskExecute,
         onCancelTask: onCancelTask,
         onRetryAgentMessage: onRetryAgentMessage,

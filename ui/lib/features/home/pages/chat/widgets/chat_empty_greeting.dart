@@ -4,8 +4,6 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:ui/features/home/widgets/home_quick_prompt_icon.dart';
-import 'package:ui/l10n/l10n.dart';
-import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/services/home_greeting_settings_service.dart';
 import 'package:ui/theme/theme_context.dart';
 
@@ -65,15 +63,15 @@ class ChatEmptyGreeting extends StatelessWidget {
     final secondaryColor = secondaryTextColor ?? palette.textSecondary;
     final keywordColor = accentColor ?? palette.accentPrimary;
     final disableAnimations =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+        MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     final resolvedAgentName = agentName?.trim() ?? '';
     final displayAgentName = resolvedAgentName.isEmpty
-        ? LegacyTextLocalizer.localize('小万')
+        ? (isEnglish ? 'Omnibot' : '小万')
         : resolvedAgentName;
     final headline = isEnglish
         ? "Hi 👋, I'm $displayAgentName"
         : '你好👋，我是$displayAgentName';
-    final prefix = LegacyTextLocalizer.localize('我可以帮助你');
+    final prefix = isEnglish ? 'I can help you' : '我可以帮助你';
     final workspaceName = agentWorkspaceName?.trim() ?? '';
     final useAgentWorkspaceGreeting = workspaceName.isNotEmpty;
     final words = isEnglish ? _kChatGreetingWordsEn : _kChatGreetingWordsZh;
@@ -164,7 +162,7 @@ class ChatEmptyGreeting extends StatelessWidget {
                         runSpacing: 2,
                         children: [
                           Text(
-                            LegacyTextLocalizer.localize('可以在'),
+                            isEnglish ? 'What can we do in' : '可以在',
                             style: helperStyle,
                           ),
                           _AgentWorkspaceNameButton(
@@ -172,7 +170,7 @@ class ChatEmptyGreeting extends StatelessWidget {
                             style: keywordStyle,
                             onTap: onAgentWorkspaceTap,
                           ),
-                          Text(LegacyTextLocalizer.localize('中做点什么'), style: helperStyle),
+                          Text(isEnglish ? '?' : '中做点什么', style: helperStyle),
                         ],
                       )
                     else
@@ -519,7 +517,7 @@ class _SlotWordRotatorState extends State<_SlotWordRotator>
       return const SizedBox.shrink();
     }
     final disableAnimations =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+        MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     final textScaler = MediaQuery.textScalerOf(context);
     final fontSize = widget.style.fontSize ?? 20;
     final lineHeight = widget.style.height ?? 1.2;

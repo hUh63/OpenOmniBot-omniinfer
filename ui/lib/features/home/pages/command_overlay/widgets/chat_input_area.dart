@@ -413,6 +413,15 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
     );
   }
 
+  /// 运行配置选择器临时占用焦点时，保持输入区当前排版（纯展示态）。
+  void setAuxiliaryPopupVisible(bool visible) {
+    if (visible) {
+      _composerStateMachine.popupOpened(ChatComposerPopup.agentRunSettings);
+    } else {
+      _composerStateMachine.popupClosed(ChatComposerPopup.agentRunSettings);
+    }
+  }
+
   Future<void> openTerminalFromInput() async {
     try {
       final handler = widget.onTerminalTap;

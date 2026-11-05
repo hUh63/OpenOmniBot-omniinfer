@@ -244,6 +244,8 @@ class AssistsMessageService {
   /// 会话列表的可见性版本号：原生推来 onConversationListChanged 就 +1。
   /// 批量操作先记下当时的值，执行途中比对，判断列表是否已经被改动过。
   static int conversationVisibilityRevision = 0;
+  static bool hasNaHistoryOwnerSnapshot = false;
+  static String? visibleNaOwnerPrefix;
 
   // 回调函数
   static CardPushCallback? _onCardPushCallback;
@@ -312,6 +314,12 @@ class AssistsMessageService {
           // 列表每变一次就推进可见性版本：批量操作发起前抓一个值，逐条执行时比对，
           // 中途被外部改动过就只提示不可用，不再按旧快照操作。
           conversationVisibilityRevision++;
+          if ((call.arguments as Map?)?['reason'] ==
+              'na_history_owner_changed') {
+            hasNaHistoryOwnerSnapshot = true;
+            visibleNaOwnerPrefix = (call.arguments as Map?)?['naOwnerPrefix']
+                as String?;
+          }
           _conversationListChangedController.add(
             Map<String, dynamic>.from(
               (call.arguments as Map?) ?? const <String, dynamic>{},

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../../../../../models/conversation_model.dart';
 import '../../../../../models/conversation_thread_target.dart';
 import '../../../../../models/chat_message_model.dart';
@@ -18,7 +19,9 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
   ) async {
     final candidates = snapshotMessages.where((message) {
       final cardData = message.cardData;
-      return message.type == 2 && cardData?['type'] == 'deep_thinking';
+      return message.type == 2 &&
+          cardData?['type'] == 'deep_thinking' &&
+          !message.isHistoryPayloadOffloaded;
     });
     for (final message in candidates) {
       final cardData = message.cardData;
@@ -51,7 +54,6 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
   set isLoadingMore(bool value);
   int get messageOffset;
   set messageOffset(int value);
-  int conversationHistoryRevision(int conversationId, ConversationMode mode) => 0;
   int captureConversationLifecycleToken();
   bool isConversationLifecycleTokenCurrent(int token);
   void invalidateConversationLifecycle();
@@ -63,6 +65,20 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     int conversationId,
     ConversationMode mode,
   );
+  ({bool hasMore, int nextOffset})? getInMemoryHistoryPageForConversation(
+    int conversationId,
+    ConversationMode mode,
+  ) => null;
+  int getHistoryPageRevisionForConversation(
+    int conversationId,
+    ConversationMode mode,
+  ) => 0;
+  void onConversationHistoryPageLoaded(
+    ConversationMode mode,
+    int conversationId, {
+    required bool hasMore,
+    required int nextOffset,
+  }) {}
   void onConversationReset(ConversationMode mode) {}
   void onConversationLoaded(
     ConversationMode mode,
@@ -299,16 +315,11 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       return;
     }
     final operationMode = mode ?? activeConversationModeValue;
-    final historyRevision = conversationHistoryRevision(conversationId, operationMode);
     try {
-      // 只需要这一条会话的元数据：走单条查询，不要再为一条记录拉整张表。
-      final conversation = await ConversationService.getConversationById(
-        conversationId,
+      final conversations = await ConversationService.getAllConversations(
         includeArchived: true,
-        mode: operationMode,
       );
-      if (!_isConversationOperationCurrent(token) ||
-          conversationHistoryRevision(conversationId, operationMode) != historyRevision) {
+      if (!_isConversationOperationCurrent(token)) {
         return;
       }
       // Metadata I/O may overlap ACP updates or completion. Read the owning
@@ -322,11 +333,24 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       final inMemoryMessages = preferInMemory
           ? getInMemoryMessagesForConversation(conversationId, operationMode)
           : null;
+      ConversationModel? conversation;
+      try {
+        conversation = conversations.firstWhere(
+          (c) => c.id == conversationId && c.mode == operationMode,
+        );
+      } catch (_) {
+        conversation = null;
+      }
+      // Na history must still be admitted by the native account-aware list.
+      // A stale local cache cannot restore a conversation hidden after logout.
+      if (conversation == null && inMemoryConversation?.agentId == 'na-cloud') {
+        onConversationMissing(operationMode, conversationId);
+        return;
+      }
       final resolvedConversation = inMemoryConversation ?? conversation;
 
       if (resolvedConversation != null) {
-        if (!_isConversationOperationCurrent(token) ||
-          conversationHistoryRevision(conversationId, operationMode) != historyRevision) {
+        if (!_isConversationOperationCurrent(token)) {
           return;
         }
         setState(() {
@@ -335,8 +359,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
           _hasSavedConversation = false;
         });
       } else {
-        if (!_isConversationOperationCurrent(token) ||
-          conversationHistoryRevision(conversationId, operationMode) != historyRevision) {
+        if (!_isConversationOperationCurrent(token)) {
           return;
         }
         setState(() {
@@ -348,16 +371,27 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
 
       List<ChatMessageModel> savedMessages;
       if (inMemoryMessages != null) {
-        // getInMemoryMessagesForConversation copied these entries from the
-        // active runtime itself. Reinstalling them would dispose every row
-        // notifier and interrupt an AgentRunGroupMessage that is currently
-        // animating from running to completed.
-        //
-        // 这里也不要动分页游标：原来无条件写 hasMoreMessages=false 会让该会话在任意
-        // 一次列表刷新后永久关掉向上翻历史；把 messageOffset 写成「内存条数」又和全库
-        // 其它地方（SQL 实际消费行数 scanned）语义相反，一旦重新打开分页就会重读或漏读。
         savedMessages = List<ChatMessageModel>.from(inMemoryMessages);
+        final page = getInMemoryHistoryPageForConversation(
+          conversationId,
+          operationMode,
+        );
+        setState(() {
+          hasMoreMessages =
+              page?.hasMore ??
+              !isEphemeralConversation(conversationId, operationMode);
+          messageOffset = page?.nextOffset ?? 0;
+          isLoadingMore = false;
+          // getInMemoryMessagesForConversation copied these entries from the
+          // active runtime itself. Reinstalling them would dispose every row
+          // notifier and interrupt an AgentRunGroupMessage that is currently
+          // animating from running to completed.
+        });
       } else {
+        final historyRevision = getHistoryPageRevisionForConversation(
+          conversationId,
+          operationMode,
+        );
         final pagedResult =
             await ConversationHistoryService.getConversationMessagesPaged(
               conversationId,
@@ -366,31 +400,52 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
               offset: 0,
               expectedMessageCount: resolvedConversation?.messageCount,
             );
-        if (!_isConversationOperationCurrent(token) ||
-          conversationHistoryRevision(conversationId, operationMode) != historyRevision) {
+        if (!_isConversationOperationCurrent(token)) {
+          return;
+        }
+        if (historyRevision !=
+            getHistoryPageRevisionForConversation(
+              conversationId,
+              operationMode,
+            )) {
           return;
         }
         final latestRuntimeMessages = preferInMemory
             ? getInMemoryMessagesForConversation(conversationId, operationMode)
             : null;
-        savedMessages = latestRuntimeMessages != null
-            ? List<ChatMessageModel>.from(latestRuntimeMessages)
-            : pagedResult.messages;
+        final latestPage = latestRuntimeMessages == null
+            ? null
+            : getInMemoryHistoryPageForConversation(
+                conversationId,
+                operationMode,
+              );
+        // A live runtime may be admitted while storage is being read. Keep its
+        // current items and add missing historical identities; the existing
+        // runtime callback below still owns projection and lifecycle state.
+        final knownIds = latestRuntimeMessages
+            ?.map((message) => message.id)
+            .toSet();
+        savedMessages = latestRuntimeMessages == null
+            ? pagedResult.messages
+            : <ChatMessageModel>[
+                ...latestRuntimeMessages,
+                ...pagedResult.messages.where(
+                  (message) => knownIds!.add(message.id),
+                ),
+              ];
         setState(() {
-          hasMoreMessages = latestRuntimeMessages == null &&
-              pagedResult.hasMore &&
-              pagedResult.scanned > 0;
-          // The history provider is allowed to return a short page. Advance
-          // from what was actually consumed from SQL (scanned) - a page whose
-          // entries were partly filtered out must not leave a gap.
-          messageOffset = latestRuntimeMessages != null
-              ? savedMessages.length
-              : pagedResult.scanned;
+          hasMoreMessages = latestPage?.hasMore ?? pagedResult.hasMore;
+          messageOffset = latestPage?.nextOffset ?? pagedResult.nextOffset;
+          isLoadingMore = false;
           // `messages` may be the shared runtime's live list. Deliver the
           // snapshot to onConversationLoaded below; its coordinator owns
           // reconciliation and must see the current items before any mutation.
         });
       }
+      final selectedPage = (
+        hasMore: hasMoreMessages,
+        nextOffset: messageOffset,
+      );
       onConversationLoaded(
         operationMode,
         conversationId,
@@ -402,6 +457,12 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
         // runtime snapshot and could erase the visible session.
         List<ChatMessageModel>.from(savedMessages),
       );
+      onConversationHistoryPageLoaded(
+        operationMode,
+        conversationId,
+        hasMore: selectedPage.hasMore,
+        nextOffset: selectedPage.nextOffset,
+      );
     } catch (e) {
       debugPrint('加载对话失败: $e');
     }
@@ -412,7 +473,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
   /// 加载更多历史消息
   Future<void> loadMoreMessages({int? lifecycleToken}) async {
     final token = lifecycleToken ?? captureConversationLifecycleToken();
-    if (!hasMoreMessages || isLoadingMore) return;
+    if (isLoadingMore) return;
     if (!_isConversationOperationCurrent(token)) {
       return;
     }
@@ -420,8 +481,17 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     final conversationId = currentConversationId;
     if (conversationId == null) return;
     if (isEphemeralConversation(conversationId, operationMode)) return;
+    final historyPage = getInMemoryHistoryPageForConversation(
+      conversationId,
+      operationMode,
+    );
+    if (!(historyPage?.hasMore ?? hasMoreMessages)) return;
+    final offset = historyPage?.nextOffset ?? messageOffset;
+    final revision = getHistoryPageRevisionForConversation(
+      conversationId,
+      operationMode,
+    );
 
-    final historyRevision = conversationHistoryRevision(conversationId, operationMode);
     setState(() {
       isLoadingMore = true;
     });
@@ -432,40 +502,41 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
             conversationId,
             mode: operationMode,
             limit: 50,
-            offset: messageOffset,
+            offset: offset,
             expectedMessageCount: currentConversation?.messageCount,
           );
-      if (_isConversationOperationCurrent(token) &&
-          conversationHistoryRevision(conversationId, operationMode) != historyRevision) {
-        setState(() { isLoadingMore = false; });
-        return;
-      }
       if (_isConversationOperationCurrent(token)) {
+        if (revision !=
+            getHistoryPageRevisionForConversation(
+              conversationId,
+              operationMode,
+            )) {
+          // A successful edit invalidated this query's storage snapshot. Its
+          // returned items and cursor must not undo the edit or skip old rows.
+          setState(() => isLoadingMore = false);
+          return;
+        }
         setState(() {
-          // offset 分页在「加载过程中消息被删/被合并」时会重新吐回已加载的条目，
-          // 直接 addAll 会让同一句话在历史里出现两次，这里按 id 去重。
+          // OFFSET pages can overlap after a new ACP item is committed. The
+          // existing live item wins; only new history identities are appended.
           final knownIds = messages.map((message) => message.id).toSet();
-          final fresh = pagedResult.messages
-              .where((message) => knownIds.add(message.id))
-              .toList(growable: false);
-          messages.addAll(fresh);
-          // offset 要按「SQL 实际消费的行数」推进：组装阶段会丢掉一部分条目
-          // （transport / 空内容 / 恢复过滤），用 messages.length 会让被丢掉的
-          // 行被反复重读，最坏情况下 offset 原地不动、向上翻历史永远翻不动。
-          messageOffset = messageOffset + pagedResult.scanned;
-          hasMoreMessages =
-              pagedResult.hasMore && pagedResult.scanned > 0;
+          messages.addAll(
+            pagedResult.messages.where((message) => knownIds.add(message.id)),
+          );
+          hasMoreMessages = pagedResult.hasMore;
+          messageOffset = pagedResult.nextOffset;
           isLoadingMore = false;
         });
+        onConversationHistoryPageLoaded(
+          operationMode,
+          conversationId,
+          hasMore: pagedResult.hasMore,
+          nextOffset: pagedResult.nextOffset,
+        );
       }
     } catch (e) {
       debugPrint('加载更多消息失败: $e');
-    } finally {
-      // 收尾必须无条件复位：await 期间用户切了会话（lifecycle token 失效）时，上面
-      // 所有 setState 分支都会被跳过 —— 原来 isLoadingMore 就永久卡在 true，
-      // 入口守卫 `if (!hasMoreMessages || isLoadingMore) return;` 让该 mode 之后
-      // 再也翻不了历史，直到页面销毁。
-      if (mounted && isLoadingMore) {
+      if (_isConversationOperationCurrent(token)) {
         setState(() {
           isLoadingMore = false;
         });
@@ -484,17 +555,17 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     if (isEphemeralConversation(activeConversationId, operationMode)) return;
 
     try {
-      // 只判断这一条是否存在：单条查询即可，不必拉全量列表。
-      final existingConversation =
-          await ConversationService.getConversationById(
-            activeConversationId,
-            includeArchived: true,
-            mode: operationMode,
-          );
+      final allConversations = await ConversationService.getAllConversations(
+        includeArchived: true,
+      );
       if (!_isConversationOperationCurrent(token)) {
         return;
       }
-      final exists = existingConversation != null;
+      final exists = allConversations.any(
+        (conversation) =>
+            conversation.id == activeConversationId &&
+            conversation.mode == operationMode,
+      );
 
       if (!exists) {
         final missingConversationId = activeConversationId;
@@ -514,18 +585,11 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
         final transitionToken = captureConversationLifecycleToken();
         onConversationMissing(operationMode, missingConversationId);
 
-        // 只有走到「当前会话已失效」这个罕见分支，才需要挑一条最近的同模式会话。
-        // 单条查询即可，不必为此拉全表。
-        final fallbackConversation =
-            await ConversationService.getLatestConversation(
-              mode: operationMode,
-              includeArchived: true,
-            );
-        if (!_isConversationOperationCurrent(transitionToken)) {
-          return;
-        }
-
-        if (fallbackConversation != null) {
+        final sameModeConversations = allConversations
+            .where((conversation) => conversation.mode == operationMode)
+            .toList();
+        if (sameModeConversations.isNotEmpty) {
+          final fallbackConversation = sameModeConversations.first;
           await loadConversation(
             fallbackConversation.id,
             mode: fallbackConversation.mode,
@@ -591,16 +655,44 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
   }) async {
     final token = lifecycleToken ?? captureConversationLifecycleToken();
     try {
-      final savedMessages =
-          await ConversationHistoryService.getConversationMessages(
+      final historyRevision = getHistoryPageRevisionForConversation(
+        conversationId,
+        mode,
+      );
+      final page =
+          await ConversationHistoryService.getConversationMessagesPaged(
             conversationId,
             mode: mode,
+            limit: 50,
+            offset: 0,
             expectedMessageCount: currentConversation?.messageCount,
           );
       if (!_isConversationOperationCurrent(token)) {
         return false;
       }
-      if (savedMessages.isEmpty) return false;
+      if (historyRevision !=
+          getHistoryPageRevisionForConversation(conversationId, mode)) {
+        // An edited history is not proof of a missing conversation. Leave the
+        // selected runtime and its reset cursor to the committed edit owner.
+        return true;
+      }
+      final savedMessages = page.messages;
+      if (savedMessages.isEmpty) {
+        if (page.hasMore && messages.isEmpty) {
+          setState(() {
+            hasMoreMessages = true;
+            messageOffset = page.nextOffset;
+            isLoadingMore = false;
+          });
+          onConversationHistoryPageLoaded(
+            mode,
+            conversationId,
+            hasMore: true,
+            nextOffset: page.nextOffset,
+          );
+        }
+        return page.hasMore;
+      }
 
       final firstUserMessage = savedMessages.firstWhere(
         (m) => m.user == 1 && (m.text ?? '').isNotEmpty,
@@ -631,10 +723,14 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
         updatedAt: updatedAt,
       );
 
-      await ConversationService.updateConversation(
-        recovered,
-        preserveLatestMetadata: true,
-      );
+      // A bounded page does not describe the complete conversation count or
+      // creation time. Never write those partial values over durable metadata.
+      if (!page.hasMore) {
+        await ConversationService.updateConversation(
+          recovered,
+          preserveLatestMetadata: true,
+        );
+      }
       if (!_isConversationOperationCurrent(token)) {
         return false;
       }
@@ -655,14 +751,36 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       }
 
       if (_isConversationOperationCurrent(token)) {
+        final previousPage = getInMemoryHistoryPageForConversation(
+          conversationId,
+          mode,
+        );
         setState(() {
           currentConversation = recovered;
-          if (messages.isEmpty) {
-            messages
-              ..clear()
-              ..addAll(savedMessages);
-          }
+          final knownIds = messages.map((message) => message.id).toSet();
+          messages.addAll(
+            savedMessages.where((message) => knownIds.add(message.id)),
+          );
+          hasMoreMessages = previousPage?.hasMore ?? page.hasMore;
+          messageOffset = previousPage?.nextOffset ?? page.nextOffset;
+          isLoadingMore = false;
         });
+        final selectedPage = (
+          hasMore: hasMoreMessages,
+          nextOffset: messageOffset,
+        );
+        onConversationLoaded(
+          mode,
+          conversationId,
+          recovered,
+          List<ChatMessageModel>.from(messages),
+        );
+        onConversationHistoryPageLoaded(
+          mode,
+          conversationId,
+          hasMore: selectedPage.hasMore,
+          nextOffset: selectedPage.nextOffset,
+        );
       }
       return true;
     } catch (e) {
@@ -721,9 +839,8 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     bool markComplete = false,
     int? lifecycleToken,
     bool rethrowOnFailure = false,
-    bool allowEmpty = false,
   }) async {
-    if (messages.isEmpty && !allowEmpty) return;
+    if (messages.isEmpty) return;
     final token = lifecycleToken ?? captureConversationLifecycleToken();
 
     // 立即捕获状态，防止异步操作期间上下文切换导致的脏读
@@ -731,6 +848,9 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
     final snapshotConversationId = currentConversationId;
     final snapshotConversation = currentConversation;
     final snapshotMode = activeConversationModeValue;
+    final snapshotAgentId = snapshotMode == ConversationMode.openclaw
+        ? null
+        : snapshotConversation?.agentId ?? agentIdForNewConversation;
     if (snapshotConversationId != null &&
         isEphemeralConversation(snapshotConversationId, snapshotMode)) {
       return;
@@ -774,9 +894,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
           title: title,
           summary: summary,
           mode: snapshotMode,
-          agentId: snapshotMode == ConversationMode.agent
-              ? agentIdForNewConversation
-              : null,
+          agentId: snapshotAgentId,
           rethrowOnError: rethrowOnFailure,
         );
 
@@ -790,6 +908,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
               currentConversation = ConversationModel(
                 id: newConversationId,
                 mode: snapshotMode,
+                agentId: snapshotAgentId,
                 title: title,
                 summary: summary,
                 status: 0,
@@ -841,6 +960,7 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
             ConversationModel(
               id: targetId,
               mode: snapshotMode,
+              agentId: snapshotAgentId,
               title: title,
               summary: summary,
               status: 0,

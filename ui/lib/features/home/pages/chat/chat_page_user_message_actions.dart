@@ -13,7 +13,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
     }
 
     final conversationMode = _activeMode;
-    await showModalBottomSheet<void>(
+    await showOmniGlassBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useRootNavigator: false,
@@ -26,9 +26,8 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
             ? conversation.latestPromptTokens
             : null,
         onThresholdSaved: (nextThreshold) async {
-          final trackedConversation = _modeState(
-            conversationMode,
-          ).currentConversation;
+          final trackedConversation = _modeState(conversationMode)
+              .currentConversation;
           final activeConversation = _currentConversation;
           final ConversationModel latestConversation;
           if (trackedConversation?.id == conversation.id) {
@@ -136,6 +135,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
     return showGlassPopup<_UserMessageQuickAction>(
       context: context,
       anchor: anchor,
+      overlapAnchor: false,
       verticalGap: 10,
       instant: true,
       horizontalPlacement: GlassPopupHorizontalPlacement.centerOnAnchor,
@@ -148,6 +148,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
   }
 
   bool _canRetryUserMessage(ChatMessageModel message) {
+    if (message.isHistoryPayloadOffloaded) return false;
     // A retry creates a new ACP prompt.  While the current prompt is still
     // active, session/cancel is only a notification: its acknowledgement is
     // not the current turn's terminal response.  Do not remove or replace
@@ -156,6 +157,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
   }
 
   bool _canEditUserMessage(ChatMessageModel message) {
+    if (message.isHistoryPayloadOffloaded) return false;
     return !_isAiResponding && _isLatestUserMessage(message);
   }
 
@@ -388,6 +390,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
   }
 
   void _startEditingLatestUserMessage(ChatMessageModel message) {
+    if (message.isHistoryPayloadOffloaded) return;
     if (!_isLatestUserMessage(message)) {
       showToast(
         'Only the latest user message can be edited',
@@ -425,6 +428,10 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
 
   Future<void> _saveAndResendEditedUserMessage(ChatMessageModel message) async {
     if (_editingUserMessageId != message.id) return;
+    if (message.isHistoryPayloadOffloaded) {
+      _stopUserMessageEditing();
+      return;
+    }
     if (!_canEditUserMessage(message)) {
       _stopUserMessageEditing();
       showToast(
@@ -484,32 +491,50 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
     );
     if (removeCount <= 0) return false;
 
-    final removedIds = _messages.take(removeCount).map((item) => item.id).toSet();
+    final removedMessageIds = _messages
+        .take(removeCount)
+        .map((item) => item.id)
+        .toList(growable: false);
+    final remainingMessages = _messages.skip(removeCount).toList();
     final conversationId = _currentConversationId;
+    final mode = _activeMode;
+    final lifecycleToken = captureConversationLifecycleToken();
     if (conversationId != null &&
         !isEphemeralConversation(conversationId, activeConversationModeValue)) {
       try {
-        await _runtimeCoordinator.deleteConversationMessageIds(
-          conversationId: conversationId, mode: _modeKey(_activeMode),
-          messageIds: removedIds,
+        await _runtimeCoordinator.persistConversationMessageSnapshot(
+          allowHistoryRemoval: true,
+          removedMessageIds: removedMessageIds,
+          conversationId: conversationId,
+          mode: _modeKey(mode),
+          messages: remainingMessages,
+          conversation: _currentConversation,
         );
       } catch (error) {
-        if (mounted) showToast('删除失败，请重试', type: ToastType.warning);
+        if (mounted) {
+          showToast(
+            LegacyTextLocalizer.isEnglish
+                ? 'Could not save the edit. Please try again.'
+                : '保存修改失败，请稍后重试',
+            type: ToastType.error,
+          );
+        }
         return false;
       }
-      if (!mounted || _currentConversationId != conversationId) return false;
+    }
+    if (!mounted ||
+        !isConversationLifecycleTokenCurrent(lifecycleToken) ||
+        _currentConversationId != conversationId ||
+        _activeMode != mode) {
+      return false;
     }
     final shouldClearEditState = _editingUserMessageId == message.id;
     setState(() {
       if (shouldClearEditState) _editingUserMessageId = null;
-      _messages.removeWhere((item) => removedIds.contains(item.id));
-      // removedIds 取自 _messages.take(...)（最新的几条）。分页游标是「已加载条数」，
-      // 不跟着往回收的话，之后向上加载更早消息会跳过同样多条（表现为历史里缺一段）。
-      final nextOffset = messageOffset - removedIds.length;
-      messageOffset = nextOffset < 0 ? 0 : nextOffset;
+      _messages.removeWhere((item) => removedMessageIds.contains(item.id));
     });
     if (shouldClearEditState) {
-      _modeState(_activeMode).draftMessage = '';
+      _modeState(mode).draftMessage = '';
       _messageController.clear();
     }
     return true;
@@ -527,6 +552,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
   }
 
   Future<void> _retryUserMessage(ChatMessageModel message) async {
+    if (message.isHistoryPayloadOffloaded) return;
     final text = (message.text ?? '').trim();
     final attachments = _extractRetryAttachments(message);
     if (text.isEmpty && attachments.isEmpty) {
@@ -602,7 +628,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
     }
 
     final userMessage = _agentPromptForFailedTurn(message);
-    if (userMessage == null) {
+    if (userMessage == null || userMessage.isHistoryPayloadOffloaded) {
       showToast(
         LegacyTextLocalizer.isEnglish
             ? 'The original user message is unavailable for retry'
@@ -629,14 +655,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
 
   List<Map<String, dynamic>> _extractRetryAttachments(
     ChatMessageModel message,
-  ) {
-    final raw = message.content?['attachments'];
-    if (raw is! List) return const [];
-    return raw
-        .whereType<Map>()
-        .map((item) => item.map((k, v) => MapEntry(k.toString(), v)))
-        .toList();
-  }
+  ) => buildAgentRuntimeAttachmentsFromMessageContent(message.content);
 
   ChatMessageModel? _agentPromptForFailedTurn(ChatMessageModel message) {
     final messageIndex = _messages.indexWhere((item) => item.id == message.id);
@@ -649,7 +668,8 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
   }
 
   String? _resolveRetryableAgentTaskId(ChatMessageModel message) {
-    if (message.content?['agentRetryable'] != true) {
+    if (message.isHistoryPayloadOffloaded ||
+        message.content?['agentRetryable'] != true) {
       return null;
     }
     return _resolveAgentTaskId(message);

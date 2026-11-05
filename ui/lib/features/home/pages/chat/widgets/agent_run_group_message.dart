@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/home/pages/chat/tool_activity_utils.dart';
 import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
+import 'package:ui/features/home/pages/chat/widgets/agent_run_details_sheet.dart';
 import 'package:ui/features/home/pages/chat/widgets/agent_run_header.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_transcript.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/card_widget_factory.dart'
@@ -19,8 +20,6 @@ class AgentRunGroupMessage extends StatefulWidget {
     super.key,
     required this.group,
     this.useAcpPresentation = false,
-    required this.expanded,
-    required this.onToggleExpanded,
     required this.onBeforeTaskExecute,
     this.onCancelTask,
     this.onRetryAgentMessage,
@@ -34,8 +33,6 @@ class AgentRunGroupMessage extends StatefulWidget {
 
   final AgentRunTimelineGroup group;
   final bool useAcpPresentation;
-  final bool expanded;
-  final VoidCallback onToggleExpanded;
   final OnBeforeTaskExecute onBeforeTaskExecute;
   final void Function(String taskId)? onCancelTask;
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
@@ -60,11 +57,12 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
   late final Animation<double> _lift;
   bool _isNotifyingParentDuringAnimation = false;
   final Set<String> _expandedToolGroupKeys = <String>{};
+  ValueNotifier<AgentRunTimelineGroup>? _detailsGroup;
+  ModalRoute<void>? _detailsRoute;
 
-  /// A running turn is always open; only a finished one honours the user's
-  /// fold state. Auto-collapse-on-completion therefore needs no trigger of its
-  /// own — the run simply stops forcing itself open when it ends.
-  bool get _effectiveExpanded => widget.group.isRunning || widget.expanded;
+  /// A running turn stays inline. Completion folds its trace once; reopening
+  /// that history presents a separate sheet without resizing the transcript.
+  bool get _effectiveExpanded => widget.group.isRunning;
 
   @override
   void initState() {
@@ -101,8 +99,14 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
     super.didUpdateWidget(oldWidget);
     if (widget.group.taskId != oldWidget.group.taskId) {
       _expandedToolGroupKeys.clear();
+      _dismissDetails();
+    } else if (_detailsGroup case final details?) {
+      final group = widget.group;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && identical(_detailsGroup, details)) details.value = group;
+      });
     }
-    final wasExpanded = oldWidget.group.isRunning || oldWidget.expanded;
+    final wasExpanded = oldWidget.group.isRunning;
     if (_effectiveExpanded == wasExpanded) {
       return;
     }
@@ -116,11 +120,58 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
 
   @override
   void dispose() {
+    _dismissDetails();
     _expandController
       ..removeListener(_handleAnimationTick)
       ..removeStatusListener(_handleAnimationStatusChanged)
       ..dispose();
     super.dispose();
+  }
+
+  void _dismissDetails() {
+    final route = _detailsRoute;
+    _detailsRoute = null;
+    if (route == null) return;
+    _removeDetailsRoute(route);
+  }
+
+  void _removeDetailsRoute(ModalRoute<void> route) {
+    // A native conversation switch can remove the source row while its sheet
+    // is open. Remove that exact presentation route after Navigator unlocks.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (route.isActive) route.navigator?.removeRoute(route);
+    });
+  }
+
+  Future<void> _showDetails() async {
+    if (widget.group.isRunning ||
+        _detailsGroup != null ||
+        agentRunDetailMessages(widget.group).isEmpty) {
+      return;
+    }
+    final group = ValueNotifier(widget.group);
+    _detailsGroup = group;
+    try {
+      await showAgentRunDetailsSheet(
+        context: context,
+        group: group,
+        onRouteCreated: (route) {
+          if (!mounted ||
+              widget.group.taskId != group.value.taskId ||
+              !identical(_detailsGroup, group)) {
+            _removeDetailsRoute(route);
+            return;
+          }
+          _detailsRoute = route;
+        },
+      );
+    } finally {
+      if (identical(_detailsGroup, group)) {
+        _detailsGroup = null;
+        _detailsRoute = null;
+      }
+      group.dispose();
+    }
   }
 
   void _handleAnimationTick() {
@@ -148,14 +199,11 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
 
   @override
   Widget build(BuildContext context) {
-    final primaryVisibleMessageId =
-        widget.group.visibleMessagesOldestFirst
-            .where((message) => !isAgentTurnFailureMessage(message))
-            .lastOrNull?.id;
-    final hasFoldableHistory = widget.group.segmentsOldestFirst.any(
-      (segment) =>
-          segment.isProcess || segment.message.id != primaryVisibleMessageId,
-    );
+    final primaryVisibleMessageId = widget.group.visibleMessagesOldestFirst
+        .where((message) => !isAgentTurnFailureMessage(message))
+        .lastOrNull
+        ?.id;
+    final hasFoldableHistory = agentRunDetailMessages(widget.group).isNotEmpty;
     // Resolved across the whole turn, not per fold. The first thinking card
     // only drops its avatar while a separate run header is actually visible.
     // Xiaowan has no running header, so its thinking card owns the avatar
@@ -182,7 +230,7 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
             expanded: _effectiveExpanded,
             onToggleExpanded: widget.group.isRunning || !hasFoldableHistory
                 ? null
-                : widget.onToggleExpanded,
+                : _showDetails,
           )
         // The built-in assistant's header has no in-flight state, so while its
         // run is streaming there is simply no header — the process section is
@@ -193,7 +241,7 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
             group: widget.group,
             taskId: widget.group.taskId,
             expanded: _effectiveExpanded,
-            onTap: widget.onToggleExpanded,
+            onTap: _showDetails,
           ),
         // Arrival order. Every process segment and every prose segment except
         // the final one shares the outer fold controller. Keeping the segments
@@ -205,6 +253,11 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
               firstThinkingMessageId,
             )
           else if (isAgentTurnFailureMessage(segment.message))
+            _buildVisibleMessageBubble(segment.message)
+          else if (isAgentRequestMessage(segment.message) ||
+              segment.message.cardData?['type'] == 'permission_section')
+            // Requests keep their original response/outcome in chat. The
+            // read-only history sheet must never become an approval owner.
             _buildVisibleMessageBubble(segment.message)
           else if (isAgentPlanMessage(segment.message))
             // ACP plans are mutable state snapshots. Do not put them behind
@@ -411,10 +464,8 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
       // While the run itself is finishing, let the outer 320 ms fold own the
       // transition. Running the thinking card's 170 ms height/opacity collapse
       // at the same time multiplies both animations and looks like a flash.
-      // A manually re-opened finished run still initializes each completed
-      // thinking card in its compact collapsed state. Users can expand only
-      // the reasoning segment they want to inspect.
-      thinkingAutoCollapseOnComplete: widget.group.isRunning || widget.expanded,
+      // Historical reasoning is opened in the separate details sheet.
+      thinkingAutoCollapseOnComplete: widget.group.isRunning,
       useAgentToolPresentation: widget.useAcpPresentation,
       showThinkingAvatarOverride: hideAvatar ? false : null,
       parentScrollController: widget.parentScrollController,
@@ -681,53 +732,55 @@ class _LegacyAgentRunSummaryHeader extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           splashFactory: NoSplash.splashFactory,
           overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(2, 4, 2, 4),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                ValueListenableBuilder<AgentAvatarState>(
-                  valueListenable: AgentAvatarService.avatarStateNotifier,
-                  builder: (context, state, _) {
-                    return AgentAvatarCircle(
-                      key: ValueKey('agent-run-avatar-$taskId'),
-                      state: state,
-                      size: 30,
-                      showBorder: false,
-                    );
-                  },
-                ),
-                const SizedBox(width: 8),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: MediaQuery.sizeOf(context).width * 0.6,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 44),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(2, 4, 2, 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  ValueListenableBuilder<AgentAvatarState>(
+                    valueListenable: AgentAvatarService.avatarStateNotifier,
+                    builder: (context, state, _) {
+                      return AgentAvatarCircle(
+                        key: ValueKey('agent-run-avatar-$taskId'),
+                        state: state,
+                        size: 30,
+                        showBorder: false,
+                      );
+                    },
                   ),
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0,
-                      color: labelColor,
-                      fontFamily: 'PingFang SC',
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.sizeOf(context).width * 0.6,
+                    ),
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0,
+                        color: labelColor,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 2),
-                AnimatedRotation(
-                  turns: expanded ? 0 : -0.25,
-                  duration: _AgentRunGroupMessageState._kToggleDuration,
-                  curve: Curves.easeInOutCubicEmphasized,
-                  child: Icon(
-                    LucideIcons.chevronDown,
-                    key: ValueKey('agent-run-summary-chevron-$taskId'),
-                    size: 18,
-                    color: labelColor,
+                  const SizedBox(width: 2),
+                  AnimatedRotation(
+                    turns: expanded ? 0 : -0.25,
+                    duration: _AgentRunGroupMessageState._kToggleDuration,
+                    curve: Curves.easeInOutCubicEmphasized,
+                    child: Icon(
+                      LucideIcons.chevronDown,
+                      key: ValueKey('agent-run-summary-chevron-$taskId'),
+                      size: 18,
+                      color: labelColor,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

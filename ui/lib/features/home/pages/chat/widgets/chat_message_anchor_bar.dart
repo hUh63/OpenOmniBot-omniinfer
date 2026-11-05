@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/flclash/elastic_press.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -15,6 +15,7 @@ import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/agent_avatar.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 import 'package:ui/widgets/glass_popup.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
 
 import '../chat_page_models.dart';
 import '../utils/agent_run_timeline.dart';
@@ -507,7 +508,6 @@ class _ChatMessageAnchorBarState extends State<ChatMessageAnchorBar>
   void _handleButtonLongPressStart(LongPressStartDetails details) {
     HapticFeedback.mediumImpact();
     setState(() {
-      _buttonPressed = false;
       _dragSelecting = true;
     });
     _setExpanded(true);
@@ -731,10 +731,14 @@ class _ChatMessageAnchorBarState extends State<ChatMessageAnchorBar>
           bottom: widget.bottomInset,
           child: IgnorePointer(
             ignoring: !showButton,
-            child: AnimatedOpacity(
-              opacity: showButton ? 1 : 0,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: showButton ? 1 : 0, end: showButton ? 1 : 0),
               duration: const Duration(milliseconds: 180),
               curve: Curves.easeOutCubic,
+              builder: (context, opacity, child) => LiquidGlassFade(
+                opacity: AlwaysStoppedAnimation(opacity),
+                child: child,
+              ),
               child: _buildAnchorButton(),
             ),
           ),
@@ -935,118 +939,93 @@ class _ChatMessageAnchorBarState extends State<ChatMessageAnchorBar>
 
   Widget _buildAnchorButton() {
     final palette = context.omniPalette;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => _setExpanded(!_expanded),
-      onTapDown: (_) => setState(() => _buttonPressed = true),
-      onTapUp: (_) => setState(() => _buttonPressed = false),
-      onTapCancel: () => setState(() => _buttonPressed = false),
-      onLongPressStart: _handleButtonLongPressStart,
-      onLongPressMoveUpdate: _handleButtonLongPressMove,
-      onLongPressEnd: _handleButtonLongPressEnd,
-      onLongPressCancel: _handleButtonLongPressCancel,
-      child: AnimatedScale(
-        scale: _buttonPressed ? 0.90 : 1,
-        duration: const Duration(milliseconds: 140),
-        curve: Curves.easeOutCubic,
-        child: AnimatedBuilder(
-          animation: _expandController,
-          builder: (context, _) {
-            final t = _expandController.value.clamp(0.0, 1.0);
-            return _buildButtonGlassSurface(
-              expansion: t,
-              child: Center(
-                child: Icon(
-                  LucideIcons.galleryVerticalEnd,
-                  size: 16,
-                  color: Color.lerp(
-                    palette.textTertiary,
-                    palette.accentPrimary,
-                    t,
+    final glass = LiquidGlassScope.of(context);
+    return FlClashElasticPress(
+      enabled: glass,
+      child: Listener(
+        onPointerDown: (_) => _setButtonPressed(true),
+        onPointerUp: (_) => _setButtonPressed(false),
+        onPointerCancel: (_) => _setButtonPressed(false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _setExpanded(!_expanded),
+          onLongPressStart: _handleButtonLongPressStart,
+          onLongPressMoveUpdate: _handleButtonLongPressMove,
+          onLongPressEnd: _handleButtonLongPressEnd,
+          onLongPressCancel: _handleButtonLongPressCancel,
+          child: AnimatedScale(
+            scale: !glass && _buttonPressed ? 0.90 : 1,
+            duration: const Duration(milliseconds: 140),
+            curve: Curves.easeOutCubic,
+            child: AnimatedBuilder(
+              animation: _expandController,
+              builder: (context, _) {
+                final t = _expandController.value.clamp(0.0, 1.0);
+                return _buildButtonSurface(
+                  expansion: t,
+                  child: Center(
+                    child: Icon(
+                      LucideIcons.galleryVerticalEnd,
+                      size: 16,
+                      color: Color.lerp(
+                        palette.textTertiary,
+                        palette.accentPrimary,
+                        t,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            );
-          },
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
   }
 
-  /// 小尺寸定制玻璃圆面。不用 OmniGlassPanel：它的顶部 1px 高光线在
-  /// 圆形裁剪后只剩顶部中央一小段亮弧、向上的 accent 泛光也会在按钮
-  /// 顶缘透出一点颜色，在 34px 的圆钮上都读作杂色。
-  Widget _buildButtonGlassSurface({
+  void _setButtonPressed(bool pressed) {
+    // A held pointer can still deliver its release after this route is gone.
+    if (mounted && _buttonPressed != pressed) {
+      setState(() => _buttonPressed = pressed);
+    }
+  }
+
+  Widget _buildButtonSurface({
     required Widget child,
     required double expansion,
   }) {
     final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    final collapsedTopTint = isDark
-        ? palette.surfacePrimary.withValues(alpha: 0.26)
-        : Colors.white.withValues(alpha: 0.40);
-    final collapsedBottomTint = isDark
-        ? palette.surfaceSecondary.withValues(alpha: 0.12)
-        : Colors.white.withValues(alpha: 0.18);
-    final expandedTopTint = Color.alphaBlend(
-      palette.accentPrimary.withValues(alpha: isDark ? 0.24 : 0.16),
-      palette.surfacePrimary.withValues(alpha: isDark ? 0.96 : 0.92),
-    );
-    final expandedBottomTint = Color.alphaBlend(
-      palette.accentPrimary.withValues(alpha: isDark ? 0.15 : 0.11),
-      palette.surfaceSecondary.withValues(alpha: isDark ? 0.88 : 0.82),
-    );
-    final topTint = Color.lerp(collapsedTopTint, expandedTopTint, expansion)!;
-    final bottomTint = Color.lerp(
-      collapsedBottomTint,
-      expandedBottomTint,
-      expansion,
-    )!;
-    final borderColor = Color.lerp(
-      palette.borderSubtle.withValues(alpha: isDark ? 0.18 : 0.28),
-      palette.accentPrimary.withValues(alpha: isDark ? 0.72 : 0.58),
-      expansion,
-    )!;
+    if (LiquidGlassScope.of(context)) {
+      return SizedBox.square(
+        dimension: _kAnchorButtonSize,
+        child: LiquidGlass(
+          style: LiquidGlassStyle.regular(Theme.of(context).colorScheme),
+          clipper: const ShapeBorderClipper(shape: CircleBorder()),
+          pressed: _buttonPressed,
+          child: child,
+        ),
+      );
+    }
     return Container(
       width: _kAnchorButtonSize,
       height: _kAnchorButtonSize,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
+        color: Color.lerp(
+          palette.surfacePrimary,
+          palette.surfaceElevated,
+          expansion,
+        ),
+        border: Border.all(color: palette.borderSubtle, width: 0.5),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.30 : 0.10),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-          BoxShadow(
-            color: palette.accentPrimary.withValues(
-              alpha: expansion * (isDark ? 0.38 : 0.24),
-            ),
-            blurRadius: 18,
-            spreadRadius: expansion,
+            color: palette.shadowColor,
+            blurRadius: 14,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
-      foregroundDecoration: BoxDecoration(
-        shape: BoxShape.circle,
-        border: Border.all(color: borderColor, width: 0.8),
-      ),
-      child: ClipOval(
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [topTint, bottomTint],
-              ),
-            ),
-            child: child,
-          ),
-        ),
-      ),
+      child: child,
     );
   }
 

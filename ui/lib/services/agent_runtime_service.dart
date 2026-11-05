@@ -656,7 +656,8 @@ class AcpAgentProfile {
     this.discoveryCommand,
     this.managedAdapter = false,
     this.uninstallable = false,
-  });
+    bool? configurationAvailable,
+  }) : configurationAvailable = configurationAvailable ?? id != 'na-cloud';
 
   final String id;
   final String name;
@@ -679,6 +680,9 @@ class AcpAgentProfile {
 
   /// 官方托管运行时声明了卸载策略（agents.json 的 managedUninstallStrategy）。
   final bool uninstallable;
+
+  /// 该 Agent 是否带有可编辑的运行配置（模型/权限等）。
+  final bool configurationAvailable;
 
   factory AcpAgentProfile.fromMap(Map<dynamic, dynamic> map) {
     final rawArguments = map['arguments'];
@@ -712,6 +716,9 @@ class AcpAgentProfile {
           _normalizeMap(map['capabilities']) ?? const <String, dynamic>{},
       discoveryCommand: _stringOrNull(map['discoveryCommand']),
       managedAdapter: map['managedAdapter'] == true,
+      configurationAvailable: map['configurationAvailable'] is bool
+          ? map['configurationAvailable'] as bool
+          : null,
     );
   }
 

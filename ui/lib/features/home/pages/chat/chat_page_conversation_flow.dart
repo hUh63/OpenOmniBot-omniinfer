@@ -12,9 +12,10 @@ Future<String?> _prepareAcpSessionForTurn({
   required String taskId,
   required int conversationId,
   required String mode,
+  required String? agentId,
   required String? existingSessionId,
   required bool Function() isTargetCurrent,
-  String? agentId,
+  bool preparedForFirstPrompt = false,
   String? model,
   String? effort,
   String? collaborationMode,
@@ -30,21 +31,42 @@ Future<String?> _prepareAcpSessionForTurn({
   if (!ownsTurn()) return null;
 
   final hadExistingSession = existingSessionId?.trim().isNotEmpty == true;
+  String? preparedSessionId;
+  if (preparedForFirstPrompt && hadExistingSession) {
+    // The process may have reconnected since the panel configured this
+    // unbound session. Restore it through ACP before native prompt admission.
+    final loaded = await AgentRuntimeService.readSession(
+      sessionId: existingSessionId,
+      agentId: agentId,
+      includeHistory: false,
+      conversationMode: conversationMode,
+    );
+    preparedSessionId = (loaded['sessionId'] ?? loaded['threadId'])?.toString();
+    if (preparedSessionId != existingSessionId) {
+      if (preparedSessionId != null && preparedSessionId.isNotEmpty) {
+        await AgentRuntimeService.closeSession(
+          sessionId: preparedSessionId,
+          agentId: agentId,
+        );
+      }
+      throw StateError('The configured ACP session could not be restored');
+    }
+  }
   final sessionId = await AgentRuntimeService.ensureSession(
-    agentId: agentId,
-    sessionId: existingSessionId,
+    sessionId: preparedSessionId ?? existingSessionId,
     conversationId: conversationId,
+    agentId: agentId,
     model: model,
     effort: effort,
     collaborationMode: collaborationMode,
     conversationMode: conversationMode,
   );
   if (!ownsTurn()) {
-    if (!hadExistingSession) {
+    if (!hadExistingSession || preparedForFirstPrompt) {
       try {
         await AgentRuntimeService.closeSession(
-          agentId: agentId,
           sessionId: sessionId,
+          agentId: agentId,
           conversationId: conversationId,
         );
       } catch (error) {
@@ -59,11 +81,11 @@ Future<String?> _prepareAcpSessionForTurn({
     mode: mode,
     sessionId: sessionId,
   )) {
-    if (!hadExistingSession) {
+    if (!hadExistingSession || preparedForFirstPrompt) {
       try {
         await AgentRuntimeService.closeSession(
-          agentId: agentId,
           sessionId: sessionId,
+          agentId: agentId,
           conversationId: conversationId,
         );
       } catch (error) {
@@ -81,6 +103,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     final cardData = message.cardData;
     if (conversationId == null ||
         isEphemeralConversation(conversationId, activeConversationModeValue) ||
+        message.isHistoryPayloadOffloaded ||
         message.type != 2 ||
         cardData?['type'] != 'deep_thinking') {
       return;
@@ -112,7 +135,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       mode: _modeKey(mode),
     );
     _runtimeCoordinator.replaceConversationSnapshot(
-      expectedHistoryRevision: runtime?.historyRevision ?? 0,
       conversationId: conversationId,
       mode: _modeKey(mode),
       messages: List<ChatMessageModel>.from(
@@ -194,6 +216,142 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     _rememberRuntimeUiSnapshot(mode);
   }
 
+  /// Configuration may create an official ACP session, but never a history
+  /// row. This same session is adopted by the first admitted user prompt.
+  @override
+  Future<Map<String, dynamic>> _readActiveAcpSessionConfig({
+    bool refreshConfig = false,
+  }) async {
+    final generation = _conversationTargetRequestId;
+    final mode = _activeMode;
+    final conversationMode = activeConversationModeValue;
+    final agentId = _activeAcpAgentId;
+    if (agentId == null || agentId.isEmpty) {
+      throw StateError('agent_identity_required: configuration');
+    }
+    final conversationId = _currentConversationId;
+    final sessionId = mode == ChatPageMode.normal
+        ? (_normalAcpSessionConversationId == conversationId
+              ? _normalAcpSessionId
+              : null)
+        : _activeAgentThreadId;
+    bool isCurrent() => mounted && generation == _conversationTargetRequestId;
+
+    void remember(Map<String, dynamic> response) {
+      final id = (response['sessionId'] ?? response['threadId'])
+          ?.toString()
+          .trim();
+      if (id == null || id.isEmpty) {
+        throw StateError('ACP session did not return a session id');
+      }
+      // A refresh can finish after the first send commits this same target.
+      // It must not turn the now-adopted session back into an unused draft.
+      final adoptedConversationId =
+          _modeState(mode).currentConversationId ?? conversationId;
+      if (mode == ChatPageMode.normal) {
+        _normalAcpSessionId = id;
+        _normalAcpSessionConversationId = adoptedConversationId;
+      } else {
+        _activeAgentThreadId = id;
+      }
+      if (sessionId != null &&
+          _unboundConfigurationSessions[mode]?.sessionId == sessionId &&
+          _unboundConfigurationSessions[mode]?.agentId == agentId) {
+        _unboundConfigurationSessions[mode] = (sessionId: id, agentId: agentId);
+      }
+    }
+
+    if (conversationId == null && (sessionId == null || sessionId.isEmpty)) {
+      final pending = _configurationSessionCreation;
+      if (pending != null &&
+          _configurationSessionCreationTarget == generation) {
+        return pending;
+      }
+      Future<Map<String, dynamic>> create() async {
+        final response = await AgentRuntimeService.newSession(
+          agentId: agentId,
+          conversationMode: conversationMode.storageValue,
+          model: mode == ChatPageMode.normal
+              ? (_activeConversationModelOverrideSelection?.modelId ??
+                    _activeNormalChatModelId)
+              : _activeAgentModelId,
+          effort: mode == ChatPageMode.normal
+              ? _activeConversationReasoningEffort
+              : _activeAgentReasoningEffort,
+          collaborationMode: mode == ChatPageMode.agent
+              ? _activeAgentCollaborationMode
+              : null,
+        );
+        if (!isCurrent()) {
+          final id = (response['sessionId'] ?? response['threadId'])
+              ?.toString();
+          if (id != null && id.isNotEmpty) {
+            try {
+              await AgentRuntimeService.closeSession(
+                sessionId: id,
+                agentId: agentId,
+              );
+            } catch (error) {
+              debugPrint(
+                'Abandoned configuration session close failed: $error',
+              );
+            }
+          }
+          throw StateError('Conversation changed');
+        }
+        remember(response);
+        _unboundConfigurationSessions[mode] = (
+          sessionId: (response['sessionId'] ?? response['threadId']).toString(),
+          agentId: agentId,
+        );
+        return response;
+      }
+
+      final creation = create();
+      _configurationSessionCreation = creation;
+      _configurationSessionCreationTarget = generation;
+      try {
+        return await creation;
+      } finally {
+        if (identical(_configurationSessionCreation, creation)) {
+          _configurationSessionCreation = null;
+          _configurationSessionCreationTarget = null;
+        }
+      }
+    }
+
+    final isPreparedSession =
+        sessionId != null &&
+        _unboundConfigurationSessions[mode]?.sessionId == sessionId &&
+        _unboundConfigurationSessions[mode]?.agentId == agentId;
+    final response = await AgentRuntimeService.readSession(
+      sessionId: conversationId == null || isPreparedSession ? sessionId : null,
+      conversationId: isPreparedSession ? null : conversationId,
+      agentId: agentId,
+      conversationMode: conversationMode.storageValue,
+      includeHistory: false,
+      refreshConfig: refreshConfig,
+    );
+    if (!isCurrent()) throw StateError('Conversation changed');
+    remember(response);
+    return response;
+  }
+
+  @override
+  void _releaseUnboundConfigurationSession(ChatPageMode mode) {
+    final session = _unboundConfigurationSessions.remove(mode);
+    if (session == null) return;
+    unawaited(
+      AgentRuntimeService.closeSession(
+        sessionId: session.sessionId,
+        agentId: session.agentId,
+      ).catchError((Object error) {
+        debugPrint('Unused configuration session close failed: $error');
+        return <String, dynamic>{};
+      }),
+    );
+  }
+
   @override
   Future<void> _ensureActiveConversationReadyForStreaming() async {
     if (_currentConversationId == null) {
@@ -201,7 +359,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         generateSummary: false,
         markComplete: false,
         rethrowOnFailure: true,
-        allowEmpty: true,
       );
     }
     if (_currentConversationId == null) {
@@ -305,36 +462,22 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
   }
 
   @override
-  Future<void> _pickAttachments() async {
+  Future<void> _pickAttachments({FileType type = FileType.any}) async {
     try {
-      final files = await FilePicker.pickFiles(type: FileType.any);
+      final files = await FilePicker.pickFiles(type: type);
       if (files.isEmpty || !mounted) return;
-
-      final skipped = <String>[];
+      var rejectedNaAttachment = false;
       setState(() {
         for (final file in files) {
-          if (_pendingAttachments.length >= _maxAttachmentCount) {
-            skipped.add(
-              _isEnglishUi
-                  ? 'At most $_maxAttachmentCount attachments per message'
-                  : '每条消息最多 $_maxAttachmentCount 个附件',
-            );
-            break;
-          }
           final metadata = pickedAttachmentMetadata(file);
-          if (metadata == null) {
-            skipped.add(file.name);
+          if (metadata == null) continue;
+          if (_activeConversationMode == ChatPageMode.agent &&
+              _activeAcpAgentId == 'na-cloud' &&
+              (metadata.size ?? 0) > 10 * 1024 * 1024) {
+            rejectedNaAttachment = true;
             continue;
           }
           final path = metadata.path;
-          if (metadata.size != null && metadata.size! > _maxAttachmentBytes) {
-            skipped.add(
-              _isEnglishUi
-                  ? '${file.name} exceeds ${_maxAttachmentBytes ~/ (1024 * 1024)}MB'
-                  : '${file.name} 超过 ${_maxAttachmentBytes ~/ (1024 * 1024)}MB',
-            );
-            continue;
-          }
           final exists = _pendingAttachments.any((item) => item.path == path);
           if (exists) continue;
           final displayName = (file.name.trim().isNotEmpty)
@@ -355,28 +498,13 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
           );
         }
       });
-      if (skipped.isNotEmpty) {
-        _showSnackBar(
-          _isEnglishUi
-              ? 'Skipped: ${skipped.take(3).join(', ')}'
-              : '已跳过：${skipped.take(3).join('、')}',
-        );
+      if (rejectedNaAttachment) {
+        _showSnackBar('Na 附件单个不能超过 10 MiB，请重新选择。');
       }
     } catch (e) {
-      _showSnackBar(
-        _isEnglishUi ? 'Failed to add attachment: $e' : '添加附件失败：$e',
-      );
+      _showSnackBar('添加附件失败：$e');
     }
   }
-
-  /// 附件数量与单文件体积上限。
-  /// 没有上限时一次选 10 张原图会被 Kotlin 侧逐张整文件 base64（峰值≈原图 2.7 倍），
-  /// 低端机直接 OOM；这里在入口就挡掉。
-  int get _maxAttachmentCount => 9;
-  int get _maxAttachmentBytes => 32 * 1024 * 1024;
-
-  bool get _isEnglishUi =>
-      Localizations.localeOf(context).languageCode == 'en';
 
   @override
   void _removePendingAttachment(String id) {
@@ -583,14 +711,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     // A Harness switch changes both the native ACP adapter and the visible
     // conversation runtime. Let a user submit queue behind that atomic
     // transition instead of registering it against the old target.
-    final queuedDuringSwitch =
-        waitForBootstrap && _harnessSwitchSendBarrier.isActive;
-    final submittedText = queuedDuringSwitch
-        ? (text ?? _messageController.text)
-        : null;
-    final submittedAttachments = queuedDuringSwitch
-        ? List<ChatInputAttachment>.of(_pendingAttachments)
-        : null;
+    final submittedText = text ?? _messageController.text;
+    final submittedAttachments = List<ChatInputAttachment>.of(
+      _pendingAttachments,
+    );
     if (waitForBootstrap) {
       final switched = await _harnessSwitchSendBarrier.waitUntilIdle();
       // A failed switch must not deliver the queued prompt to the old Agent.
@@ -616,13 +740,26 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       if (waitForBootstrap && bootstrapFuture != null) {
         await bootstrapFuture;
       }
-      final messageText = (submittedText ?? text ?? _messageController.text)
-          .trim();
-      // 一进来就快照：下面还有 bootstrap / 模型配置两个 await，直接持有 live 列表
-      // 会在窗口期把用户新加的附件算进本次发送（并被 consume 掉），或让已删除的附件
-      // 仍被算作「已发送」。
-      final inputAttachments =
-          submittedAttachments ?? List<ChatInputAttachment>.of(_pendingAttachments);
+      // A panel may still be preparing the draft's official session when the
+      // user submits. Reuse that request before freezing the prompt target.
+      final configurationSession = _configurationSessionCreation;
+      if (configurationSession != null &&
+          _configurationSessionCreationTarget == sendTargetId) {
+        try {
+          await configurationSession;
+        } catch (_) {
+          // A failed settings read owns no turn. Normal send admission still
+          // reports its own canonical session/prompt result.
+        }
+      }
+      if (!_isConversationTargetRequestCurrent(sendTargetId)) return;
+      final unavailableMessage = _activeAgentUnavailableMessage;
+      if (unavailableMessage != null) {
+        showToast(unavailableMessage, type: ToastType.error);
+        return;
+      }
+      final messageText = submittedText.trim();
+      final inputAttachments = submittedAttachments;
       final hasAttachments = inputAttachments.isNotEmpty;
       if ((messageText.isEmpty && !hasAttachments) || _isAiResponding) return;
       if (!hasAttachments &&
@@ -630,17 +767,15 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         await _startManualRecordingCommand(messageText);
         return;
       }
-      // 模型配置检查只在 _dispatchUserMessage 里做一次。这里再检查一遍会让每次发送
-      // 跑两轮「读 provider 文档 + 场景目录」并 setState 覆盖模型列表，
-      // 明显拉长「点发送 → 出现用户气泡」的时延（_dispatchUserMessage 在乐观插入前
-      // 才检查，所以去掉这里不影响「未配置就不插入消息」的行为）。
+      if (!await _ensureNormalChatModelConfigurationForSend()) return;
+      if (!_isConversationTargetRequestCurrent(sendTargetId)) return;
+
       final attachments = inputAttachments.map((item) => item.toMap()).toList();
       await _dispatchUserMessage(
         messageText,
         attachments: attachments,
         runSlashCommand: true,
-        restoreInputValue:
-            queuedDuringSwitch && _messageController.text != submittedText
+        restoreInputValue: _messageController.text != submittedText
             ? _messageController.value
             : null,
       );
@@ -730,7 +865,17 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     TextEditingValue? restoreInputValue,
     String? retainedUserMessageId,
   }) async {
+    final generation = _conversationTargetRequestId;
+    bool isCurrent() => mounted && generation == _conversationTargetRequestId;
     if ((messageText.isEmpty && attachments.isEmpty) || _isAiResponding) {
+      return;
+    }
+    if (_activeConversationMode == ChatPageMode.agent &&
+        _activeAcpAgentId == 'na-cloud' &&
+        attachments.any(
+          (item) => (item['size'] as num? ?? 0) > 10 * 1024 * 1024,
+        )) {
+      _showSnackBar('Na 附件单个不能超过 10 MiB，请重新选择。');
       return;
     }
 
@@ -739,7 +884,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         messageText,
         attachments: attachments,
       );
-      if (handledSlash) return;
+      if (!isCurrent() || handledSlash) return;
     }
 
     if (_isOpenClawSurface && _openClawBaseUrl.trim().isEmpty) {
@@ -748,6 +893,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       return;
     }
     if (!await _ensureNormalChatModelConfigurationForSend()) return;
+    if (!isCurrent()) return;
 
     _inputFocusNode.unfocus();
     final retainedUserMessageIndex = retainedUserMessageId == null
@@ -786,6 +932,42 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       return;
     }
 
+    if (_activeConversationMode == ChatPageMode.agent &&
+        _resolvedThreadTarget?.isRemoteCodexSessionTarget != true &&
+        _resolvedThreadTarget?.agentRuntime?.trim().toLowerCase() != 'remote' &&
+        _activeAcpAgentId != _kRemoteCodexModeAgentId) {
+      try {
+        await _ensureActiveConversationReadyForStreaming();
+        if (!isCurrent()) return;
+        final admittedConversationId = _currentConversationId!;
+        final admittedMode = _modeKey(_activeMode);
+        _runtimeCoordinator.beginAcpTurn(
+          taskId: messageIds.aiMessageId,
+          conversationId: admittedConversationId,
+          mode: admittedMode,
+        );
+        await _runtimeCoordinator.persistRuntimeConversation(
+          conversationId: admittedConversationId,
+          mode: admittedMode,
+          persistMessages: true,
+        );
+        if (!isCurrent()) {
+          _runtimeCoordinator.unregisterTask(
+            messageIds.aiMessageId,
+            conversationId: admittedConversationId,
+            mode: admittedMode,
+          );
+          return;
+        }
+      } catch (error) {
+        if (isCurrent()) {
+          handleAgentError('Conversation setup failed. Please retry. $error');
+        }
+        return;
+      }
+    }
+
+    if (!isCurrent()) return;
     if (_activeConversationMode == ChatPageMode.agent) {
       await _sendAgentMessage(
         messageIds.aiMessageId,
@@ -799,10 +981,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     try {
       await _ensureActiveConversationReadyForStreaming();
     } catch (error) {
-      // 附件在乐观插入时就被从输入区消费掉了：发送失败后若不还回去，
-      // 用户只能看到「一条已存在的用户消息 + 空输入区」，而这些本地文件可能
-      // 已经失效（SAF 临时授权被回收），重试永远失败。
-      _restoreAttachmentsAfterFailedSend(attachments);
       if (mounted) {
         handleAgentError('Conversation setup failed. Please retry. $error');
       }
@@ -821,40 +999,15 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     if (!handled &&
         mounted &&
         _currentDispatchTurnId == messageIds.aiMessageId) {
-      _restoreAttachmentsAfterFailedSend(attachments);
       handleAgentError('统一 Agent 启动失败，请检查模型提供商与场景模型配置。');
     }
   }
 
-  /// 发送失败后把附件还回输入区（按 path 去重，避免用户已重新选过同一文件时重复）。
-  void _restoreAttachmentsAfterFailedSend(
-    List<Map<String, dynamic>> attachments,
-  ) {
-    if (attachments.isEmpty || !mounted) return;
-    final restored = <ChatInputAttachment>[];
-    for (final raw in attachments) {
-      final path = (raw['path'] ?? '').toString().trim();
-      if (path.isEmpty) continue;
-      if (_pendingAttachments.any((item) => item.path == path)) continue;
-      restored.add(
-        ChatInputAttachment(
-          id: '${path}_${DateTime.now().microsecondsSinceEpoch}',
-          name: (raw['name'] ?? _fileNameFromPath(path)).toString(),
-          path: path,
-          size: (raw['size'] as num?)?.toInt(),
-          mimeType: raw['mimeType']?.toString(),
-          isImage: raw['isImage'] == true,
-          promptPath: raw['promptPath']?.toString(),
-          sendToModel: raw['sendToModel'] != false,
-        ),
-      );
-    }
-    if (restored.isEmpty) return;
-    setState(() => _pendingAttachments.addAll(restored));
-  }
-
-  void _syncUserMessageLinkPreviews(String messageId) {
-    final index = _messages.indexWhere((msg) => msg.id == messageId);
+  Future<void> _syncUserMessageLinkPreviews(String messageId) async {
+    final conversationId = _currentConversationId;
+    final mode = activeConversationModeValue;
+    final targetRequestId = _conversationTargetRequestId;
+    var index = _messages.indexWhere((msg) => msg.id == messageId);
     if (index == -1) {
       return;
     }
@@ -865,10 +1018,24 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     }
 
     final content = Map<String, dynamic>.from(message.content ?? const {});
-    final nextPreviews = LinkPreviewService.instance.reconcilePreviewMaps(
+    final nextPreviews = await LinkPreviewService.instance.reconcilePreviewMaps(
       text: message.text ?? '',
       existing: content['linkPreviews'],
     );
+    if (nextPreviews == null ||
+        !mounted ||
+        (conversationId != null && _currentConversationId != conversationId) ||
+        !_isConversationTargetRequestCurrent(targetRequestId) ||
+        activeConversationModeValue != mode)
+      return;
+    index = _messages.indexWhere((msg) => msg.id == messageId);
+    if (index == -1) return;
+    if (!identical(_messages[index], message)) {
+      // Import/stream updates may replace the display object while native URL parsing runs.
+      // Reconcile against that object's fields so a stale result cannot erase an edit.
+      unawaited(_syncUserMessageLinkPreviews(messageId));
+      return;
+    }
     if (_previewMapListsEqual(content['linkPreviews'], nextPreviews)) {
       return;
     }
@@ -897,15 +1064,15 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     String messageId,
     String url,
   ) async {
-    final previewConversationId = _currentConversationId;
-    final previewMode = _modeKey(_activeMode);
-    final previewRevision = previewConversationId == null ? 0 :
-        (_runtimeCoordinator.runtimeFor(conversationId: previewConversationId, mode: previewMode)?.historyRevision ?? 0);
+    final requestedConversationId = _currentConversationId;
+    final mode = activeConversationModeValue;
+    final targetRequestId = _conversationTargetRequestId;
     final resolved = await LinkPreviewService.instance.loadPreview(url);
-    if (!mounted || _currentConversationId != previewConversationId ||
-        _modeKey(_activeMode) != previewMode ||
-        (previewConversationId != null &&
-          _runtimeCoordinator.runtimeFor(conversationId: previewConversationId, mode: previewMode)?.historyRevision != previewRevision)) {
+    if (!mounted ||
+        (requestedConversationId != null &&
+            _currentConversationId != requestedConversationId) ||
+        !_isConversationTargetRequestCurrent(targetRequestId) ||
+        activeConversationModeValue != mode) {
       return;
     }
 
@@ -953,12 +1120,11 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     final conversationId = _currentConversationId;
     if (conversationId != null &&
         !isEphemeralConversation(conversationId, activeConversationModeValue)) {
-      final index = _messages.indexWhere((message) => message.id == messageId);
-      if (index < 0) return;
-      await _runtimeCoordinator.updateConversationLinkPreviews(
-        conversationId: conversationId, mode: previewMode, messageId: messageId,
-        expectedHistoryRevision: previewRevision,
-        previews: _messages[index].content?['linkPreviews'] as List<dynamic>? ?? [],
+      await _runtimeCoordinator.persistConversationMessageSnapshot(
+        conversationId: conversationId,
+        mode: _modeKey(_activeMode),
+        messages: List<ChatMessageModel>.from(_messages),
+        conversation: _currentConversation,
       );
     }
   }
@@ -1068,7 +1234,14 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         taskId: aiMessageId,
         conversationId: resolvedConversationId,
         mode: dispatchModeKey,
+        agentId: _kXiaowanAcpAgentId,
         existingSessionId: dispatchSessionId,
+        preparedForFirstPrompt:
+            _unboundConfigurationSessions[dispatchMode]?.sessionId ==
+                dispatchSessionId &&
+            _unboundConfigurationSessions[dispatchMode]?.agentId ==
+                _kXiaowanAcpAgentId &&
+            dispatchSessionId != null,
         isTargetCurrent: isDispatchTargetCurrent,
         model: dispatchSelection?.modelId,
         effort: dispatchReasoningEffort,
@@ -1082,19 +1255,16 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         );
         return;
       }
+      _unboundConfigurationSessions.remove(dispatchMode);
       _normalAcpSessionId = acpSessionId;
       _normalAcpSessionConversationId = resolvedConversationId;
       final response = await AgentRuntimeService.promptSession(
         conversationId: resolvedConversationId,
         sessionId: acpSessionId,
         requestId: _buildPromptRequestId(aiMessageId),
-        // Pure chat is an ACP turn with tools disabled, not a provider-only
-        // transport. It deliberately has no Harness identity: otherwise a
-        // previous DSH/Xiaowan switch leaks into the pure-chat session and
-        // the runtime can reconnect the wrong Agent.
-        agentId: dispatchConversationMode == ConversationMode.chatOnly
-            ? null
-            : _kXiaowanAcpAgentId,
+        // Pure chat explicitly owns the in-process Xiaowan runtime with
+        // tools disabled, independently of other conversations.
+        agentId: _kXiaowanAcpAgentId,
         text: userMessage,
         attachments: userAttachments,
         approvalPolicy: dispatchPermissionMode.approvalPolicy,
@@ -1245,7 +1415,14 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         taskId: aiMessageId,
         conversationId: resolvedConversationId,
         mode: dispatchModeKey,
+        agentId: _kXiaowanAcpAgentId,
         existingSessionId: dispatchSessionId,
+        preparedForFirstPrompt:
+            _unboundConfigurationSessions[dispatchMode]?.sessionId ==
+                dispatchSessionId &&
+            _unboundConfigurationSessions[dispatchMode]?.agentId ==
+                _kXiaowanAcpAgentId &&
+            dispatchSessionId != null,
         isTargetCurrent: isDispatchTargetCurrent,
         model: dispatchSelection?.modelId,
         effort: dispatchReasoningEffort,
@@ -1259,6 +1436,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         );
         return false;
       }
+      _unboundConfigurationSessions.remove(dispatchMode);
       _normalAcpSessionId = acpSessionId;
       _normalAcpSessionConversationId = resolvedConversationId;
       final response = await AgentRuntimeService.promptSession(
@@ -1346,6 +1524,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       if (raw is! List) return const [];
       final normalized = raw
           .whereType<Map>()
+          .where((item) => item['historyPayloadOffloaded'] != true)
           .map((item) => item.map((k, v) => MapEntry(k.toString(), v)))
           .where(_attachmentShouldSendToModel)
           .toList();
@@ -1374,58 +1553,8 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     return const <Map<String, dynamic>>[];
   }
 
-  /// 「停止」的唯一入口（输入区主按钮 / 语音/快捷键都走这里）。
   @override
   void _onCancelTask() {
-    _stopActiveTurn(source: 'composer');
-  }
-
-  @override
-  void _onCancelTaskFromCard(String taskId) {
-    _stopActiveTurn(source: 'card', taskId: taskId);
-  }
-
-  /// 停止语义 —— 全应用唯一的实现。
-  ///
-  /// 定义（所有入口一致，不再各自发明）：
-  /// 1. 停止只中止**当前活跃回合**：保留用户消息、保留已经产出的助手内容；
-  ///    不删除会话、不切换会话、不关闭页面。
-  /// 2. 本轮以 cancelled 收敛（不是 error）：思考卡/工具卡改写成「已停止」；
-  ///    纯占位（loading / 等待用户回答的卡）移除，避免留下空气泡。
-  /// 3. 幂等：连续点击只发一次 cancel（700ms 去抖），同一轮不会被取消两次。
-  /// 4. 一定能收尾：ACP 回合以官方 cancel + 终态为准（另有 12s 本地兜底）；
-  ///    本地/无 ACP 回合直接收尾。任何情况下都不会让输入框被永久占住。
-  /// 5. 「停止」≠「结束会话」≠「关闭页面」≠「停止本地模型服务」，后三者各有入口。
-  void _stopActiveTurn({required String source, String? taskId}) {
-    final now = DateTime.now();
-    final last = _lastStopRequestAt;
-    if (last != null &&
-        now.difference(last) < const Duration(milliseconds: 700)) {
-      debugPrint('[stop] $source ignored (debounced)');
-      return;
-    }
-    _lastStopRequestAt = now;
-
-    final isAcpOwnedMode =
-        _activeConversationMode == ChatPageMode.agent ||
-        (_activeConversationMode == ChatPageMode.normal &&
-            activeConversationModeValue != ConversationMode.chatOnly);
-    final normalizedTaskId = taskId?.trim();
-    if (normalizedTaskId != null &&
-        normalizedTaskId.isNotEmpty &&
-        isAcpOwnedMode) {
-      final conversationId = _currentConversationId;
-      if (conversationId == null ||
-          !_runtimeCoordinator.isTaskActive(
-            taskId: normalizedTaskId,
-            conversationId: conversationId,
-            mode: _modeKey(_activeConversationMode),
-          )) {
-        // 旧回合的卡片不能取消当前回合（终态由共享 runtime 自己围栏）。
-        debugPrint('[stop] $source: task $normalizedTaskId is not active');
-        return;
-      }
-    }
     try {
       if (_activeConversationMode == ChatPageMode.agent) {
         // ACP owns the terminal transition. Do not unregister the task or
@@ -1465,28 +1594,21 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         );
       }
 
-      _convergeStoppedState();
-      debugPrint('[stop] $source: local fallback converged');
-    } catch (e) {
-      debugPrint('[stop] $source failed: $e');
-      // 停止绝不能因为一次异常而让 UI 卡在「运行中」。
-      _convergeStoppedState();
-    }
-  }
+      setState(() {
+        _isAiResponding = false;
+        _isContextCompressing = false;
+        _isCheckingExecutableTask = false;
+        _isExecutingTask = false;
+        _isInputAreaVisible = true;
+        _messages.removeWhere(
+          (msg) => msg.isLoading || _isOpenClawWaitingCardMessage(msg),
+        );
+      });
 
-  /// 停止后的统一收尾：保留已产出内容，只移除纯占位卡，复位 busy 标志。
-  void _convergeStoppedState() {
-    if (!mounted) return;
-    setState(() {
-      _isAiResponding = false;
-      _isContextCompressing = false;
-      _isCheckingExecutableTask = false;
-      _isExecutingTask = false;
-      _isInputAreaVisible = true;
-      _messages.removeWhere(
-        (msg) => msg.isLoading || _isOpenClawWaitingCardMessage(msg),
-      );
-    });
+      debugPrint('Task cancelled, all states reset');
+    } catch (e) {
+      debugPrint('onCancelTask error: $e');
+    }
   }
 
   @override
@@ -1538,7 +1660,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     if (taskId != null) {
       _updateThinkingCardToCancelled(taskId);
       _upsertCancelledAgentRunMessage(taskId);
-      _collapseAgentRunTrace(taskId);
       _runtimeCoordinator.unregisterTask(
         taskId,
         conversationId: _currentConversationId,
@@ -1551,6 +1672,82 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     }
   }
 
+  @override
+  void _onCancelTaskFromCard(String taskId) {
+    try {
+      final runtimeIdentity = _activeRuntime?.activeRunIdentity;
+      final agentSessionId =
+          runtimeIdentity?.normalizedSessionId ?? _activeAgentThreadId?.trim();
+      final agentTurnId =
+          runtimeIdentity?.normalizedTurnId ?? _activeAgentTurnId?.trim();
+      final normalIdentity = _runtimeForMode(ChatPageMode.normal)
+          ?.activeRunIdentity;
+      final normalSessionId =
+          normalIdentity?.normalizedSessionId ?? _normalAcpSessionId?.trim();
+      final normalTurnId =
+          normalIdentity?.normalizedTurnId ?? _normalAcpTurnId?.trim();
+      final isAcpMode =
+          _activeConversationMode == ChatPageMode.agent ||
+          (_activeConversationMode == ChatPageMode.normal &&
+              activeConversationModeValue != ConversationMode.chatOnly);
+      final activeConversationId = _currentConversationId;
+      if (isAcpMode &&
+          (activeConversationId == null ||
+              !_runtimeCoordinator.isTaskActive(
+                taskId: taskId,
+                conversationId: activeConversationId,
+                mode: _modeKey(_activeConversationMode),
+              ))) {
+        // A card from an older turn must not cancel the currently active ACP
+        // turn. Its terminal event is already fenced by the shared runtime.
+        return;
+      }
+      if (_activeConversationMode == ChatPageMode.normal &&
+          activeConversationModeValue != ConversationMode.chatOnly) {
+        unawaited(
+          cancelAcpPromptForMode(
+            mode: ChatPageMode.normal,
+            sessionId: normalSessionId,
+            turnId: normalTurnId,
+          ),
+        );
+        return;
+      }
+      if (_activeConversationMode == ChatPageMode.agent) {
+        unawaited(_interruptAgentTurn());
+        return;
+      }
+      interruptActiveToolCard();
+      if (!(_activeConversationMode == ChatPageMode.normal &&
+          activeConversationModeValue != ConversationMode.chatOnly)) {
+        unawaited(
+          cancelAcpPromptForMode(
+            mode: _activeConversationMode,
+            sessionId: agentSessionId,
+            turnId: agentTurnId,
+          ),
+        );
+      }
+      _runtimeCoordinator.unregisterTask(
+        taskId,
+        conversationId: _currentConversationId,
+        mode: _modeKey(_activeConversationMode),
+      );
+      _updateThinkingCardToCancelled(taskId);
+      _upsertCancelledAgentRunMessage(taskId);
+      if (_activeConversationMode != ChatPageMode.agent) {
+        clearAgentStreamSessionState();
+        resetDispatchState();
+      }
+      setState(() {
+        _messages.removeWhere(
+          (msg) => msg.isLoading || _isOpenClawWaitingCardMessage(msg),
+        );
+      });
+    } catch (e) {
+      debugPrint('onCancelTaskFromCard error: $e');
+    }
+  }
 
   @override
   void _updateThinkingCardToCancelled(String taskId) {
@@ -1579,21 +1776,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       );
     });
     _persistDeepThinkingCardIfNeeded(_messages[index]);
-  }
-
-  @override
-  void _collapseAgentRunTrace(String taskId) {
-    final normalizedTaskId = taskId.trim();
-    if (normalizedTaskId.isEmpty) {
-      return;
-    }
-    final expandedTaskIds = _expandedAgentRunTaskIdsForMode(_activeMode);
-    if (!expandedTaskIds.contains(normalizedTaskId)) {
-      return;
-    }
-    final nextTaskIds = Set<String>.from(expandedTaskIds)
-      ..remove(normalizedTaskId);
-    _updateExpandedAgentRunTaskIds(_activeMode, nextTaskIds);
   }
 
   void _upsertCancelledAgentRunMessage(String taskId) {
