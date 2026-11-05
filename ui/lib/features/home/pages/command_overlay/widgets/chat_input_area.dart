@@ -173,6 +173,9 @@ class ChatInputArea extends StatefulWidget {
   /// 极简输入态：只保留输入框与发送按钮（chat 页浮层里的紧凑形态）。
   final bool minimalComposer;
 
+  /// 只选图片的快捷入口（与 [onPickAttachment] 并存时由调用方决定优先用哪个）。
+  final Future<void> Function()? onPickImages;
+
   const ChatInputArea({
     super.key,
     required this.controller,
@@ -212,6 +215,7 @@ class ChatInputArea extends StatefulWidget {
     this.onAgentPermissionModeChanged,
     this.useIndependentSendButton = true,
     this.minimalComposer = false,
+    this.onPickImages,
   });
 
   @override

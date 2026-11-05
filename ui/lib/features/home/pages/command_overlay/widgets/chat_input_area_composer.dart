@@ -348,6 +348,13 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
           return;
         }
 
+        // 只有图片入口时，"+" 直接进相册，避免弹出空的附件菜单。
+        if (widget.onPickImages != null) {
+          _hideLegacyPopup();
+          widget.onPickImages!.call();
+          return;
+        }
+
         _hideLegacyPopup(alwaysNotify: true);
       },
     );
