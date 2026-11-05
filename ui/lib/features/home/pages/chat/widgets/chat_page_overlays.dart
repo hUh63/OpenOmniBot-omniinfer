@@ -21,132 +21,59 @@ class _UserMessageQuickMenuContent extends StatelessWidget {
     required String label,
     required VoidCallback onTap,
   }) {
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    final foregroundColor = isDark
-        ? palette.textPrimary
-        : const Color(0xFF172033);
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: foregroundColor),
-            const SizedBox(width: 10),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                color: foregroundColor,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    return OmniMenuItem(onTap: onTap, label: label, leading: Icon(icon));
   }
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.omniPalette;
-    final dividerColor = context.isDarkTheme
-        ? palette.borderSubtle.withValues(alpha: 0.58)
-        : Colors.white.withValues(alpha: 0.62);
-    return SizedBox(
+    return OmniMenuSurface(
       width: width,
-      child: OmniGlassPanel(
-        borderRadius: BorderRadius.circular(18),
-        child: Material(
-          color: Colors.transparent,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildAction(
-                context,
-                icon: Icons.content_copy_rounded,
-                label: LegacyTextLocalizer.isEnglish ? 'Copy' : '复制',
-                onTap: () => _select(context, _UserMessageQuickAction.copy),
-              ),
-              if (showEditAction) ...[
-                Divider(
-                  height: 1,
-                  thickness: 1,
-                  // 横线不占满宽度——两侧缩进到与菜单项内容 (icon/文字,
-                  // 水平 padding 14) 对齐,像原生"全选｜复制｜发送"那样只占
-                  // 中间一段,而不是贴着面板左右边。
-                  indent: 14,
-                  endIndent: 14,
-                  color: dividerColor,
-                ),
-                _buildAction(
-                  context,
-                  icon: Icons.edit_outlined,
-                  label: LegacyTextLocalizer.isEnglish ? 'Edit' : '编辑',
-                  onTap: () => _select(context, _UserMessageQuickAction.edit),
-                ),
-              ],
-              if (showRetryAction) ...[
-                Divider(
-                  height: 1,
-                  thickness: 1,
-                  // 横线不占满宽度——两侧缩进到与菜单项内容 (icon/文字,
-                  // 水平 padding 14) 对齐,像原生"全选｜复制｜发送"那样只占
-                  // 中间一段,而不是贴着面板左右边。
-                  indent: 14,
-                  endIndent: 14,
-                  color: dividerColor,
-                ),
-                _buildAction(
-                  context,
-                  icon: Icons.refresh_rounded,
-                  label: LegacyTextLocalizer.isEnglish ? 'Retry' : '重试这条消息',
-                  onTap: () => _select(context, _UserMessageQuickAction.retry),
-                ),
-              ],
-            ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildAction(
+            context,
+            icon: LucideIcons.copy,
+            label: LegacyTextLocalizer.isEnglish ? 'Copy' : '复制',
+            onTap: () => _select(context, _UserMessageQuickAction.copy),
           ),
-        ),
+          if (showEditAction)
+            _buildAction(
+              context,
+              icon: LucideIcons.pencil,
+              label: LegacyTextLocalizer.isEnglish ? 'Edit' : '编辑',
+              onTap: () => _select(context, _UserMessageQuickAction.edit),
+            ),
+          if (showRetryAction)
+            _buildAction(
+              context,
+              icon: LucideIcons.rotateCw,
+              label: LegacyTextLocalizer.isEnglish ? 'Retry' : '重试这条消息',
+              onTap: () => _select(context, _UserMessageQuickAction.retry),
+            ),
+        ],
       ),
     );
   }
 }
 
-class _PaneResizeHandle extends StatelessWidget {
-  const _PaneResizeHandle({
-    required this.onDragUpdate,
-    this.onDragStart,
-    this.onDragEnd,
-  });
-
-  final ValueChanged<double> onDragUpdate;
-  final VoidCallback? onDragStart;
-  final VoidCallback? onDragEnd;
+/// Hidden side panes keep their scroll/file state without accepting input.
+class _ChatPaneVisibility extends StatelessWidget {
+  const _ChatPaneVisibility({required this.hidden, required this.child});
+  final bool hidden;
+  final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onHorizontalDragStart: (_) => onDragStart?.call(),
-      onHorizontalDragUpdate: (details) => onDragUpdate(details.delta.dx),
-      onHorizontalDragEnd: (_) => onDragEnd?.call(),
-      onHorizontalDragCancel: () => onDragEnd?.call(),
-      child: const SizedBox(
-        width: HdPadPaneLayoutResolver.dividerHitWidth,
-        child: Center(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Color(0xFFD7E5FB),
-              borderRadius: BorderRadius.all(Radius.circular(999)),
-            ),
-            child: SizedBox(width: 3, height: 52),
-          ),
-        ),
+  Widget build(BuildContext context) => ExcludeFocus(
+    excluding: hidden,
+    child: ExcludeSemantics(
+      excluding: hidden,
+      child: IgnorePointer(
+        ignoring: hidden,
+        child: TickerMode(enabled: !hidden, child: child),
       ),
-    );
-  }
+    ),
+  );
 }
 
 class _ContextThresholdSheet extends StatefulWidget {
@@ -444,23 +371,8 @@ class _ContextThresholdSheetState extends State<_ContextThresholdSheet> {
         top: false,
         child: Padding(
           padding: EdgeInsets.only(top: 12, bottom: bottomInset),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: palette.surfacePrimary,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(28),
-              ),
-              border: Border(top: BorderSide(color: dividerColor)),
-              boxShadow: isDark
-                  ? const []
-                  : [
-                      BoxShadow(
-                        color: palette.shadowColor.withValues(alpha: 0.18),
-                        blurRadius: 24,
-                        offset: const Offset(0, -8),
-                      ),
-                    ],
-            ),
+          child: OmniGlassSheet(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
               child: Column(
