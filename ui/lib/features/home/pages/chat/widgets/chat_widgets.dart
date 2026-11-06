@@ -10,6 +10,7 @@ import 'package:ui/services/home_greeting_settings_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 import 'package:ui/widgets/omni_circle_button.dart';
+import 'package:ui/widgets/flclash/search_header.dart';
 
 import '../../../../../models/chat_message_model.dart';
 import '../../../../../services/app_background_service.dart';

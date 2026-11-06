@@ -18,7 +18,7 @@ extension _ChatPageUserMessageActions on _ChatPageStateBase {
       isScrollControlled: true,
       useRootNavigator: false,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ContextThresholdSheet(
+      builder: (_) => ContextThresholdSheet(
         initialThreshold: conversation.promptTokenThreshold,
         currentUsageTokens:
             conversation.latestPromptTokensUpdatedAt > 0 ||

@@ -157,7 +157,11 @@ extension _HomeDrawerHome on HomeDrawerState {
               const SizedBox(height: 10),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  // Move 12dp of the sidebar gutter inside its rows so the
+                  // selection has breathing room without narrowing the text.
+                  padding: EdgeInsets.symmetric(
+                    horizontal: widget.conversationSidebar ? 4 : 16,
+                  ),
                   child: SlidableAutoCloseBehavior(
                     child: isLoadingConversations
                         ? _buildConversationLoadingState()
