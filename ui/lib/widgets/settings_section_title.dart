@@ -7,53 +7,52 @@ class SettingsSectionTitle extends StatelessWidget {
     super.key,
     required this.label,
     this.subtitle,
+    this.trailing,
     this.topPadding = 0,
-    this.bottomPadding = 12,
+    this.bottomPadding = 10,
   });
 
   final String label;
   final String? subtitle;
+  final Widget? trailing;
   final double topPadding;
   final double bottomPadding;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
+    final titleWidget = Text(
+      context.trLegacy(label),
+      style: TextStyle(
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.3,
+        color: palette.textTertiary,
+        height: 1.35,
+      ),
+    );
     return Padding(
-      padding: EdgeInsets.only(top: topPadding, bottom: bottomPadding),
+      padding: EdgeInsets.fromLTRB(4, topPadding, 4, bottomPadding),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(
-                context.trLegacy(label),
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.6,
-                  color: palette.textTertiary,
-                  fontFamily: 'PingFang SC',
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Container(
-                  height: 1,
-                  color: palette.borderSubtle.withValues(
-                    alpha: context.isDarkTheme ? 0.56 : 0.8,
-                  ),
-                ),
-              ),
-            ],
-          ),
+          if (trailing == null)
+            titleWidget
+          else
+            Row(
+              children: [
+                Expanded(child: titleWidget),
+                const SizedBox(width: 8),
+                trailing!,
+              ],
+            ),
           if (subtitle != null) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             Text(
               context.trLegacy(subtitle!),
               style: TextStyle(
                 fontSize: 12,
-                height: 1.5,
+                height: 1.48,
                 color: palette.textSecondary,
                 fontWeight: FontWeight.w400,
               ),

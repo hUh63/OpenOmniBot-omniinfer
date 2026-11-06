@@ -1316,6 +1316,9 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     required bool showSurfaceSwitcher,
     VoidCallback? onWorkspacePaneTap,
     bool showWorkspacePaneButton = false,
+    VoidCallback? onConversationPaneTap,
+    bool conversationPaneVisible = false,
+    bool workspacePaneVisible = false,
   }) {
     final slashCommandCards =
         _showSlashCommandPanel &&
