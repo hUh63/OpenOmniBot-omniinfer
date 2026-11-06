@@ -258,6 +258,10 @@ must not modify long-term memory APIs or stored memory data.
 - ReTerminal settings pages replicate the main app's list style in Compose (no cards, hairline row dividers, 18dp page padding, 24dp group spacing, centered 17sp title bar): see `core/components/src/main/java/com/rk/components/compose/preferences/` and the extra tokens in `OmniPaletteExtras.kt` (provided by `KarbonTheme`).
 - Native terminal navigation uses the installed Miuix `NavDisplay` defaults in `MainActivityNavHost.kt`, with its existing controller/back stack. Activity open/close uses Android defaults. There is no Flutter preference gate, detached navigation dispatcher, or custom cross-activity animation override.
 
+### Na Personal Page UI
+- `NaPersonalPage` (`ui/lib/features/home/pages/agent/na_personal_page.dart`) and its child widgets (`na_composio_settings.dart`, `na_connector_grants.dart`, `na_notification_settings.dart`) use the app's shared liquid-glass components: `OmniSegmentedSlider` for the tab row, `OmniGlassCard` (`LiquidGlassStyle.regular`) for cards, `OmniSettingsSearchField` for search, and `OmniCircleButton` for header actions. Do not add page-local card, chip, or search styles to these pages.
+- Na page copy stays short and user-facing: no internal identifiers (Composio/toolkit slugs, account ids, tool versions, revisions, IANA) in the primary UI — collapse them under a 详情/advanced affordance. Prefer one short empty-state line over explanatory paragraphs.
+
 ### GitHub Codex Bot Rules
 - The self-hosted GitHub Actions Codex bot is configured in `.github/workflows/codex-bot.yml`.
 - Supported maintainer command format is `@codex <natural-language task>` in issue, PR, or review comments.

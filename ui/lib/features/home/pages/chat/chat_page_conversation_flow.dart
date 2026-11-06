@@ -731,6 +731,13 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         }
       }
       if (!_isConversationTargetRequestCurrent(sendTargetId)) return;
+      // ACP owns admission for both new and existing conversations. Optional
+      // terminal capabilities prepare their environment when a tool uses them.
+      final unavailableMessage = _activeAgentUnavailableMessage;
+      if (unavailableMessage != null) {
+        showToast(unavailableMessage, type: ToastType.error);
+        return;
+      }
       final messageText = submittedText.trim();
       final inputAttachments = submittedAttachments;
       final hasAttachments = inputAttachments.isNotEmpty;

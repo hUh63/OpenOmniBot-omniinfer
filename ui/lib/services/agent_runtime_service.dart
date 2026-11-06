@@ -213,6 +213,55 @@ const _agentUserErrors = <String, ({String zh, String en})>{
     zh: '当前模型的图片请求被服务商拒绝。请在聊天的“模型与设置”中选择支持图片的模型后重试；若已使用视觉模型，请检查图片格式、大小及服务商状态。',
     en: 'The provider rejected this image request. Select an image-capable model in Model & settings and retry. If already using a vision model, check the image format, size, and provider status.',
   ),
+  'naConnectionFailed': (
+    zh: '无法连接 Na 服务，请检查网络后重试。',
+    en: 'Could not connect to Na. Check your connection and try again.',
+  ),
+  'naRequestTimeout': (
+    zh: '连接 Na 服务超时，请稍后重试。',
+    en: 'The connection to Na timed out. Try again shortly.',
+  ),
+  'naCertificate': (
+    zh: 'Na 安全连接验证失败，请检查网络和设备时间。',
+    en: 'Could not verify the secure connection to Na. Check your network and device time.',
+  ),
+  'naAuthentication': (
+    zh: 'Na 连接验证已失效，请重新登录或检查连接设置。',
+    en: 'The Na connection is no longer authenticated. Sign in again or check the connection settings.',
+  ),
+  'naPermission': (
+    zh: '当前账号没有此 Na 操作的权限，请检查账号授权。',
+    en: 'Your account does not have permission for this Na action. Check its authorization.',
+  ),
+  'naConnectionChanged': (
+    zh: 'Na 连接已变化，请重新打开此对话。',
+    en: 'The Na connection changed. Reopen this conversation.',
+  ),
+  'naOwnerConflict': (
+    zh: '此 Na 对话属于其他账号或连接，请切回原账号或新建对话。',
+    en: 'This Na conversation belongs to another account or connection. Switch back or start a new conversation.',
+  ),
+  'naServiceUnavailable': (
+    zh: 'Na 服务暂时不可用，请稍后重试。',
+    en: 'Na is temporarily unavailable. Try again later.',
+  ),
+  'naRateLimited': (
+    zh: 'Na 请求过于频繁，请稍后重试。',
+    en: 'Na is rate limiting requests. Try again later.',
+  ),
+  'naRequestRejected': (
+    zh: 'Na 未接受此请求，请重新打开对话后重试。',
+    en: 'Na did not accept this request. Reopen the conversation and try again.',
+  ),
+  'naResponseInvalid': (
+    zh: 'Na 返回了无法识别的响应，请稍后重试。',
+    en: 'Na returned an invalid response. Try again later.',
+  ),
+  'naAdmissionUnconfirmed': (
+    zh: '尚未确认 Na 是否已受理，请重新打开对话查看状态。',
+    en: 'It is not yet confirmed whether Na accepted this request. Reopen the conversation to check its status.',
+  ),
+
   'unknown': (
     zh: '助手暂时无法完成操作，请重试。',
     en: 'The assistant could not complete this action. Please try again.',
@@ -275,6 +324,28 @@ String formatAgentRuntimeErrorForUser(
   }
   // 包维护（安装/卸载）的错误属于宿主，不是模型请求：先按结构化 failureKind 判定，
   // 再去看 timeout / command not found 这类宽泛诊断。
+
+  // Na connection failures belong to the cloud service, not the model Provider.
+  final naError = switch (failureKind) {
+    'na_connection_failed' => 'naConnectionFailed',
+    'na_request_timeout' => 'naRequestTimeout',
+    'na_tls_certificate_failure' => 'naCertificate',
+    'na_authentication_required' => 'naAuthentication',
+    'na_permission_denied' => 'naPermission',
+    'na_connection_changed' => 'naConnectionChanged',
+    'na_owner_conflict' => 'naOwnerConflict',
+    'na_service_unavailable' => 'naServiceUnavailable',
+    'na_rate_limited' => 'naRateLimited',
+    'na_request_rejected' => 'naRequestRejected',
+    'na_response_invalid' => 'naResponseInvalid',
+    'na_admission_unconfirmed' => 'naAdmissionUnconfirmed',
+    _ => null,
+  };
+  if (naError != null) return text(naError);
+
+  // Package maintenance errors belong to the host, not a model request. Use
+  // their structured kind before inspecting diagnostics such as "timeout".
+
   final packageError = switch (failureKind) {
     'agent_uninstall_failed' => 'uninstallFailed',
     'agent_uninstall_external_installation' => 'uninstallExternalInstallation',
@@ -1035,6 +1106,35 @@ class CodexRemoteFilePayload {
   }
 }
 
+enum AgentPackageOperation { install, uninstall }
+
+typedef _AgentPackageTask = ({
+  AgentPackageOperation operation,
+  String? distributionId,
+  bool force,
+  Future<Map<String, dynamic>> future,
+});
+
+/// Response attributed to one captured Na account and service endpoint.
+class NaPersonalResponse {
+  const NaPersonalResponse({required this.owner, required this.data});
+  final String owner;
+  final Map<String, dynamic> data;
+
+  factory NaPersonalResponse.fromMap(Map<String, dynamic> value) {
+    final owner = value['owner'];
+    if (owner is! String || owner.isEmpty) {
+      throw StateError('Na 返回了无效的连接归属。');
+    }
+    final raw = value['data'];
+    if (raw is! Map) throw StateError('Na 返回了无效的资源。');
+    return NaPersonalResponse(
+      owner: owner,
+      data: Map<String, dynamic>.from(raw),
+    );
+  }
+}
+
 class AgentRuntimeService {
   AgentRuntimeService._();
 
@@ -1070,7 +1170,76 @@ class AgentRuntimeService {
   static Stream<Set<String>> get agentPreparationChanges =>
       _agentPreparationController.stream;
 
+  static String _requiredAgentId(String agentId) {
+    final normalized = agentId.trim();
+    if (normalized.isEmpty)
+      throw ArgumentError('agent_identity_required: agentId');
+    return normalized;
+  }
+
+  /// Bounded Na resource bridge. Only status may discover a fresh owner;
+  /// native validates every operation against that captured connection.
+  static Future<NaPersonalResponse> requestNaPersonal({
+    required String operation,
+    String? owner,
+    String? id,
+    Map<String, dynamic> payload = const {},
+  }) async {
+    if (operation.trim().isEmpty ||
+        (operation != 'status' && (owner == null || owner.isEmpty))) {
+      throw ArgumentError(
+        'Na resource operation requires its connection owner',
+      );
+    }
+    final result = await _invokeMap('config/na/personal', {
+      'agentId': 'na-cloud',
+      'operation': operation,
+      if (owner != null) 'owner': owner,
+      if (id != null) 'id': id,
+      'payload': payload,
+    });
+    final response = NaPersonalResponse.fromMap(result);
+    if (owner != null && response.owner != owner) {
+      throw StateError('Na 连接已更改，请重新载入连接。');
+    }
+    return response;
+  }
+
+  /// Pure IANA calendar conversion; never connects or starts an Agent turn.
+  static Future<Map<String, dynamic>> requestNaLocalTime({
+    String? localTime,
+    String? at,
+    required String timezone,
+  }) => _invokeMap('config/na/local-time', {
+    'agentId': 'na-cloud',
+    if (localTime != null) 'localTime': localTime,
+    if (at != null) 'at': at,
+    'timezone': timezone,
+  });
+
+  /// Local device delivery preferences; private connector/project keys never
+  /// enter this API. Native captures the same Na account/endpoint owner.
+  static Future<NaPersonalResponse> requestNaNotifications({
+    String? owner,
+    bool? enabled,
+  }) async {
+    if (enabled != null && (owner == null || owner.isEmpty)) {
+      throw ArgumentError('Na notification changes require their connection owner');
+    }
+    final response = NaPersonalResponse.fromMap(await _invokeMap('config/na/notifications', {
+      'agentId': 'na-cloud',
+      'operation': enabled == null ? 'read' : 'write',
+      if (owner != null) 'owner': owner,
+      if (enabled != null) 'enabled': enabled,
+    }));
+    if (owner != null && response.owner != owner) {
+      throw StateError('Na 连接已更改，请重新载入通知设置。');
+    }
+    return response;
+  }
+
   static Future<AgentRuntimeStatus> status({String? agentId}) async {
+
     final result = await _invokeMap('status', {
       if (agentId != null && agentId.trim().isNotEmpty)
         'agentId': agentId.trim(),
@@ -1358,6 +1527,7 @@ class AgentRuntimeService {
     bool includeHistory = true,
     bool refreshConfig = false,
     String? conversationMode,
+    String? historyCursor,
   }) {
     return _invokeMap('session/load', {
       if (sessionId != null) 'sessionId': sessionId,
@@ -1365,9 +1535,17 @@ class AgentRuntimeService {
       if (agentId != null && agentId.trim().isNotEmpty)
         'agentId': agentId.trim(),
       'includeHistory': includeHistory,
+      if (historyCursor != null) 'historyCursor': historyCursor,
       if (refreshConfig) 'refreshConfig': true,
       if (conversationMode != null && conversationMode.trim().isNotEmpty)
         'conversationMode': conversationMode.trim(),
+    });
+  }
+
+  static Future<void> setNaHistorySyncEnabled(bool enabled) async {
+    await _invokeMap('config/na/historySync', {
+      'agentId': 'na-cloud',
+      'enabled': enabled,
     });
   }
 

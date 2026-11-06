@@ -3,10 +3,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Pages that make up the first-use tutorial flow.
 enum TutorialPage {
-  system,
-  development,
-  tools,
-  environmentProgress,
   permissions,
   provider,
   providerSelection,
@@ -19,9 +15,6 @@ enum TutorialPage {
 
 /// Pages reachable through the dotted pagination footer, in order.
 const List<TutorialPage> tutorialNavigationPages = <TutorialPage>[
-  TutorialPage.system,
-  TutorialPage.development,
-  TutorialPage.tools,
   TutorialPage.permissions,
   TutorialPage.provider,
   TutorialPage.providerSelection,
@@ -30,46 +23,6 @@ const List<TutorialPage> tutorialNavigationPages = <TutorialPage>[
   TutorialPage.primaryScenes,
   TutorialPage.memoryScenes,
 ];
-
-/// A starter development-environment preset.
-class EnvironmentPreset {
-  const EnvironmentPreset({
-    required this.id,
-    required this.icon,
-    required this.titleZh,
-    required this.titleEn,
-    required this.descriptionZh,
-    required this.descriptionEn,
-    required this.packageIds,
-    required this.contents,
-  });
-
-  final String id;
-  final IconData icon;
-  final String titleZh;
-  final String titleEn;
-  final String descriptionZh;
-  final String descriptionEn;
-  final List<String> packageIds;
-  final String contents;
-}
-
-/// An optional extra tool the user can add to the environment.
-class OptionalTool {
-  const OptionalTool({
-    required this.id,
-    required this.icon,
-    required this.label,
-    required this.descriptionZh,
-    required this.descriptionEn,
-  });
-
-  final String id;
-  final IconData icon;
-  final String label;
-  final String descriptionZh;
-  final String descriptionEn;
-}
 
 /// A model provider the user can connect to.
 class ProviderOption {
@@ -231,31 +184,27 @@ const List<SceneDefinition> sceneDefinitions = <SceneDefinition>[
     icon: LucideIcons.bot,
     title: 'Agent',
     descriptionZh: '理解任务、规划步骤并调用工具，建议选择能力最强的工具调用模型。',
-    descriptionEn:
-        'Understands tasks, plans work, and calls tools. Prefer your strongest tool-capable model.',
+    descriptionEn: 'Understands tasks, plans work, and calls tools. Prefer your strongest tool-capable model.',
   ),
   SceneDefinition(
     id: 'scene.compactor.context.chat',
     icon: LucideIcons.messagesSquare,
     title: 'Chat Compactor',
     descriptionZh: '在长对话中压缩历史上下文，平衡速度与总结准确度。',
-    descriptionEn:
-        'Compresses long chat history while balancing speed and summary accuracy.',
+    descriptionEn: 'Compresses long chat history while balancing speed and summary accuracy.',
   ),
   SceneDefinition(
     id: 'scene.memory.embedding',
     icon: LucideIcons.database,
     title: 'Memory Embed',
     descriptionZh: '把记忆转换为向量用于检索；若提供商有 embedding 模型，请优先选择。',
-    descriptionEn:
-        'Creates vectors for memory search. Prefer an embedding model when available.',
+    descriptionEn: 'Creates vectors for memory search. Prefer an embedding model when available.',
   ),
   SceneDefinition(
     id: 'scene.memory.rollup',
     icon: LucideIcons.memoryStick,
     title: 'Memory Rollup',
     descriptionZh: '归纳长期记忆并去除重复信息，适合稳定、成本适中的文本模型。',
-    descriptionEn:
-        'Consolidates long-term memory and removes duplicates. A reliable text model is ideal.',
+    descriptionEn: 'Consolidates long-term memory and removes duplicates. A reliable text model is ideal.',
   ),
 ];

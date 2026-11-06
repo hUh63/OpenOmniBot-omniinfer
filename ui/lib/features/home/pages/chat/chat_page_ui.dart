@@ -92,17 +92,11 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     return [
       if (_isInputAreaVisible) ...[
         if (_activeMode == ChatPageMode.agent &&
-            _activeAcpAgentId == 'na-cloud' &&
-            _agentCatalog?.agents.any(
-                  (agent) =>
-                      agent.id == 'na-cloud' && agent.configurationAvailable,
-                ) ==
-                true)
+            _activeAcpAgentId == 'na-cloud')
           ChatAppBarAction(
-            label: english ? 'Cloud connection' : '云端连接',
-            icon: LucideIcons.cloud,
-            onSelected: (_) =>
-                GoRouterManager.push('/home/agent_config/na-cloud'),
+            label: english ? 'Personal assistant' : '个人助理',
+            icon: LucideIcons.userRound,
+            onSelected: (_) => GoRouterManager.push('/home/na/personal'),
           ),
         ChatAppBarAction(
           label: english ? 'Commands' : '命令',
@@ -1376,66 +1370,68 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     return Stack(
       clipBehavior: Clip.hardEdge,
       children: [
-        Column(
-          children: [
-            ChatAppBar(
-              onMenuTap: _returnToConversationHome,
-              title: _currentConversation?.title,
-              actions: _chatHeaderActions(),
-              onPetTap: () {
-                unawaited(_handlePetOverlayTap());
-              },
-              isPetOpening: _isPetOverlayOpening,
-              isPetShowing: _isPetOverlayShowing,
-              onPrimaryModeTap:
-                  _activeMode == ChatPageMode.agent && _activeAcpAgentId != null
-                  ? () => GoRouterManager.push(
-                      '/home/agent_sessions',
-                      extra: _activeAcpAgentId,
-                    )
-                  : null,
-              activeMode: appBarMode,
-              onModeChanged: (value) {
-                unawaited(_switchChatMode(value, syncPage: true));
-              },
-              displayLayer: _resolveChatPaneDisplayLayer(),
-              onDisplayLayerChanged: _handleChatIslandDisplayLayerChanged,
-              onTerminalEnvironmentTap: (anchorContext) {
-                unawaited(_openTerminalEnvironmentEditor(anchorContext));
-              },
-              onTerminalTap: _handleTerminalToolTap,
-              onBrowserTap: _handleBrowserToolTap,
-              hasTerminalEnvironment: _terminalEnvironmentVariables.isNotEmpty,
-              isBrowserEnabled: _isBrowserSessionAvailable,
-              activeToolType: _lastAgentToolType,
-              acpAgentModes: _chatAcpAgentModeOptions,
-              activeAcpAgentId: switch (_activeMode) {
-                ChatPageMode.agent => _appBarActiveAcpAgentId,
-                ChatPageMode.openclaw => 'openclaw',
-                ChatPageMode.normal => _kXiaowanAcpAgentId,
-              },
-              showAppUpdateIndicator: showAppUpdateIndicator,
-              appUpdateTooltip: appUpdateTooltip,
-              onAppUpdateTap: showAppUpdateIndicator
-                  ? () {
-                      unawaited(_handleAppUpdateBannerTap());
-                    }
-                  : null,
-              translucent: backgroundActive,
-              visualProfile: visualProfile,
-              showMenuButton: showMenuButton,
-              showSurfaceSwitcher: showSurfaceSwitcher,
-              isPureChatSelected:
-                  _activeMode == ChatPageMode.normal && _isPureChatSelected,
-              showTerminalActions: _showLocalTerminalActions,
-              showWorkspacePaneButton: showWorkspacePaneButton,
-              onWorkspacePaneTap: onWorkspacePaneTap,
-              tutorialMenuAnchorKey: _firstUseTourMenuAnchorKey,
-              tutorialActionsAnchorKey: _firstUseTourActionsAnchorKey,
-              tutorialModeAnchorKey: _firstUseTourModeAnchorKey,
-            ),
-            Expanded(child: conversationBody),
-          ],
+        OmniHeaderBody(
+          header: ChatAppBar(
+            usePadLayout: constraints.maxWidth >= OmniLayoutBreakpoints.medium,
+            onMenuTap: _returnToConversationHome,
+            title: _currentConversation?.title,
+            actions: _chatHeaderActions(),
+            onPetTap: () {
+              unawaited(_handlePetOverlayTap());
+            },
+            isPetOpening: _isPetOverlayOpening,
+            isPetShowing: _isPetOverlayShowing,
+            onPrimaryModeTap:
+                _activeMode == ChatPageMode.agent && _activeAcpAgentId != null
+                ? () => GoRouterManager.push(
+                    '/home/agent_sessions',
+                    extra: _activeAcpAgentId,
+                  )
+                : null,
+            activeMode: appBarMode,
+            onModeChanged: (value) {
+              unawaited(_switchChatMode(value, syncPage: true));
+            },
+            displayLayer: _resolveChatPaneDisplayLayer(),
+            onDisplayLayerChanged: _handleChatIslandDisplayLayerChanged,
+            onTerminalEnvironmentTap: (anchorContext) {
+              unawaited(_openTerminalEnvironmentEditor(anchorContext));
+            },
+            onTerminalTap: _handleTerminalToolTap,
+            onBrowserTap: _handleBrowserToolTap,
+            hasTerminalEnvironment: _terminalEnvironmentVariables.isNotEmpty,
+            isBrowserEnabled: _isBrowserSessionAvailable,
+            activeToolType: _lastAgentToolType,
+            acpAgentModes: _chatAcpAgentModeOptions,
+            activeAcpAgentId: switch (_activeMode) {
+              ChatPageMode.agent => _appBarActiveAcpAgentId,
+              ChatPageMode.openclaw => 'openclaw',
+              ChatPageMode.normal => _kXiaowanAcpAgentId,
+            },
+            showAppUpdateIndicator: showAppUpdateIndicator,
+            appUpdateTooltip: appUpdateTooltip,
+            onAppUpdateTap: showAppUpdateIndicator
+                ? () {
+                    unawaited(_handleAppUpdateBannerTap());
+                  }
+                : null,
+            translucent: backgroundActive,
+            visualProfile: visualProfile,
+            showMenuButton: showMenuButton,
+            showSurfaceSwitcher: showSurfaceSwitcher,
+            isPureChatSelected:
+                _activeMode == ChatPageMode.normal && _isPureChatSelected,
+            showTerminalActions: _showLocalTerminalActions,
+            showWorkspacePaneButton: showWorkspacePaneButton,
+            onWorkspacePaneTap: onWorkspacePaneTap,
+            onConversationPaneTap: onConversationPaneTap,
+            conversationPaneVisible: conversationPaneVisible,
+            workspacePaneVisible: workspacePaneVisible,
+            tutorialMenuAnchorKey: _firstUseTourMenuAnchorKey,
+            tutorialActionsAnchorKey: _firstUseTourActionsAnchorKey,
+            tutorialModeAnchorKey: _firstUseTourModeAnchorKey,
+          ),
+          body: conversationBody,
         ),
         if (_isInputAreaVisible)
           Positioned(

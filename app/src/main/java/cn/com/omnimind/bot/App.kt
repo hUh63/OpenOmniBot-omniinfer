@@ -129,6 +129,7 @@ class App : BaseApplication() {
         }
 
         NestedBackgroundStateUtil.init(this)
+        cn.com.omnimind.bot.notifications.NaMessageService.initialize(this)
         cn.com.omnimind.baselib.llm.ModelSceneRegistry.init(this)
         // 升级后首次启动时 ensureRuntimeDirectories() 会迁移旧工作区（copyRecursively 整棵
         // 目录树）并复制内置资源，原本同步跑在 onCreate 主线程 —— 文件多时白屏甚至 ANR。

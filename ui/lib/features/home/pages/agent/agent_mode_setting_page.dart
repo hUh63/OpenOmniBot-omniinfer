@@ -13,6 +13,7 @@ import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
 import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/omni_segmented_slider.dart';
+import 'package:ui/widgets/navigation/open_container.dart';
 import 'package:ui/widgets/settings_detail_sheet.dart';
 import 'package:ui/widgets/settings_section_title.dart';
 
@@ -400,13 +401,29 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     }
   }
 
-  Future<void> _openAgentConfig(AcpAgentProfile agent) async {
+  Future<Object?> _openAgentConfig(
+    AcpAgentProfile agent,
+    OmniContainerSource source,
+  ) async {
+    if (_packageOperations.containsKey(agent.id)) return null;
+    final extra = {omniContainerExtraKey: source};
+    if (agent.id == 'na-cloud') {
+      await GoRouterManager.pushForResult<Object?>(
+        '/home/na/personal',
+        extra: extra,
+      );
+      if (mounted) await _load();
+      return null;
+    }
+    if (!agent.configurationAvailable) return null;
     final changed = await GoRouterManager.pushForResult<bool>(
       '/home/agent_config/${Uri.encodeComponent(agent.id)}',
+      extra: extra,
     );
     if (changed == true && mounted) {
       await _load();
     }
+    return changed;
   }
 
   String _pluginActionKey(OmniPluginActionItem action) =>
@@ -431,24 +448,34 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     final dark = context.isDarkTheme;
     final card = dark ? palette.surfacePrimary : Colors.white;
     final agents = _visibleAgents;
-    final managed = agents.where((agent) => agent.builtIn).toList();
-    final custom = agents.where((agent) => !agent.builtIn).toList();
-    return Scaffold(
-      backgroundColor: palette.pageBackground,
-      appBar: CommonAppBar(
-        title: _text('Agent 模式', 'Agent mode'),
-        primary: true,
-        actions: [
-          IconButton(
-            tooltip: _text('刷新检测', 'Refresh detection'),
-            onPressed: _refreshing ? null : () => _load(refresh: true),
-            icon: _refreshing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(LucideIcons.refreshCw),
+    final managed = agents.where((agent) => agent.builtIn).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final custom = agents.where((agent) => !agent.builtIn).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return PopScope(
+      canPop: !widget.active || !_searchVisible,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && widget.active && _searchVisible) _closeSearch();
+      },
+      child: Scaffold(
+        backgroundColor: palette.pageBackground,
+        appBar: OmniRootToolbar(
+          title: 'Agents',
+          primary: true,
+          showBackButton: !widget.embedded,
+          search: OmniRootToolbarSearch(
+            searching: _searchVisible,
+            onSearch: _openSearch,
+            onClose: _closeSearch,
+            controller: _searchController,
+            focusNode: _searchFocusNode,
+            onChanged: (value) => setState(() => _query = value),
+            hintText: _text('搜索 Agent', 'Search Agents'),
+            searchTooltip: _text('搜索 Agent', 'Search Agents'),
+            searchButtonKey: const Key('agent-search-button'),
+            closeButtonKey: const Key('agent-close-search'),
+            fieldKey: const Key('agent-contact-search'),
+            showClearButton: false,
           ),
           IconButton(
             tooltip: _text('添加自定义 ACP Agent', 'Add custom ACP Agent'),
@@ -682,19 +709,41 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     );
   }
 
-  /// 与设置主页一致的分组小标题。
-  Widget _buildSectionLabel(String label) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-          color: context.omniPalette.textTertiary,
-          fontFamily: 'PingFang SC',
+  Widget _buildContactSection({
+    required String title,
+    required List<AcpAgentProfile> agents,
+  }) => OmniSettingsGroup(
+    title: title,
+    translateTitle: false,
+    dividerIndent: 76,
+    children: [
+      for (var index = 0; index < agents.length; index++)
+        _buildAgentTile(
+          agents[index],
+          first: index == 0,
+          last: index == agents.length - 1,
         ),
+    ],
+  );
+
+  Widget _buildGeneralSettings() => OmniSettingsGroup(
+    title: _text('通用配置', 'General'),
+    translateTitle: false,
+    children: [
+      OmniSettingsTile(
+        tileKey: const Key('agent-shared-model'),
+        icon: LucideIcons.bot,
+        title: _text('默认模型', 'Default model'),
+        subtitle: _sharedModelLabel.isEmpty
+            ? _text('尚未配置统一模型', 'No shared model configured')
+            : _sharedModelLabel,
+        translateText: false,
+        onTap: () async {
+          await GoRouterManager.pushForResult<Object?>(
+            '/home/scene_model_setting',
+          );
+          if (mounted) await _loadSharedModel();
+        },
       ),
     );
   }
@@ -714,7 +763,11 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     );
   }
 
-  Widget _buildAgentTile(AcpAgentProfile agent) {
+  Widget _buildAgentTile(
+    AcpAgentProfile agent, {
+    required bool first,
+    required bool last,
+  }) {
     final palette = context.omniPalette;
     final status = _statusPresentation(agent.status, _english);
     final statusColor = agent.enabled ? status.color : const Color(0xFF98A2B3);
@@ -730,10 +783,11 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
               : _text('安装', 'Install')
         : _text('重新检测', 'Check again');
     final action = agent.managedAdapter ? _prepare : _test;
-    final capabilitySubtitle = _capabilitySubtitle(agent);
-    final canUninstall =
-        agent.uninstallable && agent.installed == true && agent.enabled;
-    return _FlatTile(
+    final needsAttention =
+        agent.status != 'online' ||
+        agent.packageVersion?.updateAvailable == true ||
+        agent.packageVersion?.error != null;
+    Widget buildTile(VoidCallback? onTap) => _AgentContactTile(
       tileKey: Key('agent-config-${agent.id}'),
       leading: AgentBrandIcon(
         agentId: agent.id,
@@ -765,15 +819,37 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       actionLabel: canTest ? testLabel : null,
       actionKey: Key('agent-check-${agent.id}'),
       onAction: canTest ? () => action(agent) : null,
-      navigationLabel: _text('配置', 'Configure'),
+      secondaryActionLabel: canUninstall ? _text('卸载', 'Uninstall') : null,
+      secondaryActionKey: Key('agent-uninstall-${agent.id}'),
+      onSecondaryAction: canUninstall ? () => _uninstall(agent) : null,
+      navigationLabel: agent.id == 'na-cloud' || agent.configurationAvailable
+          ? _text('配置', 'Configure')
+          : null,
       navigationKey: Key('agent-navigation-${agent.id}'),
       uninstallLabel: canUninstall ? _text('卸载', 'Uninstall') : null,
       uninstallKey: Key('agent-uninstall-${agent.id}'),
       onUninstall: canUninstall && !busy ? () => _uninstall(agent) : null,
       busy: busy,
-      onTap: preparing
-          ? () {}
-          : () => _openAgentConfig(agent),
+      onTap: onTap,
+    );
+    if ((agent.id != 'na-cloud' && !agent.configurationAvailable) || busy) {
+      return buildTile(null);
+    }
+    final rowShape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(
+        top: first ? const Radius.circular(22) : Radius.zero,
+        bottom: last ? const Radius.circular(22) : Radius.zero,
+      ),
+    );
+    return OmniOpenContainer(
+      key: ValueKey('agent-open-${agent.id}'),
+      closedBuilder: (rowContext, open) => Material(
+        color: rowContext.omniPalette.surfacePrimary,
+        shape: rowShape,
+        clipBehavior: Clip.antiAlias,
+        child: buildTile(open),
+      ),
+      onOpen: (source) => _openAgentConfig(agent, source),
     );
   }
 

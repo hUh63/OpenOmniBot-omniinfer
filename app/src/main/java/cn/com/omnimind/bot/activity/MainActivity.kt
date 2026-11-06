@@ -16,6 +16,8 @@ import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.App
 import cn.com.omnimind.bot.localmodel.LocalModelFeature
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalAutoStartManager
+import cn.com.omnimind.bot.terminal.EmbeddedTerminalInitCoordinator
+import cn.com.omnimind.bot.terminal.EmbeddedTerminalInstallService
 import cn.com.omnimind.bot.quicklog.QuickLogWidgetActionRouter
 import cn.com.omnimind.bot.ui.channel.ChannelManager
 import cn.com.omnimind.bot.ui.channel.FileSaveChannel
@@ -50,6 +52,13 @@ class MainActivity : FlutterActivity() {
 
     override fun shouldDestroyEngineWithHost(): Boolean {
         return false
+    }
+
+    override fun onFlutterUiDisplayed() {
+        super.onFlutterUiDisplayed()
+        // The shared installer owns this work beyond the Activity lifetime.
+        // Start after the first frame so setup never holds the launch screen.
+        EmbeddedTerminalInitCoordinator.startInBackground(applicationContext)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -165,6 +174,7 @@ class MainActivity : FlutterActivity() {
         LocalModelFeature.handleAppOpen(this)
         TaskRuntimeSettings.attachActivity(this)
         TaskRuntimeSettings.onActivityResumed(this)
+        EmbeddedTerminalInstallService.refresh(applicationContext)
         AppUpdateManager.requestSilentCheckIfDue(this)
         lifecycleScope.launch {
             runCatching {

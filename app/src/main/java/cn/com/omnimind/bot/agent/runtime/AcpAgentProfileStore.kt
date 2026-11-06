@@ -3,6 +3,8 @@ package cn.com.omnimind.bot.agent.runtime
 import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import cn.com.omnimind.baselib.i18n.AppLocaleManager
+import cn.com.omnimind.baselib.i18n.PromptLocale
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
@@ -96,6 +98,26 @@ internal data class AcpAgentHealth(
     val capabilities: Map<String, Any?> = emptyMap(),
     val preparationRevision: String? = null,
 ) {
+    /** In-app ACP implementations are present before environment/cloud preparation. */
+    fun forAgent(agentId: String): AcpAgentHealth {
+        if (agentId != NA_AGENT_ID && agentId != AcpAgentProfileStore.XIAOWAN_AGENT_ID) return this
+        return if (status == STATUS_MISSING) {
+            // External command discovery cannot describe bundled ACP code.
+            // Correct presence without claiming its dependencies are ready or
+            // that a cloud/account check has succeeded.
+            copy(
+                status = STATUS_UNCHECKED,
+                installed = true,
+                error = null,
+                latencyMs = null,
+                checkedAt = null,
+                preparationRevision = null,
+            )
+        } else {
+            copy(installed = true)
+        }
+    }
+
     companion object {
         const val STATUS_ONLINE = "online"
         const val STATUS_OFFLINE = "offline"
@@ -138,7 +160,12 @@ internal data class AcpOfficialRuntime(
  */
 internal class AcpAgentProfileStore(context: Context) {
     private val appContext = context.applicationContext
-    private val catalog = AcpAgentCatalog.load(appContext)
+    private val localizedCatalogs = mutableMapOf<PromptLocale, AcpAgentCatalog.Catalog>()
+    private val catalog: AcpAgentCatalog.Catalog
+        get() = synchronized(this) {
+            val locale = AppLocaleManager.resolvePromptLocale(appContext)
+            localizedCatalogs.getOrPut(locale) { AcpAgentCatalog.load(appContext) }
+        }
     private val preferences = context.applicationContext.getSharedPreferences(
         PREFERENCES_NAME,
         Context.MODE_PRIVATE

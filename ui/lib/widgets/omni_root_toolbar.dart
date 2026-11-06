@@ -103,6 +103,7 @@ class OmniRootToolbarSearch {
     this.closeButtonKey,
     this.fieldKey,
     this.clearButtonKey,
+    this.showClearButton = true,
     this.trailing,
   });
 
@@ -119,5 +120,6 @@ class OmniRootToolbarSearch {
   final Key? closeButtonKey;
   final Key? fieldKey;
   final Key? clearButtonKey;
+  final bool showClearButton;
   final Widget? trailing;
 }

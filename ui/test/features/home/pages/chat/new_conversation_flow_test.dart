@@ -20,6 +20,7 @@ import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/conversation_model.dart';
 import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/services/storage_service.dart';
+import 'package:ui/services/embedded_terminal_preparation_service.dart';
 import 'package:ui/theme/app_theme.dart';
 
 class _DraftFilePicker extends FilePickerPlatform {
@@ -72,6 +73,10 @@ void main() {
   Completer<void>? historyMetadataGate;
   Completer<void>? historySessionGate;
   Map<String, Object?>? historySessionResponse;
+  late Map<String, Map<String, Object?>> naHistoryPages;
+  late Set<String> failedNaHistoryCursors;
+  Completer<void>? naHistoryStatusGate;
+  var delayNaHistoryStatus = false;
   Completer<void>? remoteSessionLoadGate;
   Completer<void>? remoteHistoryReadGate;
   var useRemoteRuntime = false;
@@ -84,7 +89,7 @@ void main() {
   var failAgentStatus = false;
   var nextSessionNumber = 0;
   late Map<String, Map<String, Object>> sessionConfig;
-  List<Map<String, dynamic>>? messagesBeforeStatusFailure;
+  late Map<String, Object?> environmentSnapshot;
 
   Map<String, Object?> sessionResponse(String sessionId) => {
     'sessionId': sessionId,
@@ -134,6 +139,13 @@ void main() {
   ];
 
   setUp(() async {
+    EmbeddedTerminalPreparationService.instance.resetForTest();
+    environmentSnapshot = {
+      'running': false,
+      'completed': true,
+      'success': true,
+      'progress': 1.0,
+    };
     SharedPreferences.setMockInitialValues({});
     await StorageService.init();
     LegacyTextLocalizer.setResolvedLocale(const Locale('zh'));
@@ -147,6 +159,10 @@ void main() {
     historyMetadataGate = null;
     historySessionGate = null;
     historySessionResponse = null;
+    naHistoryPages = {};
+    failedNaHistoryCursors = {};
+    naHistoryStatusGate = null;
+    delayNaHistoryStatus = false;
     remoteSessionLoadGate = null;
     remoteHistoryReadGate = null;
     useRemoteRuntime = false;
@@ -171,6 +187,13 @@ void main() {
         return null;
       });
     }
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('cn.com.omnimind.bot/SpecialPermissionEvent'),
+      (call) async => call.method == 'getEmbeddedTerminalInitSnapshot'
+          ? environmentSnapshot
+          : null,
+    );
+    await EmbeddedTerminalPreparationService.instance.refresh();
     messenger.setMockMethodCallHandler(assistChannel, (call) async {
       assistCalls.add(call);
       switch (call.method) {
@@ -239,6 +262,10 @@ void main() {
         case 'agent/list':
           return {'selectedAgentId': 'xiaowan-acp', 'agents': agents};
         case 'status':
+          if (delayNaHistoryStatus) {
+            delayNaHistoryStatus = false;
+            await naHistoryStatusGate?.future;
+          }
           if (failAgentStatus) {
             messagesBeforeStatusFailure = assistCalls
                 .where((call) => call.method == 'replaceConversationMessages')
@@ -282,6 +309,20 @@ void main() {
           return sessionResponse(sessionId);
         case 'session/load':
           final arguments = call.arguments as Map;
+          if (failedNaHistoryCursors.contains(arguments['historyCursor'])) {
+            throw PlatformException(code: 'TEMPORARY_HISTORY_FAILURE');
+          }
+          if (arguments['agentId'] == 'na-cloud' &&
+              arguments['includeHistory'] == false &&
+              naHistoryStatusGate != null) {
+            delayNaHistoryStatus = true;
+          }
+          if (failSessionLoad) {
+            throw PlatformException(
+              code: 'SESSION_UNAVAILABLE',
+              message: 'Session load failed',
+            );
+          }
           if (useRemoteRuntime &&
               arguments['sessionId'] == 'remote-history-session') {
             if (arguments['includeHistory'] == true) {
@@ -313,10 +354,12 @@ void main() {
             };
           }
           if (arguments['refreshConfig'] == true) await sessionLoadGate?.future;
-          if (arguments['conversationId'] != null &&
-              arguments['includeHistory'] == false) {
+          if (arguments['conversationId'] != null) {
+            final snapshot =
+                naHistoryPages[arguments['historyCursor']] ??
+                historySessionResponse;
             await historySessionGate?.future;
-            if (historySessionResponse != null) return historySessionResponse;
+            if (snapshot != null) return snapshot;
           }
           return sessionResponse(
             (arguments['sessionId'] ??
@@ -345,6 +388,7 @@ void main() {
   });
 
   tearDown(() {
+    EmbeddedTerminalPreparationService.instance.resetForTest();
     coordinator.resetForTest();
     FilePickerPlatform.instance = originalPicker;
     LegacyTextLocalizer.clearResolvedLocale();
@@ -502,6 +546,712 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+  }
+
+  for (final installation in <String, Map<String, Object?>>{
+    'idle': {},
+    'running': {'running': true, 'completed': false},
+    'failed': {'running': false, 'completed': true, 'success': false},
+  }.entries) {
+    for (final existing in [false, true]) {
+      testWidgets(
+        'Xiaowan sends with ${installation.key} installation (existing=$existing)',
+        (tester) async {
+          allowConversationCreation = true;
+          environmentSnapshot = installation.value;
+          await EmbeddedTerminalPreparationService.instance.refresh();
+          const conversationId = 805;
+          if (existing) {
+            conversations = [
+              historyConversation(conversationId, ConversationMode.agent),
+            ];
+            historyPages[conversationId] = historyMessage(conversationId);
+          }
+          await pumpChat(
+            tester,
+            existing
+                ? const ConversationThreadTarget.existing(
+                    conversationId: conversationId,
+                    mode: ConversationMode.agent,
+                  )
+                : const ConversationThreadTarget.newConversation(
+                    agentId: 'xiaowan-acp',
+                  ),
+          );
+          expect(find.byType(ChatMessageList), findsOneWidget);
+          if (existing) {
+            expect(find.text('已加载历史消息 $conversationId'), findsOneWidget);
+          } else {
+            expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+          }
+          expectNoSessionAdmission();
+          const query = '终端安装不影响对话发送';
+          composer(tester).controller.text = query;
+          composer(tester).onSendMessage();
+          await tester.pumpAndSettle();
+          final prompt = agentCalls.singleWhere(
+            (call) => call.method == 'session/prompt',
+          );
+          expect((prompt.arguments as Map)['text'], query);
+          expect(
+            assistCalls.where((call) => call.method == 'createConversation'),
+            hasLength(existing ? 0 : 1),
+          );
+          if (!existing) {
+            expect(
+              agentCalls.where((call) => call.method == 'session/new'),
+              hasLength(1),
+            );
+          }
+          final messages = tester
+              .widget<ChatMessageList>(find.byType(ChatMessageList))
+              .messages;
+          expect(
+            messages.where((message) => message.text == query),
+            hasLength(1),
+          );
+          if (existing) {
+            expect(
+              messages.map((message) => message.text),
+              contains('已加载历史消息 $conversationId'),
+            );
+          }
+          // Installation completion must not create a session or replay a prompt.
+          final sessionCount = agentCalls
+              .where((call) => call.method == 'session/new')
+              .length;
+          environmentSnapshot = {
+            'running': false,
+            'completed': true,
+            'success': true,
+          };
+          await EmbeddedTerminalPreparationService.instance.refresh();
+          await tester.pumpAndSettle();
+          expect(
+            agentCalls.where((call) => call.method == 'session/prompt'),
+            hasLength(1),
+          );
+          expect(
+            agentCalls.where((call) => call.method == 'session/new'),
+            hasLength(sessionCount),
+          );
+          await disposeChat(tester);
+        },
+      );
+    }
+  }
+
+  testWidgets(
+    'an initial Xiaowan task submits once while system installation runs',
+    (tester) async {
+      allowConversationCreation = true;
+      environmentSnapshot = {'running': true, 'completed': false};
+      await EmbeddedTerminalPreparationService.instance.refresh();
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(
+          agentId: 'xiaowan-acp',
+          initialMessage: '安装期间收到的任务',
+          requestKey: 'task-during-installation',
+        ),
+      );
+      final prompt = agentCalls.singleWhere(
+        (call) => call.method == 'session/prompt',
+      );
+      expect((prompt.arguments as Map)['text'], '安装期间收到的任务');
+      expect(
+        agentCalls.where((call) => call.method == 'session/new'),
+        hasLength(1),
+      );
+      expect(
+        tester
+            .widget<ChatMessageList>(find.byType(ChatMessageList))
+            .messages
+            .where((message) => message.text == '安装期间收到的任务'),
+        hasLength(1),
+      );
+      environmentSnapshot = {
+        'running': false,
+        'completed': true,
+        'success': true,
+      };
+      await EmbeddedTerminalPreparationService.instance.refresh();
+      await tester.pumpAndSettle();
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        hasLength(1),
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  for (final target in [
+    const ConversationThreadTarget.newConversation(
+      mode: ConversationMode.chatOnly,
+    ),
+    const ConversationThreadTarget.newConversation(agentId: 'na-cloud'),
+  ]) {
+    testWidgets(
+      'incoming ${target.mode.storageValue}/${target.agentId} keeps its draft while installation runs',
+      (tester) async {
+        environmentSnapshot = {'running': true, 'completed': false};
+        await EmbeddedTerminalPreparationService.instance.refresh();
+        initializeGate = Completer<void>();
+        await pumpChat(tester, target, settle: false);
+        await pumpHistoryFrames(tester);
+        initializeGate!.complete();
+        await tester.pumpAndSettle();
+        expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+        expectNoSessionAdmission();
+        await disposeChat(tester);
+      },
+    );
+  }
+
+  testWidgets(
+    'fresh chat startup remains Xiaowan with no preferences and an unprepared environment',
+    (tester) async {
+      environmentSnapshot = {'running': true, 'completed': false};
+      await EmbeddedTerminalPreparationService.instance.refresh();
+      reportedStatusAgentId = 'na-cloud';
+      agents.firstWhere((agent) => agent['id'] == 'xiaowan-acp').addAll({
+        'installed': null,
+        'status': 'unchecked',
+      });
+      await pumpChat(tester, null, settle: false);
+      await pumpHistoryFrames(tester);
+      expect(selector(tester).selectedId, 'xiaowan-acp');
+      expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+      expectNoSessionAdmission();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'startup preserves a persisted explicit Na draft while local setup runs',
+    (tester) async {
+      environmentSnapshot = {'running': true, 'completed': false};
+      await EmbeddedTerminalPreparationService.instance.refresh();
+      restoredTarget = const ConversationThreadTarget.newConversation(
+        agentId: 'na-cloud',
+        requestKey: 'persisted-na-draft',
+      );
+      await pumpChat(tester, null);
+      expect(selector(tester).selectedId, 'na-cloud');
+      expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+      expectNoSessionAdmission();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets('system failure leaves mode switching and the draft available', (
+    tester,
+  ) async {
+    environmentSnapshot = {
+      'running': false,
+      'completed': true,
+      'success': false,
+    };
+    await EmbeddedTerminalPreparationService.instance.refresh();
+    await pumpChat(
+      tester,
+      const ConversationThreadTarget.newConversation(agentId: 'xiaowan-acp'),
+      settle: false,
+    );
+    await pumpHistoryFrames(tester);
+    expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+    composer(tester).controller.text = '可切换的输入';
+    await chooseMode(tester, 'na-cloud');
+    expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+    expect(composer(tester).controller.text, '可切换的输入');
+    expect(selector(tester).selectedId, 'na-cloud');
+    expectNoSessionAdmission();
+    await disposeChat(tester);
+
+    await pumpChat(
+      tester,
+      const ConversationThreadTarget.newConversation(
+        mode: ConversationMode.chatOnly,
+      ),
+    );
+    expect(find.byType(ChatEmptyGreeting), findsOneWidget);
+    await disposeChat(tester);
+  });
+
+  for (final value in ['off', 'none', 'on', 'High']) {
+    testWidgets('ACP reasoning value $value survives settings and prompt admission', (
+      tester,
+    ) async {
+      useRemoteRuntime = true;
+      allowConversationCreation = true;
+      reasoningOptions = ['off', 'none', 'on', 'High'];
+      reasoningValue = value;
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(agentId: 'codex-remote'),
+      );
+      composer(tester).onTriggerSlashCommand!();
+      await tester.pumpAndSettle();
+      expect(agentCalls.where((call) => call.method == 'config/read'), isNotEmpty);
+      composer(tester).controller.text = '保留原始档位';
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('chat-acp-config-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('acp-config-thought_level')));
+      await tester.pumpAndSettle();
+      for (final choice in reasoningOptions) {
+        expect(find.text(choice), findsOneWidget);
+      }
+      await tester.tap(find.byKey(ValueKey('acp-config-thought_level-value-$value')));
+      await tester.pumpAndSettle();
+      final write = agentCalls.lastWhere((call) => call.method == 'session/set_config_option');
+      expect((write.arguments as Map)['configId'], 'thought_level');
+      expect((write.arguments as Map)['value'], value);
+      await dismissConfigPanel(tester);
+      composer(tester).onSendMessage();
+      await tester.pumpAndSettle();
+      final prompt = agentCalls.singleWhere((call) => call.method == 'session/prompt');
+      expect((prompt.arguments as Map)['effort'], value);
+      await disposeChat(tester);
+    });
+  }
+
+  testWidgets(
+    'Pad resizing and pane controls preserve the draft without admitting a turn',
+    (tester) async {
+      addTearDown(tester.view.resetViewInsets);
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(
+          mode: ConversationMode.agent,
+          requestKey: 'pad-resize-draft',
+          agentId: 'xiaowan-acp',
+        ),
+        size: const Size(768, 1024),
+      );
+      final controller = composer(tester).controller;
+      controller.text = '旋转平板后仍保留的草稿';
+      final focusNode = composer(tester).focusNode;
+      Future<void> togglePane({required bool conversation}) async {
+        final direct = find.byKey(
+          ValueKey(
+            conversation
+                ? 'chat-app-bar-sidebar-button'
+                : 'chat-app-bar-workspace-button',
+          ),
+        );
+        if (direct.evaluate().isNotEmpty) {
+          await tester.tap(direct);
+        } else {
+          await tester.tap(
+            find.byKey(const ValueKey('chat-app-bar-layout-button')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(
+              ValueKey(
+                conversation
+                    ? 'chat-app-bar-layout-conversations'
+                    : 'chat-app-bar-layout-workspace',
+              ),
+            ),
+          );
+        }
+        await tester.pumpAndSettle();
+      }
+
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isTrue,
+      );
+      expect(
+        tester.widget<ChatAppBar>(find.byType(ChatAppBar)).workspacePaneVisible,
+        isFalse,
+      );
+      await togglePane(conversation: true);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isFalse,
+      );
+      expect(
+        tester.widget<ChatAppBar>(find.byType(ChatAppBar)).workspacePaneVisible,
+        isFalse,
+      );
+      focusNode.requestFocus();
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyB);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isTrue,
+      );
+      await togglePane(conversation: false);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<ChatAppBar>(find.byType(ChatAppBar)).workspacePaneVisible,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isFalse,
+      );
+      await togglePane(conversation: true);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isTrue,
+      );
+      expect(
+        tester.widget<ChatAppBar>(find.byType(ChatAppBar)).workspacePaneVisible,
+        isFalse,
+      );
+      for (final size in [
+        const Size(1366, 1024),
+        const Size(960, 480),
+        const Size(844, 390),
+        const Size(600, 960),
+        const Size(768, 1024),
+      ]) {
+        tester.view.physicalSize = size;
+        await tester.pumpAndSettle();
+        expect(composer(tester).controller, same(controller));
+        expect(composer(tester).focusNode, same(focusNode));
+        expect(controller.text, '旋转平板后仍保留的草稿');
+        if (size.height < 500) {
+          focusNode.requestFocus();
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 160);
+          await tester.pumpAndSettle();
+          expect(
+            tester.getRect(find.byType(ChatInputArea)).bottom,
+            lessThanOrEqualTo(size.height - 160),
+          );
+          expect(
+            find
+                    .byKey(const ValueKey('chat-app-bar-sidebar-button'))
+                    .evaluate()
+                    .isNotEmpty ||
+                find
+                    .byKey(const ValueKey('chat-app-bar-layout-button'))
+                    .evaluate()
+                    .isNotEmpty,
+            isTrue,
+          );
+          tester.view.viewInsets = FakeViewPadding.zero;
+          await tester.pumpAndSettle();
+        }
+        expect(tester.takeException(), isNull);
+      }
+      // A split-window resize can unmount the divider while the pointer is
+      // still down. Returning to Pad layout must accept a fresh transaction.
+      final resizeHandle = find.byKey(
+        const ValueKey('chat-conversation-resize-handle'),
+      );
+      final drag = await tester.startGesture(tester.getCenter(resizeHandle));
+      await drag.moveBy(const Offset(30, 0));
+      await tester.pump();
+      await drag.moveBy(const Offset(20, 0));
+      await tester.pump();
+      tester.view.physicalSize = const Size(600, 960);
+      await tester.pumpAndSettle();
+      expect(find.byType(ChatPaneResizeHandle), findsNothing);
+      await drag.up();
+      tester.view.physicalSize = const Size(768, 1024);
+      await tester.pumpAndSettle();
+      await togglePane(conversation: true);
+      await togglePane(conversation: true);
+      final dividerAnimation = tester.widget<AnimatedContainer>(
+        find
+            .ancestor(
+              of: resizeHandle,
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
+      );
+      expect(dividerAnimation.duration, const Duration(milliseconds: 280));
+      expect(controller.text, '旋转平板后仍保留的草稿');
+      focusNode.requestFocus();
+      await tester.pump();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 340);
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.byType(ChatInputArea)).bottom,
+        lessThanOrEqualTo(684),
+      );
+      expect(
+        find
+                .byKey(const ValueKey('chat-app-bar-sidebar-button'))
+                .evaluate()
+                .isNotEmpty ||
+            find
+                .byKey(const ValueKey('chat-app-bar-layout-button'))
+                .evaluate()
+                .isNotEmpty,
+        isTrue,
+      );
+      expectNoSessionAdmission();
+      expectNoPersistedDraft();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'Pad history keeps transcript and tool details readable across columns',
+    (tester) async {
+      const conversationId = 806;
+      conversations = [
+        historyConversation(
+          conversationId,
+          ConversationMode.agent,
+          messageCount: 3,
+        ),
+        historyConversation(807, ConversationMode.agent),
+      ];
+      historyPages[807] = historyMessage(807);
+      historyPages[conversationId] = [
+        ChatMessageModel(
+          id: 'pad-answer',
+          type: 1,
+          user: 2,
+          content: const {'text': '检查完成，当前工作区没有待提交改动。'},
+          streamMeta: const {
+            'parentTaskId': 'pad-turn',
+            'kind': 'text_snapshot',
+            'seq': 3,
+            'isFinal': true,
+          },
+        ).toJson(),
+        ChatMessageModel.cardMessage(
+          const {
+            'type': 'agent_tool_summary',
+            'uiStyle': 'agent_tool',
+            'toolType': 'terminal',
+            'status': 'success',
+            'toolTitle': '运行 git status',
+            'summary': '命令执行完成',
+            'terminalOutput':
+                'On branch main\nnothing to commit, working tree clean',
+          },
+          id: 'pad-tool',
+          streamMeta: const {
+            'parentTaskId': 'pad-turn',
+            'kind': 'tool_completed',
+            'seq': 2,
+            'isFinal': false,
+          },
+        ).toJson(),
+        ...historyMessage(conversationId),
+      ];
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: conversationId,
+          mode: ConversationMode.agent,
+        ),
+        size: const Size(1366, 1024),
+      );
+      expect(composer(tester).focusNode.hasFocus, isFalse);
+      expect(tester.testTextInput.isVisible, isFalse);
+      Future<void> shortcut(LogicalKeyboardKey key) async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(key);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pumpAndSettle();
+      }
+
+      await shortcut(LogicalKeyboardKey.keyB);
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isFalse,
+      );
+      await shortcut(LogicalKeyboardKey.keyB);
+      expect(
+        tester
+            .widget<ChatAppBar>(find.byType(ChatAppBar))
+            .conversationPaneVisible,
+        isTrue,
+      );
+      await shortcut(LogicalKeyboardKey.keyE);
+      expect(
+        tester.widget<ChatAppBar>(find.byType(ChatAppBar)).workspacePaneVisible,
+        isFalse,
+      );
+      await shortcut(LogicalKeyboardKey.keyE);
+      expect(
+        tester.widget<ChatAppBar>(find.byType(ChatAppBar)).workspacePaneVisible,
+        isTrue,
+      );
+      await shortcut(LogicalKeyboardKey.keyL);
+      expect(composer(tester).focusNode.hasFocus, isTrue);
+      composer(tester).focusNode.unfocus();
+      await tester.pumpAndSettle();
+      for (final size in [
+        const Size(1366, 1024),
+        const Size(768, 1024),
+        const Size(960, 480),
+      ]) {
+        tester.view.physicalSize = size;
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('检查完成，当前工作区没有待提交改动。', findRichText: true),
+          findsOneWidget,
+        );
+        expect(
+          tester.getSize(find.byType(ChatMessageList)).width,
+          lessThanOrEqualTo(840),
+        );
+        final header = find.byKey(const ValueKey('agent-run-summary-pad-turn'));
+        await tester.ensureVisible(header);
+        await tester.tap(header);
+        await tester.pumpAndSettle();
+        expect(find.text('执行命令'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(
+        find.descendant(
+          of: find.byType(HomeDrawer),
+          matching: find.text('历史对话 807'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChatPage), findsOneWidget);
+      expect(find.text('已加载历史消息 807'), findsOneWidget);
+      expect(
+        tester
+            .widget<Semantics>(
+              find.byKey(const ValueKey('home-current-thread-agent:807')),
+            )
+            .properties
+            .selected,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<Semantics>(
+              find.byKey(const ValueKey('home-current-thread-agent:806')),
+            )
+            .properties
+            .selected,
+        isFalse,
+      );
+      await tester.tap(find.byKey(const ValueKey('home-search-button')));
+      await tester.pumpAndSettle();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('home-close-search')), findsNothing);
+      expect(find.byType(ChatPage), findsOneWidget);
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        isEmpty,
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  for (final keyboardAlreadyOpen in [false, true]) {
+    testWidgets('Pad history search keeps the greeting at rest '
+        '(keyboardAlreadyOpen=$keyboardAlreadyOpen)', (tester) async {
+      addTearDown(tester.view.resetViewInsets);
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(
+          mode: ConversationMode.agent,
+          requestKey: 'pad-search-keyboard',
+          agentId: 'xiaowan-acp',
+        ),
+        size: const Size(1069, 668),
+      );
+      final input = composer(tester);
+      input.focusNode.unfocus();
+      await tester.pumpAndSettle();
+      final greeting = find.byType(ChatEmptyGreeting);
+      AlignmentGeometry greetingAlignment() => tester
+          .widget<AnimatedAlign>(
+            find.ancestor(of: greeting, matching: find.byType(AnimatedAlign)),
+          )
+          .alignment;
+      const restingAlignment = Alignment(0, -.18);
+      final restingPosition = tester.getTopLeft(greeting);
+      final restingComposerBottom = tester
+          .getRect(find.byType(ChatInputArea))
+          .bottom;
+      expect(greetingAlignment(), restingAlignment);
+
+      if (keyboardAlreadyOpen) {
+        input.focusNode.requestFocus();
+        await tester.pump();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 280);
+        await tester.pumpAndSettle();
+        expect(greetingAlignment(), Alignment.topLeft);
+      }
+
+      await tester.tap(find.byKey(const ValueKey('home-search-button')));
+      await tester.pumpAndSettle();
+      final searchFocus = tester
+          .widget<TextField>(
+            find.descendant(
+              of: find.byType(HomeDrawer),
+              matching: find.byType(TextField),
+            ),
+          )
+          .focusNode!;
+      expect(searchFocus.hasFocus, isTrue);
+      expect(input.focusNode.hasFocus, isFalse);
+      expect(greetingAlignment(), restingAlignment);
+
+      for (final inset
+          in keyboardAlreadyOpen ? [280.0] : [40.0, 140.0, 280.0]) {
+        tester.view.viewInsets = FakeViewPadding(bottom: inset);
+        await tester.pumpAndSettle();
+        expect(greetingAlignment(), restingAlignment);
+        expect(tester.getTopLeft(greeting).dx, closeTo(restingPosition.dx, .5));
+        expect(tester.getTopLeft(greeting).dy, closeTo(restingPosition.dy, .5));
+        expect(
+          tester.getRect(find.byType(ChatInputArea)).bottom,
+          closeTo(restingComposerBottom, .5),
+        );
+      }
+
+      // Focus ownership can change without any new keyboard-metrics event.
+      input.focusNode.requestFocus();
+      await tester.pumpAndSettle();
+      expect(greetingAlignment(), Alignment.topLeft);
+      searchFocus.requestFocus();
+      await tester.pumpAndSettle();
+      expect(greetingAlignment(), restingAlignment);
+      await tester.tap(find.byKey(const ValueKey('home-close-search')));
+      await tester.pumpAndSettle();
+      expect(greetingAlignment(), restingAlignment);
+
+      // Unmounting the focused sidebar must not notify during tree disposal.
+      await tester.tap(find.byKey(const ValueKey('home-search-button')));
+      await tester.pumpAndSettle();
+      tester.view.physicalSize = const Size(668, 1069);
+      await tester.pumpAndSettle();
+      expect(find.byType(HomeDrawer), findsNothing);
+      expect(greetingAlignment(), restingAlignment);
+      expect(tester.takeException(), isNull);
+      expectNoSessionAdmission();
+      expectNoPersistedDraft();
+      await disposeChat(tester);
+    });
   }
 
   for (final existing in [false, true]) {
@@ -778,6 +1528,389 @@ void main() {
     expect(find.byType(ChatEmptyGreeting), findsNothing);
     await disposeChat(tester);
   });
+
+  Map<String, Object?> naHistory(
+    String text, {
+    String status = 'completed',
+    String turn = 'other-phone-turn',
+  }) => {
+    'threadId': 'na:fixture:conversation',
+    'agentId': 'na-cloud',
+    'thread': {
+      'id': 'na:fixture:conversation',
+      'agentId': 'na-cloud',
+      'turns': [
+        {
+          'id': turn,
+          'status': status,
+          'stopReason': status == 'completed' ? 'end_turn' : null,
+          'items': [
+            {'id': '$turn-reply', 'type': 'agentMessage', 'text': text},
+          ],
+        },
+      ],
+    },
+  };
+
+  Future<void> emitNaChange(
+    WidgetTester tester, {
+    int? id,
+    String? owner,
+  }) async {
+    await tester.runAsync(() async {
+      await messenger.handlePlatformMessage(
+        'cn.com.omnimind.bot/AssistCoreEvent',
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('onConversationListChanged', {
+            'reason': 'na_cloud_history_changed',
+            if (id != null) 'conversation': {'id': id, 'agentId': 'na-cloud'},
+            if (owner != null) 'naOwnerPrefix': owner,
+          }),
+        ),
+        (_) {},
+      );
+      await Future<void>.delayed(Duration.zero);
+    });
+    await pumpHistoryFrames(tester);
+  }
+
+  Future<void> openNaHistory(WidgetTester tester) async {
+    AssistsMessageService.hasNaHistoryOwnerSnapshot = false;
+    conversations = [
+      {
+        ...historyConversation(806, ConversationMode.agent),
+        'agentId': 'na-cloud',
+      },
+    ];
+    historySessionResponse = naHistory('另一台手机的旧回复');
+    await pumpChat(
+      tester,
+      const ConversationThreadTarget.existing(
+        conversationId: 806,
+        mode: ConversationMode.agent,
+        agentId: 'na-cloud',
+      ),
+    );
+    expect(
+      coordinator
+          .runtimeFor(conversationId: 806, mode: kChatRuntimeModeAgent)!
+          .messages
+          .where((row) => row.text == '另一台手机的旧回复'),
+      hasLength(1),
+    );
+    agentCalls.clear();
+  }
+
+  testWidgets('Na imports earlier cloud pages after showing the latest page', (
+    tester,
+  ) async {
+    AssistsMessageService.hasNaHistoryOwnerSnapshot = false;
+    conversations = [
+      {
+        ...historyConversation(806, ConversationMode.agent),
+        'agentId': 'na-cloud',
+      },
+    ];
+    historySessionResponse = {
+      ...naHistory('最新一页'),
+      'nextRunCursor': 'before-recent',
+    };
+    naHistoryPages = {
+      'before-recent': {
+        ...naHistory('中间一页', turn: 'middle'),
+        'nextRunCursor': 'before-middle',
+      },
+      'before-middle': naHistory('最早一页', turn: 'oldest'),
+    };
+    await pumpChat(
+      tester,
+      const ConversationThreadTarget.existing(
+        conversationId: 806,
+        mode: ConversationMode.agent,
+        agentId: 'na-cloud',
+      ),
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: 806,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(
+      runtime.messages.map((row) => row.text),
+      containsAll(['最新一页', '中间一页', '最早一页']),
+    );
+    expect(
+      agentCalls
+          .where(
+            (call) =>
+                call.method == 'session/load' &&
+                (call.arguments as Map)['historyCursor'] != null,
+          )
+          .map((call) => (call.arguments as Map)['historyCursor']),
+      ['before-recent', 'before-middle'],
+    );
+    agentCalls.clear();
+    await emitNaChange(tester, id: 806);
+    expect(
+      agentCalls.where((call) => call.method == 'session/load'),
+      hasLength(1),
+    );
+    expect(
+      runtime.messages.map((row) => row.text),
+      containsAll(['最新一页', '中间一页', '最早一页']),
+    );
+    await disposeChat(tester);
+  });
+
+  testWidgets(
+    'Na resume catches messages written while this phone was backgrounded',
+    (tester) async {
+      await openNaHistory(tester);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      historySessionResponse = naHistory('后台期间另一手机的新消息');
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      final runtime = coordinator.runtimeFor(
+        conversationId: 806,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(
+        runtime.messages.where((row) => row.text == '后台期间另一手机的新消息'),
+        hasLength(1),
+      );
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        isEmpty,
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'Na invalidation imports another phone output once without a local prompt',
+    (tester) async {
+      await openNaHistory(tester);
+      historySessionResponse = naHistory('另一台手机正在继续输出', status: 'running');
+      await emitNaChange(tester, id: 806);
+      await emitNaChange(tester, id: 806);
+      final runtime = coordinator.runtimeFor(
+        conversationId: 806,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(
+        runtime.messages.where((row) => row.text == '另一台手机正在继续输出'),
+        hasLength(1),
+      );
+      expect(runtime.hasInFlightTask, false);
+      expect(runtime.activeAcpTurnId, isNull);
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        isEmpty,
+      );
+      historySessionResponse = naHistory('另一台手机已完成');
+      await emitNaChange(tester, id: 806);
+      expect(
+        runtime.messages.where((row) => row.text == '另一台手机已完成'),
+        hasLength(1),
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets('Na reconnect continues an interrupted earlier history page', (
+    tester,
+  ) async {
+    AssistsMessageService.hasNaHistoryOwnerSnapshot = false;
+    conversations = [
+      {
+        ...historyConversation(806, ConversationMode.agent),
+        'agentId': 'na-cloud',
+      },
+    ];
+    historySessionResponse = {
+      ...naHistory('最近消息'),
+      'nextRunCursor': 'before-recent',
+    };
+    naHistoryPages = {'before-recent': naHistory('断网前尚未加载的旧消息', turn: 'older')};
+    failedNaHistoryCursors.add('before-recent');
+    await pumpChat(
+      tester,
+      const ConversationThreadTarget.existing(
+        conversationId: 806,
+        mode: ConversationMode.agent,
+        agentId: 'na-cloud',
+      ),
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: 806,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    expect(
+      runtime.messages.map((row) => row.text),
+      isNot(contains('断网前尚未加载的旧消息')),
+    );
+    failedNaHistoryCursors.clear();
+    await emitNaChange(tester, id: 806);
+    await tester.pumpAndSettle();
+    expect(
+      runtime.messages.map((row) => row.text),
+      containsAll(['最近消息', '断网前尚未加载的旧消息']),
+    );
+    await disposeChat(tester);
+  });
+
+  testWidgets(
+    'Na late initial snapshot cannot roll back newer completed remote output',
+    (tester) async {
+      AssistsMessageService.hasNaHistoryOwnerSnapshot = false;
+      conversations = [
+        {
+          ...historyConversation(806, ConversationMode.agent),
+          'agentId': 'na-cloud',
+        },
+      ];
+      historyPages[806] = historyMessage(806);
+      historySessionResponse = {
+        ...naHistory('过时的未完成片段', status: 'running'),
+        'eventCursor': 10,
+      };
+      naHistoryStatusGate = Completer<void>();
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: 806,
+          mode: ConversationMode.agent,
+          agentId: 'na-cloud',
+        ),
+        settle: false,
+      );
+      await pumpHistoryFrames(tester);
+      historySessionResponse = {...naHistory('更新且已完成的回复'), 'eventCursor': 20};
+      await emitNaChange(tester, id: 806);
+      final runtime = coordinator.runtimeFor(
+        conversationId: 806,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(runtime.messages.map((row) => row.text), contains('更新且已完成的回复'));
+      naHistoryStatusGate!.complete();
+      await tester.pumpAndSettle();
+      expect(
+        runtime.messages.map((row) => row.text),
+        isNot(contains('过时的未完成片段')),
+      );
+      expect(
+        runtime.messages
+            .singleWhere((row) => row.text == '更新且已完成的回复')
+            .streamMeta?['isFinal'],
+        true,
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'Na reads preserve server activity time rather than the synchronization time',
+    (tester) async {
+      await openNaHistory(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+      expect(conversations.single['updatedAt'], 2000);
+      historySessionResponse = naHistory('更晚的服务端消息');
+      (historySessionResponse!['thread'] as Map)['updatedAt'] =
+          '2026-10-01T00:00:00Z';
+      await emitNaChange(tester, id: 806);
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+      expect(
+        conversations.single['updatedAt'],
+        DateTime.utc(2026, 10, 1).millisecondsSinceEpoch,
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets('Na ignores other conversation and old owner invalidations', (
+    tester,
+  ) async {
+    await openNaHistory(tester);
+    AssistsMessageService.hasNaHistoryOwnerSnapshot = true;
+    AssistsMessageService.visibleNaOwnerPrefix = 'new-owner';
+    await emitNaChange(tester, id: 807);
+    await emitNaChange(tester, id: 806, owner: 'old-owner');
+    expect(agentCalls.where((call) => call.method == 'session/load'), isEmpty);
+    expect(
+      coordinator
+          .runtimeFor(conversationId: 806, mode: kChatRuntimeModeAgent)!
+          .messages
+          .map((row) => row.text),
+      contains('另一台手机的旧回复'),
+    );
+    AssistsMessageService.hasNaHistoryOwnerSnapshot = false;
+    await disposeChat(tester);
+  });
+
+  testWidgets(
+    'Na coalesces changes during a pending history read and catches the latest',
+    (tester) async {
+      await openNaHistory(tester);
+      historySessionResponse = naHistory('中途快照');
+      historySessionGate = Completer<void>();
+      await emitNaChange(tester, id: 806);
+      historySessionResponse = naHistory('读取期间又有新消息');
+      await emitNaChange(tester, id: 806);
+      await emitNaChange(tester, id: 806);
+      expect(
+        agentCalls.where((call) => call.method == 'session/load'),
+        hasLength(1),
+      );
+      historySessionGate!.complete();
+      await tester.pumpAndSettle();
+      expect(
+        agentCalls.where((call) => call.method == 'session/load'),
+        hasLength(2),
+      );
+      expect(
+        coordinator
+            .runtimeFor(conversationId: 806, mode: kChatRuntimeModeAgent)!
+            .messages
+            .map((row) => row.text),
+        contains('读取期间又有新消息'),
+      );
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'Na discards a history response after account visibility changes',
+    (tester) async {
+      await openNaHistory(tester);
+      historySessionResponse = naHistory('旧账号的迟到内容');
+      historySessionGate = Completer<void>();
+      await emitNaChange(tester, id: 806);
+      AssistsMessageService.conversationVisibilityRevision++;
+      historySessionGate!.complete();
+      await tester.pumpAndSettle();
+      expect(
+        coordinator
+            .runtimeFor(conversationId: 806, mode: kChatRuntimeModeAgent)!
+            .messages
+            .map((row) => row.text),
+        isNot(contains('旧账号的迟到内容')),
+      );
+      expect(
+        coordinator
+            .runtimeFor(conversationId: 806, mode: kChatRuntimeModeAgent)!
+            .messages
+            .map((row) => row.text),
+        contains('另一台手机的旧回复'),
+      );
+      await disposeChat(tester);
+    },
+  );
 
   testWidgets(
     'restoring an unresolved target keeps the welcome screen hidden',

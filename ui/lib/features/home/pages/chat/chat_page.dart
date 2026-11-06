@@ -11,6 +11,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/utils/picked_attachment_metadata.dart';
 import 'package:flutter/material.dart';
 import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/omni_header_body.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -434,7 +436,55 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   // Pure chat remains an ACP session with tool capabilities disabled.
   String? get _activeAcpAgentId => _committedAcpAgentId;
 
-  // The visible conversation's target and binding own its Agent identity.
+  bool get _activeAgentTargetIsRemote =>
+      _activeAcpAgentId == _kRemoteCodexModeAgentId;
+
+  String get _activeAgentModelSourceKey => _activeAgentTargetIsRemote
+      ? 'remote'
+      : 'local-${_activeAcpAgentId ?? 'agent'}';
+
+  bool get _isActiveAgentRetired =>
+      _activeMode == ChatPageMode.agent &&
+      _agentCatalog?.isRetired(_activeAcpAgentId) == true;
+
+  String get _retiredAgentMessage => formatAgentRuntimeErrorForUser(
+    'agent_retired:',
+    english: Localizations.localeOf(context).languageCode == 'en',
+  );
+
+  // Only the visible Conversation target and its persisted binding own identity.
+  String? get _committedAcpAgentId {
+    final target = _resolvedThreadTarget ?? widget.threadTarget;
+    final mode = target?.mode ?? _currentConversation?.mode;
+    if (mode == ConversationMode.normal || mode == ConversationMode.chatOnly) {
+      return _kXiaowanAcpAgentId;
+    }
+    if (target?.isRemoteCodexSessionTarget == true ||
+        target?.agentRuntime == 'remote') {
+      return _kRemoteCodexModeAgentId;
+    }
+    final targetAgentId = target?.agentId?.trim() ?? '';
+    if (targetAgentId.isNotEmpty) return targetAgentId;
+    return _currentConversation?.agentId?.trim().isNotEmpty == true
+        ? _currentConversation!.agentId!.trim()
+        : _conversationBoundAcpAgentId;
+  }
+
+  String? get _activeAgentUnavailableMessage {
+    if (_isActiveAgentRetired) return _retiredAgentMessage;
+    if (_activeMode != ChatPageMode.openclaw &&
+        !_isConversationHistoryLoading &&
+        _resolvedThreadTarget != null &&
+        (_activeAcpAgentId?.trim().isEmpty ?? true)) {
+      return formatAgentRuntimeErrorForUser(
+        'agent_identity_required:',
+        english: Localizations.localeOf(context).languageCode == 'en',
+      );
+    }
+    return null;
+  }
+
+
   String? get _committedAcpAgentId {
     if (_activeMode == ChatPageMode.normal &&
         activeConversationModeValue == ConversationMode.normal) {
