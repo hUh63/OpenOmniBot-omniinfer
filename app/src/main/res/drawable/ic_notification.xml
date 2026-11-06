@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification small icons must be a monochrome alpha mask. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M54,15 C32.46,15 15,32.46 15,54 C15,75.54 32.46,93 54,93 C70.49,93 84.57,82.76 90.22,68.26 L82.3,65.18 C78.02,76.16 67.36,84 54,84 C37.43,84 24,70.57 24,54 C24,37.43 37.43,24 54,24 C63.52,24 72.05,28.43 77.54,35.35 L84.59,29.76 C77.47,20.77 66.42,15 54,15 Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M43,47 C40.79,47 39,48.79 39,51 C39,53.21 40.79,55 43,55 C45.21,55 47,53.21 47,51 C47,48.79 45.21,47 43,47 Z M65,43 C60.58,43 57,46.58 57,51 C57,55.42 60.58,59 65,59 C69.42,59 73,55.42 73,51 C73,46.58 69.42,43 65,43 Z M45,60 L53,67 L45,74 C43.34,75.47 43.19,78 44.66,79.66 C46.13,81.32 48.66,81.47 50.32,80 L62,69.78 L50.32,59.56 C48.66,58.09 46.13,58.24 44.66,59.9 C44.53,60.05 44.41,60.2 45,60 Z M56,76 C61.8,80.2 69.4,80.55 75.56,76.93 L71.5,70.03 C68.09,72.03 63.9,71.84 60.66,69.5 Z" />
+</vector>

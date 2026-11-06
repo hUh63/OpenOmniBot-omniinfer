@@ -325,6 +325,19 @@ internal class AcpAgentProfileStore(context: Context) {
             ?.takeUnless { it in catalog.retiredAgentIds }
     }
 
+    fun naOwnerForConversation(conversationId: Long): String? =
+        preferences.getString("na_owner:$conversationId", null)
+
+    @Synchronized
+    fun bindNaConversationOwner(conversationId: Long, prefix: String) {
+        require(NaConversationAccess.sessionOwner(prefix) == prefix)
+        val existing = naOwnerForConversation(conversationId)
+        check(existing == null || existing == prefix) { "Cloud conversation ownership cannot change." }
+        check(preferences.edit().putString("na_owner:$conversationId", prefix).commit()) {
+            "Unable to persist Cloud conversation ownership."
+        }
+    }
+
     /**
      * 批量版 [agentIdForSession]。
      *

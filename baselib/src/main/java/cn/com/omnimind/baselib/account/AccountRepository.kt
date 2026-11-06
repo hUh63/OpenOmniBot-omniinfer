@@ -1,6 +1,8 @@
 package cn.com.omnimind.baselib.account
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -15,6 +17,66 @@ class AccountRepository(
         CloudServiceAccessState::allowedByDefault,
 ) {
     private val refreshMutex = Mutex()
+    private val sessionLock = Any()
+    private val generation = MutableStateFlow(0L)
+    val sessionGeneration = generation.asStateFlow()
+    private var cloudIdentity: Pair<String, AccountUser>? = null
+    private val localIdentity = MutableStateFlow(runCatching { tokenStore.read()?.localUserId }.getOrNull())
+    val localUserId = localIdentity.asStateFlow()
+
+    fun cachedCloudUserId(): String? = synchronized(sessionLock) { tokenStore.read()?.localUserId }
+
+    private fun rememberVerifiedIdentity(
+        expectedGeneration: Long,
+        accessToken: String,
+        user: AccountUser,
+    ) = synchronized(sessionLock) {
+        requireSessionGeneration(expectedGeneration)
+        val tokens = tokenStore.read() ?: throw AccountNotAuthenticatedException()
+        if (tokens.accessToken != accessToken) {
+            // The same login can rotate credentials while /me is in flight.
+            // Its refresh already verified the identity; retain that newer
+            // response instead of signing out or overwriting it with this one.
+            if (tokens.localUserId != user.id) throw AccountNotAuthenticatedException()
+            return@synchronized
+        }
+        if (tokens.localUserId != user.id && !tokenStore.write(tokens.copy(localUserId = user.id))) {
+            throw AccountCredentialStorageException()
+        }
+        cloudIdentity = accessToken to user
+        localIdentity.value = user.id
+    }
+
+    fun requireSessionGeneration(expected: Long) = synchronized(sessionLock) {
+        if (generation.value != expected || tokenStore.read() == null) {
+            throw AccountNotAuthenticatedException()
+        }
+    }
+
+    /** Official Cloud uses this account's existing encrypted credentials and
+     * refresh owner. A write is never replayed after an HTTP 401 or lost reply. */
+    suspend fun <T> withCloudAccessToken(
+        expectedGeneration: Long = generation.value,
+        expectedUserId: String? = null,
+        retryUnauthorized: Boolean = true,
+        operation: suspend (AccountUser, String) -> T,
+    ): T {
+        requireSessionGeneration(expectedGeneration)
+        refreshSessionIfNeeded()
+        return authorized(retryUnauthorized) { accessToken ->
+            requireSessionGeneration(expectedGeneration)
+            val cached = synchronized(sessionLock) { cloudIdentity?.takeIf { it.first == accessToken }?.second }
+            val user = cached ?: remote.getCurrentUser(accessToken).also {
+                synchronized(sessionLock) {
+                    requireSessionGeneration(expectedGeneration)
+                    rememberVerifiedIdentity(expectedGeneration, accessToken, it)
+                }
+            }
+            if (expectedUserId != null && user.id != expectedUserId) throw AccountNotAuthenticatedException()
+            requireSessionGeneration(expectedGeneration)
+            operation(user, accessToken).also { requireSessionGeneration(expectedGeneration) }
+        }
+    }
 
     /**
      * Access tokens are short lived.  A foreground transition can happen
@@ -70,10 +132,18 @@ class AccountRepository(
 
     suspend fun login(email: String, password: String): AccountSession {
         requireCloudServiceAccess()
-        val session = remote.login(email, password)
-        if (!tokenStore.write(session.tokens)) {
-            tokenStore.clear()
-            throw AccountCredentialStorageException()
+        val expectedGeneration = generation.value
+        val response = remote.login(email, password)
+        val session = response.copy(tokens = response.tokens.copy(localUserId = response.user.id))
+        synchronized(sessionLock) {
+            if (generation.value != expectedGeneration) throw AccountNotAuthenticatedException()
+            if (!tokenStore.write(session.tokens)) {
+                clearLocalSession()
+                throw AccountCredentialStorageException()
+            }
+            cloudIdentity = session.tokens.accessToken to session.user
+            localIdentity.value = session.user.id
+            generation.value += 1
         }
         aiAccessModeStore.clear()
         try {
@@ -87,7 +157,15 @@ class AccountRepository(
         return session
     }
 
-    suspend fun currentUser(): AccountUser = authorized(remote::getCurrentUser)
+    suspend fun currentUser(): AccountUser {
+        val expectedGeneration = generation.value
+        return authorized { token ->
+            requireSessionGeneration(expectedGeneration)
+            remote.getCurrentUser(token).also {
+                rememberVerifiedIdentity(expectedGeneration, token, it)
+            }
+        }
+    }
 
     suspend fun getAiSettings(): AiSettings = authorized(remote::getAiSettings).also {
         aiAccessModeStore.write(it.effectiveMode)
@@ -151,50 +229,55 @@ class AccountRepository(
 
     suspend fun refreshSession(): AccountSession {
         requireCloudServiceAccess()
-        val current = tokenStore.read() ?: throw AccountNotAuthenticatedException()
+        val (expectedGeneration, current) = synchronized(sessionLock) {
+            generation.value to (tokenStore.read() ?: throw AccountNotAuthenticatedException())
+        }
         return refreshMutex.withLock {
+            requireSessionGeneration(expectedGeneration)
             val latest = tokenStore.read() ?: throw AccountNotAuthenticatedException()
             if (latest.accessToken != current.accessToken) {
                 return@withLock AccountSession(
                     user = remote.getCurrentUser(latest.accessToken),
                     tokens = latest,
-                )
+                ).also { requireSessionGeneration(expectedGeneration) }
             }
-            refreshAndStore(latest)
+            refreshAndStore(latest, expectedGeneration)
         }
     }
 
     suspend fun logout() {
-        try {
-            // read() 本身可能抛（加密文件无法解密：Keystore 密钥失效/换机恢复）。
-            // 它必须在 try 内且单独兜住，否则 finally 里的本地清理会被整段跳过 ——
-            // token 与 AI 模式缓存永远清不掉，登出/重登全部失效，只能清应用数据。
-            val tokens = runCatching { tokenStore.read() }.getOrNull()
-            if (tokens != null && cloudServiceAccessProvider().allowed) {
-                remote.logout(tokens.refreshToken)
-            }
-        } finally {
-            clearLocalSession()
+        val tokens = tokenStore.read()
+        // Fence in-flight refresh/Cloud requests before awaiting the network.
+        clearLocalSession()
+        if (tokens != null && cloudServiceAccessProvider().allowed) {
+            remote.logout(tokens.refreshToken)
         }
     }
 
-    private suspend fun <T> authorized(operation: suspend (String) -> T): T {
+    private suspend fun <T> authorized(operation: suspend (String) -> T): T = authorized(true, operation)
+
+    private suspend fun <T> authorized(retryUnauthorized: Boolean, operation: suspend (String) -> T): T {
         requireCloudServiceAccess()
-        val initial = tokenStore.read() ?: throw AccountNotAuthenticatedException()
-        return try {
+        val (expectedGeneration, initial) = synchronized(sessionLock) {
+            generation.value to (tokenStore.read() ?: throw AccountNotAuthenticatedException())
+        }
+        val result = try {
             operation(initial.accessToken)
         } catch (error: AccountApiException) {
-            if (error.statusCode != 401) throw error
-            val refreshed = refreshAfterUnauthorized(initial)
+            requireSessionGeneration(expectedGeneration)
+            if (error.statusCode != 401 || !retryUnauthorized) throw error
+            val refreshed = refreshAfterUnauthorized(initial, expectedGeneration)
             try {
                 operation(refreshed.accessToken)
             } catch (retryError: AccountApiException) {
                 if (retryError.statusCode == 401) {
-                    clearRejectedSession(refreshed.accessToken)
+                    clearRejectedSession(refreshed.accessToken, expectedGeneration)
                 }
                 throw retryError
             }
         }
+        requireSessionGeneration(expectedGeneration)
+        return result
     }
 
     /**
@@ -202,40 +285,65 @@ class AccountRepository(
      * no longer usable. Clear it only if no concurrent request has already
      * installed a newer token.
      */
-    private suspend fun clearRejectedSession(rejectedAccessToken: String) {
+    private suspend fun clearRejectedSession(rejectedAccessToken: String, expectedGeneration: Long) {
         refreshMutex.withLock {
-            if (tokenStore.read()?.accessToken == rejectedAccessToken) {
-                clearLocalSession()
+            synchronized(sessionLock) {
+                if (generation.value == expectedGeneration && tokenStore.read()?.accessToken == rejectedAccessToken) {
+                    clearLocalSession()
+                }
             }
         }
     }
 
-    private suspend fun refreshAfterUnauthorized(stale: AccountTokens): AccountTokens =
+    private suspend fun refreshAfterUnauthorized(stale: AccountTokens, expectedGeneration: Long): AccountTokens =
         refreshMutex.withLock {
+            requireSessionGeneration(expectedGeneration)
             val current = tokenStore.read() ?: throw AccountNotAuthenticatedException()
             if (current.accessToken != stale.accessToken) {
                 return@withLock current
             }
-            refreshAndStore(current).tokens
+            refreshAndStore(current, expectedGeneration).tokens
         }
 
-    private suspend fun refreshAndStore(current: AccountTokens): AccountSession {
+    private suspend fun refreshAndStore(current: AccountTokens, expectedGeneration: Long): AccountSession {
         return try {
-            remote.refresh(current.refreshToken).also { refreshed ->
-                if (!tokenStore.write(refreshed.tokens)) {
-                    tokenStore.clear()
-                    throw AccountCredentialStorageException()
+            val response = remote.refresh(current.refreshToken)
+            response.copy(tokens = response.tokens.copy(localUserId = response.user.id)).also { refreshed ->
+                synchronized(sessionLock) {
+                    requireSessionGeneration(expectedGeneration)
+                    // Verifying a legacy /me response only fills localUserId;
+                    // it must not discard credentials just rotated by the server.
+                    if (tokenStore.read()?.hasSameCredentialsAs(current) != true) {
+                        throw AccountNotAuthenticatedException()
+                    }
+                    if (!tokenStore.write(refreshed.tokens)) {
+                        clearLocalSession()
+                        throw AccountCredentialStorageException()
+                    }
+                    cloudIdentity = refreshed.tokens.accessToken to refreshed.user
+                    localIdentity.value = refreshed.user.id
                 }
             }
         } catch (error: AccountApiException) {
             if (error.statusCode == 401) {
-                clearLocalSession()
+                synchronized(sessionLock) {
+                    if (generation.value == expectedGeneration && tokenStore.read()?.hasSameCredentialsAs(current) == true) {
+                        clearLocalSession()
+                    }
+                }
             }
             throw error
         }
     }
 
-    private fun clearLocalSession() {
+    private fun AccountTokens.hasSameCredentialsAs(other: AccountTokens): Boolean =
+        accessToken == other.accessToken && accessExpiresAt == other.accessExpiresAt &&
+            refreshToken == other.refreshToken && refreshExpiresAt == other.refreshExpiresAt
+
+    private fun clearLocalSession() = synchronized(sessionLock) {
+        generation.value += 1
+        cloudIdentity = null
+        localIdentity.value = null
         val tokensCleared = try {
             tokenStore.clear()
         } finally {
