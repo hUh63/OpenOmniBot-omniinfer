@@ -6,6 +6,9 @@ import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.baselib.util.CredentialEndpointSecurity
 import cn.com.omnimind.baselib.util.OssIdentity
 import com.google.gson.Gson
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
@@ -206,9 +209,32 @@ object ModelProviderConfigStore {
         if (base != normalizeBaseUrl(profile.baseUrl).orEmpty() || revision != profile.revision) {
             return@runCatching emptyList()
         }
-        bucket["models"]?.asJsonArray?.map { Gson().fromJson(it, ProviderModelOption::class.java) }
+        bucket["models"]?.asJsonArray
+            ?.map { Gson().fromJson(repairLegacyCachedModel(it), ProviderModelOption::class.java) }
             ?.filter { !it.id.isNullOrBlank() }.orEmpty()
     }.getOrDefault(emptyList())
+
+    /**
+     * 旧缓存兼容：模型清单会随版本增字段，历史缓存 JSON 里可能缺少
+     * displayName / inputModalities / outputModalities / supportedReasoningLevels。
+     * Gson 反序列化会把 Kotlin 的非空参数直接填成 null（不走构造函数的默认值），
+     * 之后 copy()/界面读取就会抛异常或显示空。因此在反序列化前先把默认值补回 JSON，
+     * 语义与新增字段时「缺省即可用」的约定一致：displayName 回落到 id，列表回落到空。
+     */
+    internal fun repairLegacyCachedModel(element: JsonElement): JsonElement {
+        val obj = element as? JsonObject ?: return element
+        val id = obj.get("id")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+        val displayName = obj.get("displayName")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+        if (displayName.isBlank()) obj.addProperty("displayName", id)
+        if (obj.get("inputModalities").isMissingOrNull()) obj.add("inputModalities", JsonArray())
+        if (obj.get("outputModalities").isMissingOrNull()) obj.add("outputModalities", JsonArray())
+        if (obj.get("supportedReasoningLevels").isMissingOrNull()) {
+            obj.add("supportedReasoningLevels", JsonArray())
+        }
+        return obj
+    }
+
+    private fun JsonElement?.isMissingOrNull(): Boolean = this == null || this.isJsonNull
 
     /** Latest successful discovery, used only to construct offline launch config.
      * Explicit refresh always calls the Provider; this is never a network cache.
