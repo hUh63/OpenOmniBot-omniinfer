@@ -20,6 +20,7 @@ export type IconName =
   | "menu"
   | "na"
   | "opencode"
+  | "pi"
   | "panel-left"
   | "panel-right"
   | "plus"
@@ -88,6 +89,7 @@ export function Icon({ name, size = 20, ...props }: IconProps) {
         <path d="M15 3v18" />
       </>
     ),
+    pi: <path d="M9 4v16M4 9h10M4 15h10" />,
     plus: <path d="M12 5v14M5 12h14" />,
     refresh: (
       <>
