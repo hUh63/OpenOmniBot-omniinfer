@@ -9,32 +9,26 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.ConnectionPool
 import kotlinx.coroutines.withTimeout
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.UUID
 import java.io.ByteArrayOutputStream
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
+import java.io.IOException
 import java.net.URLConnection
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -111,13 +105,17 @@ internal class NaCloudRuntime(
     private suspend fun connection() = currentCoroutineContext()[NaCloudConnection]
         ?: error("Na connection attribution is missing")
 
-    private suspend fun <T> withConnection(prepareWorkspace: Boolean = true, operation: suspend () -> T): T {
+    private suspend fun <T> withConnection(
+        readOnly: Boolean = false,
+        prepareWorkspace: Boolean = true,
+        operation: suspend () -> T,
+    ): T {
         val snapshot = synchronized(this) { Triple(development, baseUrl, token to configurationRevision.get()) }
         val connection = if (snapshot.first) NaCloudConnection(snapshot.second, developmentToken = snapshot.third.first)
             else NaCloudConnection.managed(BuildConfig.CLOUD_URL, NaCloudEnvironment.developmentAvailable, OmniAccount.repository())
         return withContext(connection + ConnectionRevision(snapshot.third.second)) {
             requireCurrentConnection(connection, snapshot.third.second)
-            if (prepareWorkspace) connection.prepareWorkspace(client)
+            if (prepareWorkspace) connection.prepareWorkspace(client, allowClaim = !readOnly)
             requireCurrentConnection(connection, snapshot.third.second)
             operation()
         }
@@ -193,6 +191,7 @@ internal class NaCloudRuntime(
         "collaborationMode/list" -> mapOf("collaborationModes" to emptyList<Any>())
         "config/read" -> config()
         "session/close" -> mapOf("ok" to true)
+        "config/na/historySync" -> setHistorySync(args["enabled"] == true)
         "config/na/local-time" -> NaLocalTime.convert(args)
         "config/na/notifications" -> if (args["operation"] == "read" ||
             (args["operation"] == "write" && args["enabled"] == false)) localNotificationSettings(args)
@@ -453,9 +452,20 @@ internal class NaCloudRuntime(
             val body = if (idempotent) mapOf("clientConversationId" to
                 creationReservation((args["conversationId"] as? Number)?.toLong())) else emptyMap()
             request("POST", "/api/conversations", body, idempotent)
+        } else if (historyCursor != null) {
+            val url = (connection().apiBaseUrl + "/api/conversations/${existing.removePrefix(prefix)}/runs")
+                .toHttpUrl().newBuilder().addQueryParameter("before", historyCursor).addQueryParameter("limit", "100").build()
+            request("GET", url.encodedPath.removePrefix(connection().apiBaseUrl.toHttpUrl().encodedPath.trimEnd('/')) + "?" + url.encodedQuery)
         } else request("GET", "/api/conversations/${existing.removePrefix(prefix)}")
         val snapshot = response.map("conversation")
-        val remoteId = (snapshot["id"] as? String)?.takeIf { it.isNotBlank() }
+        // Run pages contain only runs/cursors. Their request already owns the
+        // resolved session; a supplied conversation identity must still match.
+        val remoteId = if (historyCursor != null) {
+            val suppliedId = snapshot["id"]
+            if (suppliedId != null && suppliedId != existing!!.removePrefix(prefix))
+                throw NaRuntimeException("na_response_invalid", "session_load")
+            existing!!.removePrefix(prefix)
+        } else (snapshot["id"] as? String)?.takeIf { it.isNotBlank() }
             ?: throw NaRuntimeException("na_response_invalid", if (existing == null) "session_create" else "session_load")
         if (existing != null && existing != prefix + remoteId)
             throw NaRuntimeException("na_response_invalid", "session_load")
@@ -554,7 +564,8 @@ internal class NaCloudRuntime(
                         includeReferences = false,
                         cleanup = { request("DELETE", "/api/files/uploads", uploadOwner) },
                     ) { text ->
-                        val body = mapOf("text" to text, "clientMessageId" to reservation, "attachmentIds" to attachmentIds) +
+                        val body = mapOf("text" to text, "clientMessageId" to cloudReservation,
+                            "clientOriginId" to clientOriginId, "attachmentIds" to attachmentIds) +
                             (args["userMessageId"]?.toString()?.takeIf { it.isNotBlank() }?.let { mapOf("clientUserMessageId" to it) } ?: emptyMap())
                         try {
                             request("POST", "/api/conversations/${id.removePrefix(prefix)}/messages", body,
@@ -578,14 +589,26 @@ internal class NaCloudRuntime(
                                 val runs = snapshot["runs"] as? List<*>
                                     ?: throw NaRuntimeException("na_response_invalid", "message_admission")
                                 if (runs.any { it !is Map<*, *> }) throw NaRuntimeException("na_response_invalid", "message_admission")
-                                val candidates = runs.filterIsInstance<Map<*, *>>().filter { it["clientMessageId"] == reservation }
+                                val candidates = runs.filterIsInstance<Map<*, *>>().filter { it["clientMessageId"] == cloudReservation }
                                 if (candidates.size > 1) throw NaRuntimeException("na_response_invalid", "message_admission")
                                 val candidate = candidates.singleOrNull()
-                                if (candidate != null && (candidate["input"] != text.trim() ||
+                                val candidateAttachments = (candidate?.get("attachments") as? List<*>).orEmpty()
+                                    .map { (it as? Map<*, *>)?.get("id") }
+                                val matchingInput = if (attachmentIds.isEmpty())
+                                    candidate?.get("input") == text.trim() && candidateAttachments.isEmpty()
+                                else candidate?.get("userText") == text.trim() && candidateAttachments == attachmentIds
+                                if (candidate != null && (!matchingInput ||
+                                        (candidate["clientOriginId"] != null && candidate["clientOriginId"] != clientOriginId) ||
                                         (candidate["conversationId"] != null && candidate["conversationId"] != id.removePrefix(prefix)) ||
                                         (body["clientUserMessageId"] != null && candidate["clientUserMessageId"] != body["clientUserMessageId"])))
                                     throw naHttpFailure(409, "message_admission")
-                                if (candidate == null) { confirmedAbsent = true; null }
+                                if (candidate == null) {
+                                    // A latest-history window cannot prove that an
+                                    // earlier admission never happened.
+                                    confirmedAbsent = snapshot["hasMoreRuns"] != true &&
+                                        snapshot["runDetailsMayBeTruncated"] != true && snapshot["nextRunCursor"] == null
+                                    null
+                                }
                                 else (candidate["id"] as? String)?.takeIf { it.isNotBlank() }
                                     ?: throw NaRuntimeException("na_response_invalid", "message_admission")
                             } catch (lookupError: Exception) {
