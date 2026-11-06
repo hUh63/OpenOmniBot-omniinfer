@@ -232,6 +232,10 @@ class AgentRuntimeManager private constructor(
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val remoteConfigStore = CodexRemoteBridgeConfigStore(appContext)
     private val acpAgentProfileStore = AcpAgentProfileStore(appContext)
+    /** Na 云端助手：HTTP runtime，不走 ACP 进程。 */
+    private val naRuntime by lazy {
+        NaCloudRuntime(appContext, scope, bindingRepository, acpAgentProfileStore, ::emitEvent)
+    }
     /** 只做「包版本清单」：探测已装版本 / 查 npm dist-tags，不参与 ACP 会话。 */
     private val managedAgentUpdates = ManagedAgentUpdates(
         probe = { profiles, distributionId ->
@@ -829,6 +833,9 @@ class AgentRuntimeManager private constructor(
     }
 
     suspend fun handleMethod(method: String, args: Map<String, Any?>): Any? {
+        if (args["agentId"] == NA_AGENT_ID) {
+            return naRuntime.handle(method, args)
+        }
         val compatibilityRequest = AcpLegacyCompatibilityAdapter.adapt(method, args)
         return try { AcpLegacyCompatibilityAdapter.adaptResponse(
             compatibilityRequest,
