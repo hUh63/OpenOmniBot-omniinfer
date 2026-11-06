@@ -24,6 +24,46 @@ const List<TutorialPage> tutorialNavigationPages = <TutorialPage>[
   TutorialPage.memoryScenes,
 ];
 
+/// A starter development-environment preset.
+class EnvironmentPreset {
+  const EnvironmentPreset({
+    required this.id,
+    required this.icon,
+    required this.titleZh,
+    required this.titleEn,
+    required this.descriptionZh,
+    required this.descriptionEn,
+    required this.packageIds,
+    required this.contents,
+  });
+
+  final String id;
+  final IconData icon;
+  final String titleZh;
+  final String titleEn;
+  final String descriptionZh;
+  final String descriptionEn;
+  final List<String> packageIds;
+  final String contents;
+}
+
+/// An optional extra tool the user can add to the environment.
+class OptionalTool {
+  const OptionalTool({
+    required this.id,
+    required this.icon,
+    required this.label,
+    required this.descriptionZh,
+    required this.descriptionEn,
+  });
+
+  final String id;
+  final IconData icon;
+  final String label;
+  final String descriptionZh;
+  final String descriptionEn;
+}
+
 /// A model provider the user can connect to.
 class ProviderOption {
   const ProviderOption({

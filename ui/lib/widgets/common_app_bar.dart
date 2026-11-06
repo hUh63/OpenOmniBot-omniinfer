@@ -112,42 +112,47 @@ class CommonAppBar extends StatelessWidget implements PreferredSizeWidget {
 
     final resolvedActions = actions ?? (trailing == null ? null : [trailing!]);
 
-    return AppBar(
-      primary: primary,
-      automaticallyImplyLeading: false,
-      toolbarHeight: height,
-      backgroundColor: resolvedBackgroundColor,
-      elevation: 0,
-      scrolledUnderElevation: 0,
-      surfaceTintColor: resolvedBackgroundColor,
-      shadowColor: Colors.transparent,
-      leadingWidth: resolvedLeading == null ? leadingWidth : leadingWidth ?? 56,
-      leading: resolvedLeading,
-      centerTitle: centerTitle,
-      title:
-          titleWidget ??
-          (title == null
-              ? null
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      context.trLegacy(title!),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          titleStyle ??
-                          TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
-                            color: palette.textPrimary,
-                            fontFamily: 'SF Pro',
-                          ),
-                    ),
-                    if (showAiBadge) const AiGeneratedBadge(),
-                  ],
-                )),
-      actions: resolvedActions,
+    return OmniContentWidth(
+      child: AppBar(
+        // Elastic controls may paint below the toolbar while being pulled.
+        clipBehavior: Clip.none,
+        primary: primary,
+        automaticallyImplyLeading: false,
+        toolbarHeight: height,
+        backgroundColor: resolvedBackgroundColor,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        surfaceTintColor: resolvedBackgroundColor,
+        shadowColor: Colors.transparent,
+        leadingWidth: resolvedLeading == null
+            ? leadingWidth
+            : leadingWidth ?? 72,
+        leading: resolvedLeading,
+        centerTitle: centerTitle,
+        title:
+            titleWidget ??
+            (title == null
+                ? null
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        context.trLegacy(title!),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            titleStyle ??
+                            TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                              color: palette.textPrimary,
+                            ),
+                      ),
+                      if (showAiBadge) const AiGeneratedBadge(),
+                    ],
+                  )),
+        actions: resolvedActions,
+      ),
     );
   }
 }

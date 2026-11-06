@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.ui.channel
 
 import android.content.Context
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.AgentRuntimeErrorSupport
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
 import io.flutter.embedding.engine.FlutterEngine
@@ -78,15 +79,15 @@ class AgentRuntimeChannel {
             }.onFailure { error ->
                 if (error is CancellationException) throw error
                 val detail = AgentRuntimeErrorSupport.safeDiagnosticMessage(error)
-                val failureKind = AgentRuntimeErrorSupport.failureKind(error)
+                val diagnostic = AgentRuntimeErrorSupport.boundaryFailureDetails(call.method, error)
+                if (error !is CancellationException) {
+                    OmniLog.e("AgentRuntimeChannel", diagnostic.entries.joinToString(" ") { "${it.key}=${it.value}" })
+                }
                 result.error(
                     "AGENT_RUNTIME_CALL_FAILED",
                     AgentRuntimeErrorSupport.userFacingMessage(error)
                         ?: "${call.method}: ${detail.ifBlank { error.javaClass.simpleName }}",
-                    buildMap {
-                        put("method", call.method)
-                        failureKind?.let { put("failureKind", it) }
-                    }
+                    diagnostic,
                 )
             }
         }

@@ -27,20 +27,9 @@ class _SvgTestAssetBundle extends CachingAssetBundle {
   }
 
   @override
-  Future<String> loadString(String key, {bool cache = true}) async {
-    return utf8.decode(_svgBytes);
-  }
-}
-
-class _ChatAppBarHarness extends StatefulWidget {
-  const _ChatAppBarHarness({
-    this.showSurfaceSwitcher = true,
-    this.petShowing = false,
-  });
-
-  final bool showSurfaceSwitcher;
-  final bool petShowing;
-
+  Future<ByteData> load(String key) async => key.endsWith('.svg')
+      ? ByteData.view(_bytes.buffer)
+      : rootBundle.load(key);
   @override
   State<_ChatAppBarHarness> createState() => _ChatAppBarHarnessState();
 }
@@ -994,8 +983,43 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(selectedAgentId, 'claude-code-acp');
-  });
+  testWidgets(
+    'history selection updates the actual Agent mark without a selector',
+    (tester) async {
+      for (final agent in [
+        'xiaowan-acp',
+        'na-cloud',
+        'codex-acp',
+        'custom-harness',
+      ]) {
+        await tester.pumpWidget(_app(selectedAgent: agent));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<AgentBrandIcon>(find.byType(AgentBrandIcon)).agentId,
+          agent,
+        );
+        if (agent == 'na-cloud') {
+          final avatar = tester.widget<Image>(
+            find.descendant(
+              of: find.byType(AgentBrandIcon),
+              matching: find.byType(Image),
+            ),
+          );
+          expect(
+            (avatar.image as AssetImage).assetName,
+            'assets/agents/na.png',
+          );
+          expect(avatar.color, isNull);
+          expect(find.text('N'), findsNothing);
+        }
+        expect(
+          find.byKey(const ValueKey('chat-app-bar-pure-chat-button')),
+          findsNothing,
+        );
+        expect(find.byType(PopupMenuItem<String>), findsNothing);
+      }
+    },
+  );
 
   testWidgets('keeps a long ACP Agent list scrollable and selectable', (
     tester,

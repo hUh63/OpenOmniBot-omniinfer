@@ -57,6 +57,8 @@ const SECTION_ORDER = [
   "deepseek",
   "claude",
   "opencode",
+  "pi",
+  "na",
   "acp",
   "omni",
   "chat",
@@ -70,6 +72,8 @@ const SECTION_LABELS: Record<ConversationSection, string> = {
   deepseek: "DeepSeek Harness",
   claude: "Claude Code",
   opencode: "OpenCode",
+  pi: "Pi",
+  na: "Na",
   acp: "Agent",
   omni: "小万",
   chat: "纯聊天",
@@ -80,6 +84,8 @@ const SECTION_ICONS: Record<Exclude<ConversationSection, "pinned">, IconName> = 
   deepseek: "deepseek",
   claude: "claude",
   opencode: "opencode",
+  pi: "pi",
+  na: "na",
   acp: "agent",
   omni: "agent",
   chat: "chat",
@@ -93,6 +99,7 @@ const FALLBACK_AGENT_PROFILES: AgentProfile[] = [
 ];
 
 function agentIcon(agentId?: string): IconName {
+  if (agentId === "na-cloud") return "na";
   if (agentId === "codex-acp") return "codex";
   if (agentId === "claude-code-acp") return "claude";
   if (agentId === "opencode-acp") return "opencode";
@@ -102,14 +109,13 @@ function agentIcon(agentId?: string): IconName {
 
 function conversationSection(conversation: Conversation): ConversationSection {
   if (conversation.isPinned) return "pinned";
-  // 服务端把 codex/acp/coding 一律归一成 mode="agent"，按 mode === "codex" 分组永远
-  // 不成立 —— 所有 Agent 会话都会掉进「小万」，Codex/Claude/OpenCode/DeepSeek 四个
-  // 分组永远是空的。改为按 agentId 分组。
   const agentId = conversation.agentId?.trim() ?? "";
   if (agentId && agentId !== "xiaowan-acp") {
+    if (agentId === "na-cloud") return "na";
     if (agentId === "codex-acp") return "codex";
     if (agentId === "claude-code-acp") return "claude";
     if (agentId === "opencode-acp") return "opencode";
+    if (agentId === "pi-acp") return "pi";
     if (agentId === "deepseek-harness-acp") return "deepseek";
     return "acp";
   }

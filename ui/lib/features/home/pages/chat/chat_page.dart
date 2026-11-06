@@ -485,28 +485,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   }
 
 
-  String? get _committedAcpAgentId {
-    if (_activeMode == ChatPageMode.normal &&
-        activeConversationModeValue == ConversationMode.normal) {
-      return _kXiaowanAcpAgentId;
-    }
-    final targetAgentId = _resolvedThreadTarget?.agentId?.trim() ?? '';
-    if (targetAgentId.isNotEmpty) {
-      return targetAgentId;
-    }
-    final boundAgentId = _conversationBoundAcpAgentId;
-    if (boundAgentId != null) {
-      return boundAgentId;
-    }
-    if (_agentRuntimeStatus.runtime == 'remote' ||
-        _agentRuntimeStatus.remoteEnabled) {
-      return _kRemoteCodexModeAgentId;
-    }
-    final activeId =
-        _agentRuntimeStatus.activeAgentId ?? _agentCatalog?.selectedAgentId;
-    return activeId?.trim().isNotEmpty == true ? activeId!.trim() : null;
-  }
-
   String get _activeAcpAgentDisplayName {
     final activeAgentId = _activeAcpAgentId?.trim() ?? '';
     if (activeAgentId == _kRemoteCodexModeAgentId) {

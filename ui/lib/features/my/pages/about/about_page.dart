@@ -519,57 +519,42 @@ class _AboutPageState extends State<AboutPage> {
     );
   }
 
-  Widget _buildFlatSectionDivider() {
-    final palette = context.omniPalette;
-    return Padding(
-      padding: const EdgeInsets.only(left: 12),
-      child: Divider(
-        height: 1,
-        thickness: 1,
-        color: palette.borderSubtle.withValues(
-          alpha: context.isDarkTheme ? 0.5 : 0.78,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDownloadSourceTrailing() {
-    final palette = context.omniPalette;
-    return DropdownButtonHideUnderline(
-      child: DropdownButton<AppUpdateDownloadSource>(
-        key: const ValueKey('about-download-source-dropdown'),
-        value: _downloadSource,
-        isDense: true,
-        itemHeight: null,
-        menuMaxHeight: 260,
-        dropdownColor: context.isDarkTheme
-            ? palette.surfacePrimary
-            : Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        icon: Icon(
-          LucideIcons.chevronDown,
-          size: 18,
-          color: context.isDarkTheme ? palette.textTertiary : AppColors.text50,
-        ),
-        style: TextStyle(
-          color: context.isDarkTheme ? palette.textPrimary : AppColors.text,
-          fontWeight: FontWeight.w600,
-          fontSize: 13,
-          fontFamily: AppTextStyles.fontFamily,
-        ),
-        selectedItemBuilder: (context) {
-          return AppUpdateDownloadSource.values.map((source) {
-            return Align(
-              alignment: Alignment.centerRight,
-              child: Text(
-                _downloadSourceLabel(source),
-                style: TextStyle(
-                  color: context.isDarkTheme
-                      ? palette.textPrimary
-                      : AppColors.text,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                  fontFamily: AppTextStyles.fontFamily,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OmniSettingsGroup(
+          title: context.l10n.aboutPreferencesSectionTitle,
+          children: [
+            OmniSettingsTile(
+              icon: hasUpdate ? LucideIcons.sparkles : LucideIcons.refreshCw,
+              iconColor: hasUpdate ? palette.accentPrimary : null,
+              title: _isCheckingUpdate
+                  ? context.trLegacy('检查中...')
+                  : (hasUpdate
+                        ? context.trLegacy('查看新版本')
+                        : context.trLegacy('检查更新')),
+              trailingText: updateHint,
+              trailingTextColor: hasUpdate ? palette.accentPrimary : null,
+              trailingStatusDotColor: hasUpdate ? palette.accentPrimary : null,
+              onTap: _isCheckingUpdate ? null : _handlePrimaryAction,
+            ),
+            AnimatedOpacity(
+              duration: const Duration(milliseconds: 180),
+              opacity: _isUpdatingBetaOptIn ? 0.72 : 1,
+              child: OmniSettingsTile(
+                icon: LucideIcons.flaskConical,
+                title: context.l10n.aboutBetaProgramTitle,
+                subtitle: context.l10n.aboutBetaProgramDescription,
+                onTap: _isUpdatingBetaOptIn
+                    ? null
+                    : () => _handleToggleBetaOptIn(!_betaOptIn),
+                trailing: OmniSettingsSwitch(
+                  value: _betaOptIn,
+                  enabled: !_isUpdatingBetaOptIn,
+                  duration: _hasSyncedUpdatePreferences
+                      ? const Duration(milliseconds: 300)
+                      : Duration.zero,
+                  onToggle: _handleToggleBetaOptIn,
                 ),
               ),
             );

@@ -18,6 +18,8 @@ import {
 } from "./ComposerIcons";
 import { Icon } from "./Icon";
 
+const naAvatarUrl = new URL("../assets/na-avatar.png", import.meta.url).href;
+
 interface ChatPanelProps {
   conversation: Conversation | null;
   messages: ChatMessage[];
@@ -120,18 +122,19 @@ function EmptyGreeting() {
   );
 }
 
-function AgentAvatar({ className }: { className: string }) {
-  const [failed, setFailed] = useState(false);
+function AgentAvatar({ className, agentId }: { className: string; agentId?: string }) {
+  const source = agentId === "na-cloud" ? naAvatarUrl : agentAvatarUrl();
+  const [failedSource, setFailedSource] = useState<string | null>(null);
   return (
     <span className={className}>
-      {failed ? (
+      {failedSource === source ? (
         <Icon name="agent" size={16} />
       ) : (
         <img
           alt=""
           draggable={false}
-          src={agentAvatarUrl()}
-          onError={() => setFailed(true)}
+          src={source}
+          onError={() => setFailedSource(source)}
         />
       )}
     </span>
@@ -200,11 +203,13 @@ function MessageAttachments({ attachments }: { attachments: Record<string, unkno
 function DeepThinkingMessage({
   card,
   classes,
+  agentId,
   active = false,
   showAvatar = true,
 }: {
   card: Record<string, unknown>;
   classes: string;
+  agentId?: string;
   active?: boolean;
   showAvatar?: boolean;
 }) {
@@ -254,7 +259,7 @@ function DeepThinkingMessage({
           }}
         >
           <summary>
-            {showAvatar && <AgentAvatar className="reasoning-avatar" />}
+            {showAvatar && <AgentAvatar className="reasoning-avatar" agentId={agentId} />}
             <span className="reasoning-toggle-label">
               <span className="reasoning-label">{label}</span>
               <Icon className="reasoning-chevron" name="chevron-down" size={16} />
@@ -322,11 +327,13 @@ function toolIcon(card: Record<string, unknown>): "terminal" | "browser" | "sear
 
 function Message({
   message,
+  agentId,
   active = false,
   suppressReasoning = false,
   suppressThinkingAvatar = false,
 }: {
   message: ChatMessage;
+  agentId?: string;
   active?: boolean;
   suppressReasoning?: boolean;
   suppressThinkingAvatar?: boolean;
@@ -349,6 +356,7 @@ function Message({
       <DeepThinkingMessage
         card={card}
         classes={classes}
+        agentId={messageAgentId(message) ?? agentId}
         active={active}
         showAvatar={!suppressThinkingAvatar}
       />
@@ -442,6 +450,15 @@ function messageCardData(message: ChatMessage): Record<string, unknown> | null {
   const content = messageContent(message);
   if (isRecord(content.cardData)) return content.cardData;
   return Number(message.type) === 2 ? content : null;
+}
+
+function messageAgentId(message: ChatMessage): string | undefined {
+  const content = messageContent(message);
+  const card = messageCardData(message);
+  for (const value of [message.streamMeta?.agentId, card?.agentId, content.agentId]) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 function cardType(message: ChatMessage): string {
@@ -660,12 +677,13 @@ function buildGroups(messages: ChatMessage[], activeTaskId: string | null): Rend
   return items;
 }
 
-function AgentRunGroup({ group }: { group: RunGroup }) {
+function AgentRunGroup({ group, agentId }: { group: RunGroup; agentId?: string }) {
   const [expanded, setExpanded] = useState(group.active);
   const elapsed = Math.max(0, Math.round((group.endTime - group.startTime) / 1000));
   const timeLabel = formatRunTime(elapsed);
   const label = timeLabel ? `已处理  ${timeLabel}` : "已处理";
   const groupMessages = [...group.processMessages, ...group.visibleMessages];
+  const groupAgentId = groupMessages.map(messageAgentId).find(Boolean) ?? agentId;
   const activeTailMessage = group.active && groupMessages.length
     ? newestBySequence(groupMessages)
     : null;
@@ -677,7 +695,7 @@ function AgentRunGroup({ group }: { group: RunGroup }) {
   return (
     <div className={`agent-run-group${expanded ? " expanded" : ""}`}>
       <button className="agent-run-header" type="button" aria-expanded={expanded} onClick={() => setExpanded((e) => !e)}>
-        <AgentAvatar className="agent-run-avatar" />
+        <AgentAvatar className="agent-run-avatar" agentId={groupAgentId} />
         <span className="agent-run-title">
           <span className="agent-run-label">{label}</span>
           <Icon name="chevron-down" size={18} className="agent-run-chevron" />
@@ -687,6 +705,7 @@ function AgentRunGroup({ group }: { group: RunGroup }) {
         {group.processMessages.map((msg, index) => (
           <Message
             message={msg}
+            agentId={groupAgentId}
             active={msg === activeTailMessage}
             suppressReasoning={group.hasThinking}
             suppressThinkingAvatar={isDeepThinkingMessage(msg)}
@@ -697,6 +716,7 @@ function AgentRunGroup({ group }: { group: RunGroup }) {
       {group.visibleMessages.map((msg, index) => (
         <Message
           message={msg}
+          agentId={groupAgentId}
           active={msg === activeTailMessage}
           suppressReasoning={group.hasThinking}
           key={String(msg.id ?? `${messageTime(msg)}-v${index}`)}
@@ -859,13 +879,14 @@ export function ChatPanel({
         {!sortedMessages.length && <EmptyGreeting />}
         {renderItems.map((item, index) => {
           if (item.kind === "run") {
-            return <AgentRunGroup group={item.group} key={`run-${item.group.taskId}`} />;
+            return <AgentRunGroup group={item.group} agentId={conversation?.agentId} key={`run-${item.group.taskId}`} />;
           }
           const taskId = agentRunParentTaskId(item.message);
           const isThinking = isDeepThinkingMessage(item.message);
           return (
             <Message
               message={item.message}
+              agentId={conversation?.agentId}
               active={item.message === activeTailMessage}
               suppressReasoning={thinkingTaskIds.has(taskId ?? "")}
               suppressThinkingAvatar={Boolean(
