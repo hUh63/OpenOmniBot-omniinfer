@@ -86,6 +86,17 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations ORDER BY updatedAt DESC LIMIT :limit OFFSET :offset")
     suspend fun getConversationsByPage(offset: Int, limit: Int): List<Conversation>
 
+    @Query("""
+        SELECT * FROM conversations
+        WHERE (:archivedOnly = 0 OR isArchived = 1)
+          AND (:archivedOnly = 1 OR :includeArchived = 1 OR isArchived = 0)
+          AND (:mode IS NULL OR CASE WHEN mode IN ('normal','codex','acp','coding','') THEN 'agent' ELSE mode END = :mode)
+        ORDER BY updatedAt DESC, CASE WHEN mode = 'subagent' THEN 1 ELSE 0 END,
+                 createdAt DESC, id ASC
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun getDisplayPage(offset: Int, limit: Int, includeArchived: Boolean, archivedOnly: Boolean, mode: String?): List<Conversation>
+
     @Query(
         "SELECT * FROM conversations WHERE isArchived = :archived " +
             "ORDER BY updatedAt DESC LIMIT :limit OFFSET :offset"

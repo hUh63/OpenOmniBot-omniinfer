@@ -528,7 +528,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
                   ),
                 ),
               ),
-              const ThemeModeSettingCard(),
+              ThemeModeSettingCard(),
               const SizedBox(height: 18),
               _buildLanguageSettingCard(),
               const SizedBox(height: 18),
