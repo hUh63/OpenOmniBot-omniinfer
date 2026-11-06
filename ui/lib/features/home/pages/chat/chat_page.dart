@@ -59,6 +59,9 @@ import 'package:ui/services/scene_model_config_service.dart';
 import 'package:ui/services/shared_open_draft_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/services/special_permission.dart';
+import 'package:ui/services/overlay_service.dart';
+import 'package:ui/services/permission_registry.dart';
+import 'package:ui/services/permission_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
@@ -83,6 +86,7 @@ import 'chat_page_models.dart';
 import 'tool_activity_utils.dart';
 import 'widgets/chat_widgets.dart';
 import 'widgets/context_threshold_sheet.dart';
+import 'widgets/pet_overlay_permission_sheet.dart';
 import 'widgets/chat_keyboard_layout.dart';
 import 'widgets/chat_message_viewport.dart';
 import 'widgets/chat_browser_overlay.dart';
@@ -265,6 +269,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
       'chat_hd_pad_right_pane_width';
   bool _workspaceBrowserCanGoUp = false;
   Future<OmnibotWorkspacePaths>? _workspacePathsLoadFuture;
+  bool _isPetOverlayOpening = false;
+  bool _isPetOverlayShowing = false;
   AppUpdateStatus? _appUpdateStatus;
   ModalRoute<dynamic>? _subscribedRoute;
   StreamSubscription<Map<String, dynamic>>?
@@ -1813,6 +1819,10 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   Future<void> _syncVisibleChatConversation();
 
   Future<void> _clearVisibleChatConversation();
+
+  Future<void> _handlePetOverlayTap();
+
+  Future<void> _syncPetOverlayState();
 
   void _armComposerLiftIntent();
 
