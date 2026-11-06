@@ -399,7 +399,7 @@ internal class NaCloudRuntime(
             if (existingOwner != null && existingOwner != connection.prefix)
                 throw NaRuntimeException("na_owner_conflict", "session_load")
         }
-        val local = bindings.ensureBinding(id, NA_AGENT_ID, conversationId, cwd = "na-cloud", title = title)
+        val local = bindings.ensureBinding(id, conversationId, cwd = "na-cloud", title = title)
         profiles.bindSession(id, NA_AGENT_ID)
         profiles.bindConversation(local, NA_AGENT_ID)
         profiles.bindNaConversationOwner(local, connection.prefix)
