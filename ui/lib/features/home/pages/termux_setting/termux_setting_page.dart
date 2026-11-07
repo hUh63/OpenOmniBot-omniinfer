@@ -12,6 +12,7 @@ import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:ui/widgets/settings_section_title.dart';
 
 class _EnvironmentDefinition {
@@ -138,7 +139,7 @@ class TermuxSettingPage extends StatefulWidget {
 }
 
 class _TermuxSettingPageState extends State<TermuxSettingPage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, FlClashPageLoadMixin {
   bool _isOpeningSetup = false;
   bool _isDetecting = true;
   bool _isDistributionLoading = true;
