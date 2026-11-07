@@ -87,17 +87,29 @@ internal class NaCloudRuntime(
         if (OmniAccount.isConfigured()) scope.launch {
             val account = OmniAccount.repository()
             var previous = account.sessionGeneration.value
-            account.sessionGeneration.collect { current ->
-                if (current != previous && !development) {
-                    promptOwners.entries.filter { it.value.managed && it.value.generation != current }.forEach {
-                        prompts.remove(it.key)?.cancel()
-                        promptInputs.remove(it.key)
-                        promptOwners.remove(it.key)
+            // Any throw inside the collector would end account-change handling for
+            // the whole process: logging out would then leave the previous
+            // account's runs, prompts and cached status untouched.
+            while (true) {
+                try {
+                    account.sessionGeneration.collect { current ->
+                        if (current != previous && !development) {
+                            promptOwners.entries.filter { it.value.managed && it.value.generation != current }.forEach {
+                                prompts.remove(it.key)?.cancel()
+                                promptInputs.remove(it.key)
+                                promptOwners.remove(it.key)
+                            }
+                            cachedStatus = emptyMap()
+                            restartHistorySync()
+                        }
+                        previous = current
                     }
-                    cachedStatus = emptyMap()
-                    restartHistorySync()
+                    break
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    delay(1_000)
                 }
-                previous = current
             }
         }
     }
@@ -666,6 +678,16 @@ internal class NaCloudRuntime(
                         "turnId" to reservation, "stopReason" to "cancelled")
                 } finally { admittedRunId?.let { activeRuns.remove(id, it) }; cancelPending.remove(id) }
             }.also { promptOwners[key] = connection; promptInputs[key] = submittedInput; prompts[key] = it }
+        }
+        // A failed or cancelled attempt must leave the idempotency cache: callers
+        // retry with the same requestId, and replaying the stored failure would
+        // fail again without ever reaching the network.
+        execution.invokeOnCompletion { cause ->
+            if (cause != null) {
+                prompts.remove(key, execution)
+                promptInputs.remove(key)
+                promptOwners.remove(key)
+            }
         }
         try { return execution.await() } finally {
             // Retain completed reservations for concurrent duplicate callers, bounded.
