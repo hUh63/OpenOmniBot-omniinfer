@@ -31,8 +31,24 @@ fun SettingsToggle(
     isSwitchLocked: Boolean = false,
     endWidget: (@Composable () -> Unit)? = null,
 ) {
-    var state by remember {
+    // `default` is the owner-provided value: when the caller re-renders with a new
+    // one (settings restored, another screen changed it) the row must follow it.
+    var state by remember(default) {
         mutableStateOf(default)
+    }
+
+    // Both entry points must commit the requested value, not a negation of whatever
+    // `state` happens to hold: a drag and a row tap can land in the same frame.
+    fun applyToggle(target: Boolean) {
+        if (isSwitchLocked) return
+        val reactive = reactiveSideEffect
+        state =
+            if (reactive != null) {
+                reactive(target)
+            } else {
+                sideEffect?.invoke(target)
+                target
+            }
     }
 
     if (showSwitch && endWidget != null){
@@ -42,31 +58,12 @@ fun SettingsToggle(
     if (showSwitch) {
         PreferenceSwitch(checked = state,
             onLongClick = onLongClick,
-            onCheckedChange = {
-                if (isSwitchLocked.not()) {
-                    state = !state
-                }
-                if (reactiveSideEffect != null) {
-                    state = reactiveSideEffect.invoke(state) == true
-                } else {
-                    sideEffect?.invoke(state)
-                }
-
-            },
+            onCheckedChange = { target -> applyToggle(target) },
             label = label,
             modifier = modifier,
             description = description,
             enabled = isEnabled,
-            onClick = {
-                if (isSwitchLocked.not()) {
-                    state = !state
-                }
-                if (reactiveSideEffect != null) {
-                    state = reactiveSideEffect.invoke(state) == true
-                } else {
-                    sideEffect?.invoke(state)
-                }
-            })
+            onClick = { applyToggle(!state) })
     } else {
         val interactionSource = remember { MutableInteractionSource() }
         PreferenceTemplate(
@@ -79,7 +76,7 @@ fun SettingsToggle(
             ),
             title = { Text(text = label) },
             description = { description?.let { Text(text = it) } },
-            enabled = true,
+            enabled = isEnabled,
             endWidget = endWidget
         )
     }
