@@ -133,13 +133,23 @@ object EmbeddedTerminalInitCoordinator {
     ): TermuxLiveEnvironmentResult {
         val appContext = context.applicationContext
         var worker: Job? = null
+        val request = PreparationRequest.Prepare(selectedPackageIds?.toList())
         val deferred = synchronized(stateLock) {
-            activeRun?.takeIf { !it.isCompleted } ?: reservePreparationLocked(
-                appContext,
-                PreparationRequest.Prepare(selectedPackageIds?.toList())
-            ).let { (result, job) ->
-                worker = job
-                result
+            val current = activeRun?.takeIf { !it.isCompleted }
+            if (current != null) {
+                // Installing selected tools must not silently join a running
+                // distribution switch: the caller would get that task's result
+                // (or trigger a second full install afterwards) instead of its
+                // own outcome. Same predicate as submit().
+                if (selectedPackageIds != null && embeddedTerminalInitState.request != request) {
+                    return failure("另一个终端环境准备任务正在运行，请稍后再试。")
+                }
+                current
+            } else {
+                reservePreparationLocked(appContext, request).let { (result, job) ->
+                    worker = job
+                    result
+                }
             }
         }
         worker?.let {

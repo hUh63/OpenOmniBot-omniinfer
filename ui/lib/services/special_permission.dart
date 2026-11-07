@@ -531,13 +531,33 @@ Future<EmbeddedTerminalDistribution> setEmbeddedTerminalDistribution(
   return EmbeddedTerminalDistribution.fromId(result);
 }
 
+/// 切换发行版要下载并解包 rootfs，耗时远超通用 10 秒兜底。
+/// 超时不能回落成 alpine：页面会把 UI 与提示都按 alpine 收尾，而原生仍在装
+/// ubuntu，最终出现「显示 Alpine、实际 Ubuntu」的分裂状态。
+const Duration _kDistributionSwitchTimeout = Duration(minutes: 20);
+
 Future<EmbeddedTerminalDistribution> switchEmbeddedTerminalDistribution(
   EmbeddedTerminalDistribution distribution,
 ) async {
-  final result = await invokeSpecialPermission<String>(
-    'switchEmbeddedTerminalDistribution',
-    <String, dynamic>{'distribution': distribution.id},
-  );
+  String? result;
+  try {
+    result = await spePermission
+        .invokeMethod<String>(
+          'switchEmbeddedTerminalDistribution',
+          <String, dynamic>{'distribution': distribution.id},
+        )
+        .timeout(_kDistributionSwitchTimeout);
+  } on TimeoutException {
+    throw PlatformException(
+      code: 'distribution_switch_timeout',
+      message: '切换耗时超出预期：安装可能仍在后台进行，请稍后重新进入本页确认。',
+    );
+  } on MissingPluginException {
+    throw PlatformException(
+      code: 'distribution_switch_unavailable',
+      message: '当前版本不支持切换终端系统。',
+    );
+  }
   return EmbeddedTerminalDistribution.fromId(result);
 }
 

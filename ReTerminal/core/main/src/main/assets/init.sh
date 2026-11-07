@@ -48,7 +48,12 @@ configure_apk_repositories() {
 if [ "$TERMINAL_DISTRIBUTION" = "alpine" ]; then
     configure_apk_repositories || true
 elif [ "$TERMINAL_DISTRIBUTION" = "ubuntu" ]; then
-    /bin/sh "$BIN/ubuntu-repositories" "$OMNIBOT_UBUNTU_APT_REPOSITORY_BASE"
+    # Mirror the alpine branch: a repository rewrite must never kill the shell
+    # entry point. `set -e` above would otherwise abort every session (and every
+    # hidden command) whenever dpkg is unavailable or the rootfs is read-only;
+    # the Kotlin side reports the real failure.
+    /bin/sh "$BIN/ubuntu-repositories" "$OMNIBOT_UBUNTU_APT_REPOSITORY_BASE" || \
+        echo "[warn] 无法写入 Ubuntu 软件源配置，继续启动终端。" >&2
 fi
 
 suppress_ubuntu_sudo_group_probe() {

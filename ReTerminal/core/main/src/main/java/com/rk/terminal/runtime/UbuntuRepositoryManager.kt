@@ -50,13 +50,25 @@ object UbuntuRepositoryManager {
 
         val sourcesFile = rootfs.child("etc").child("apt").child("sources.list.d").child("ubuntu.sources")
         sourcesFile.parentFile?.mkdirs()
-        sourcesFile.writeText(
-            buildSourcesFileContent(
-                source = source,
-                codename = detectInstalledCodename(rootfs)
-            )
+        val content = buildSourcesFileContent(
+            source = source,
+            codename = detectInstalledCodename(rootfs)
         )
-        return ApplyResult(applied = true, sourcesFile = sourcesFile)
+        // Write through a sibling temp file: a truncating write interrupted by
+        // a kill or a full disk leaves an empty sources file, and nothing ever
+        // rebuilds it — every later apt-get update inside the container fails.
+        val temp = sourcesFile.resolveSibling("ubuntu.sources.tmp")
+        return runCatching {
+            temp.writeText(content)
+            if (!temp.renameTo(sourcesFile)) {
+                sourcesFile.writeText(content)
+                temp.delete()
+            }
+            ApplyResult(applied = true, sourcesFile = sourcesFile)
+        }.getOrElse {
+            temp.delete()
+            ApplyResult(applied = false, sourcesFile = sourcesFile)
+        }
     }
 
     internal fun buildSourcesFileContent(source: Int, codename: String): String {

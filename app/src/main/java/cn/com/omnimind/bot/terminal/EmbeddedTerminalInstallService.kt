@@ -200,6 +200,9 @@ class EmbeddedTerminalInstallService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // onTimeout() disposes this instance before the service actually stops;
+        // if it is started again meanwhile, publishing must resume.
+        disposed = false
         when (intent?.action) {
             ACTION_OBSERVE -> {
                 lastContent = null
