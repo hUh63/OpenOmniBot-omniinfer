@@ -223,6 +223,8 @@ class SpecialPermissionChannel {
                         .prepareTermuxLiveWrapper(call, result)
                     "getEmbeddedTerminalInitSnapshot" -> specialPermissionManager!!
                         .getEmbeddedTerminalInitSnapshot(result)
+                    "retryEmbeddedTerminalInit" -> specialPermissionManager!!
+                        .retryEmbeddedTerminalInit(result)
                     "cancelEmbeddedTerminalInit" -> specialPermissionManager!!
                         .cancelEmbeddedTerminalInit(result)
                     "isUnknownAppInstallAllowed" -> specialPermissionManager!!

@@ -18,6 +18,7 @@ import cn.com.omnimind.bot.agent.SkillIndexService
 import cn.com.omnimind.bot.agent.WorkspaceMemoryRollupScheduler
 import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
 import cn.com.omnimind.bot.activity.StartupThemeResolver
+import cn.com.omnimind.bot.activity.RetainedPlatformChannel
 import cn.com.omnimind.bot.cleanup.LegacyLocalModelDataCleanup
 import cn.com.omnimind.bot.localmodel.LocalModelFeatureInstaller
 import cn.com.omnimind.bot.mcp.McpServerManager
@@ -47,6 +48,7 @@ class App : BaseApplication() {
 
         private var flutterEngineGroup: FlutterEngineGroup? = null
         private var cachedMainEngine: FlutterEngine? = null
+        private var cachedMainPlatformChannel: RetainedPlatformChannel? = null
 
         fun getFlutterEngineGroup(): FlutterEngineGroup {
             if (flutterEngineGroup == null) {
@@ -62,6 +64,9 @@ class App : BaseApplication() {
                 OmniLog.d("AppStartup", "Creating main engine from FlutterEngineGroup")
 
                 cachedMainEngine = getFlutterEngineGroup().createAndRunDefaultEngine(instance)
+                cachedMainPlatformChannel = RetainedPlatformChannel(
+                    cachedMainEngine!!.dartExecutor
+                )
 
                 OmniLog.d(
                     "AppStartup",
@@ -69,6 +74,11 @@ class App : BaseApplication() {
                 )
             }
             return cachedMainEngine!!
+        }
+
+        fun getMainPlatformChannel(): RetainedPlatformChannel {
+            getCachedMainEngine()
+            return checkNotNull(cachedMainPlatformChannel)
         }
 
     }

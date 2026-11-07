@@ -127,8 +127,12 @@ object EmbeddedRuntimeInstaller {
         }
     }
 
-    fun isCurrentDistributionReady(context: Context): Boolean {
-        val distribution = TerminalDistribution.selected()
+    /** Maintenance must not extract or download a missing terminal environment. */
+    fun isDistributionInstalled(context: Context, distribution: TerminalDistribution.Spec): Boolean =
+        commonAssets.all { File(context.filesDir, it.outputName).isFile } &&
+            isRootfsInstalled(context, distribution)
+
+    fun isDistributionReady(context: Context, distribution: TerminalDistribution.Spec): Boolean {
         val commonReady = commonAssets.all { File(context.filesDir, it.outputName).isFile }
         return commonReady && (
             isRootfsInstalled(context, distribution) ||

@@ -5,6 +5,14 @@ from pathlib import Path
 
 SCRIPT=Path(__file__).resolve().parents[1]/'ReTerminal/core/main/src/main/assets/init-host.sh'
 
+def restore_host_signals():
+    # JVM test workers can pass ignored or blocked signals to subprocesses.
+    # Give the host shell its normal launch state so its traps can be tested.
+    signals = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+    for sig in signals:
+        signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, signals)
+
 class HostStopTest(unittest.TestCase):
     def test_stop_reaches_runtime_cleanup_and_preserves_stdin(self):
         self.run_contract(cancel=True)

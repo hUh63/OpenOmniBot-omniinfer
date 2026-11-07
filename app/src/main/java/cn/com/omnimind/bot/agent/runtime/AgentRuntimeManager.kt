@@ -241,7 +241,7 @@ class AgentRuntimeManager private constructor(
         probe = { profiles, distributionId ->
             check(
                 TerminalDistribution.selected().id == distributionId &&
-                    EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)
+                    EmbeddedRuntimeInstaller.isDistributionReady(appContext, TerminalDistribution.selected())
             ) { "Prepare the terminal environment before checking installed Agent versions" }
             val result = TerminalManager.getInstance(appContext).executeHiddenCommand(
                 command = managedAgentVersionProbeCommand(profiles),
@@ -261,7 +261,7 @@ class AgentRuntimeManager private constructor(
         profiles = acpAgentProfileStore::list,
         currentDistribution = { TerminalDistribution.selected().id },
         disconnect = { profile ->
-            if (!EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)) {
+            if (!EmbeddedRuntimeInstaller.isDistributionReady(appContext, TerminalDistribution.selected())) {
                 throw ManagedAgentUninstallException(
                     "agent_uninstall_terminal_unavailable", "The terminal environment is unavailable.",
                 )
@@ -2606,7 +2606,7 @@ class AgentRuntimeManager private constructor(
                 "agent_uninstall_distribution_changed", "Terminal environment changed. Refresh Agent settings.",
             )
         }
-        if (!EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)) {
+        if (!EmbeddedRuntimeInstaller.isDistributionReady(appContext, TerminalDistribution.selected())) {
             throw ManagedAgentUninstallException(
                 "agent_uninstall_terminal_unavailable", "The terminal environment is unavailable.",
             )

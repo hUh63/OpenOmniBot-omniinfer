@@ -436,6 +436,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     final dark = context.isDarkTheme;
     final card = dark ? palette.surfacePrimary : Colors.white;
     final agents = _visibleAgents;
+    // Grouping and filtering preserve the shared catalog's display order.
     final managed = agents.where((agent) => agent.builtIn).toList();
     final custom = agents.where((agent) => !agent.builtIn).toList();
     return Scaffold(
