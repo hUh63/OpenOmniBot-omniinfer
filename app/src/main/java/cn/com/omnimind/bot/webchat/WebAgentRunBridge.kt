@@ -881,8 +881,8 @@ internal class WebAgentRunBridge(
             val card = content["cardData"] as? Map<*, *> ?: return@forEach
             hash = 31 * hash + ((card["status"] ?: card["stage"])?.toString()?.hashCode() ?: 0)
             hash = 31 * hash + ((card["summary"] as? String)?.hashCode() ?: 0)
-            hash = 31 * hash + (card["terminalOutput"] as? String)?.length.hashCode()
-            hash = 31 * hash + (card["rawResultJson"] as? String)?.length.hashCode()
+            hash = 31 * hash + ((card["terminalOutput"] as? String)?.length ?: 0)
+            hash = 31 * hash + ((card["rawResultJson"] as? String)?.length ?: 0)
             hash = 31 * hash + (card["thinkingContent"] as? String)?.hashCode()
         }
         return hash
