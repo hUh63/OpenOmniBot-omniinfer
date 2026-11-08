@@ -408,7 +408,11 @@ class AgentRunService(
             }.getOrElse { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
                 OmniLog.w("AgentRunService", "persist webchat attachments failed: ${error.message}")
-                normalizedPayload.attachments
+                // 落盘失败时只能保留元数据：原样回退会把 dataUrl 的 base64 写进历史，
+                // 正是上面注释想避免的（Room 单行 2MB 上限）。
+                normalizedPayload.attachments.map { attachment ->
+                    LinkedHashMap(attachment).apply { remove("dataUrl") }
+                }
             }
         }
         val storedConversation = conversationService.getConversationPayload(conversationId)

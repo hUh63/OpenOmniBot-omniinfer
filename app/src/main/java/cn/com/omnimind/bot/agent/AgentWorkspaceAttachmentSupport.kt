@@ -333,6 +333,10 @@ internal object AgentWorkspaceAttachmentSupport {
     ): Map<String, Any?> {
         val shellPath = workspaceManager.shellPathForAndroid(target) ?: target.absolutePath
         return LinkedHashMap(attachment).apply {
+            // 已经落盘：dataUrl 只用于落盘前的传输，留着会把整段 base64 写进历史，
+            // 单行突破 Room 的 CursorWindow 2MB 上限（读历史/取附件都会失败）。
+            // 需要发模型时由 AgentImageAttachmentSupport 按 path 现读现编码。
+            remove("dataUrl")
             put("path", target.absolutePath)
             put("promptPath", shellPath)
             put("workspacePath", shellPath)

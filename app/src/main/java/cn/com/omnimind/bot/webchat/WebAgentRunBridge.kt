@@ -407,6 +407,10 @@ internal class WebAgentRunBridge(
             ?: return
         if (state.finished.get()) return
         state.lastActivityAt.set(System.currentTimeMillis())
+        // 已请求停止：ACP 取消是 notification，旧 turn 在真正结束前还会继续吐
+        // chunk。再追加正文会让「已停止」的会话继续长文本，并且落进历史。
+        // 终态事件仍然要处理，所以只丢非终态事件。
+        if (state.cancelRequestedAt > 0 && !isTerminalAgentEvent(event)) return
         if (turnId != null && state.turnId != null && turnId != state.turnId) {
             return
         }
