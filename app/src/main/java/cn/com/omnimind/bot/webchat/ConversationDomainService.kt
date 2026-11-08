@@ -925,7 +925,13 @@ class ConversationDomainService(
         conversationMode: String,
         reason: String = "messages_replaced"
     ) {
-        val messages = listConversationMessages(conversationId, conversationMode)
+        // 这条通道只服务 webchat（浏览器）。必须和其它推送点一样把附件 base64 换成
+        // 按需 URL：老会话里残留的 dataUrl 一帧就是几 MB。
+        val messages = listConversationMessages(
+            conversationId = conversationId,
+            conversationMode = conversationMode,
+            resolveAttachmentUrls = true
+        )
         RealtimeHub.publish(
             "messages_replaced",
             mapOf(

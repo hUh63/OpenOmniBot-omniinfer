@@ -67,7 +67,10 @@ private data class WebAgentTextEntryState(
     // 字段会被事件消费协程与收尾协程（finish/看门狗）同时读写，用 @Volatile
     // 保证可见性；容器本身由 WebAgentRunState.entryLock 保护。
     @Volatile var text: String = "",
-    @Volatile var isFinal: Boolean = false
+    @Volatile var isFinal: Boolean = false,
+    /** 上次落盘时间 / 落盘时的文本长度，用于流式写库节流（见 PERSIST_MIN_INTERVAL_MS）。 */
+    @Volatile var lastPersistAt: Long = 0L,
+    @Volatile var lastPersistLength: Int = 0
 )
 
 private data class WebAgentToolEntryState(
@@ -75,7 +78,9 @@ private data class WebAgentToolEntryState(
     val parentTaskId: String,
     val createdAt: Long,
     val sequence: Long,
-    @Volatile var update: WebAgentToolUpdate
+    @Volatile var update: WebAgentToolUpdate,
+    /** 上次落盘时间；工具进度事件也是高频的，同样要节流。 */
+    @Volatile var lastPersistAt: Long = 0L
 )
 
 private data class WebAgentRunState(
@@ -97,6 +102,8 @@ private data class WebAgentRunState(
     var lastPublishAt: Long = 0L,
     /** 当前快照的实际发送间隔（按上一帧体量自适应，见 resolvePublishInterval）。 */
     var publishIntervalMs: Long = SNAPSHOT_MIN_INTERVAL_MS,
+    /** 上一次真正广播出去的快照指纹，用于跳过内容未变的重复推送。 */
+    var lastPublishedFingerprint: Int = Int.MIN_VALUE,
     val assistantEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val reasoningEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val toolEntries: LinkedHashMap<String, WebAgentToolEntryState> = linkedMapOf()
@@ -154,6 +161,18 @@ internal class WebAgentRunBridge(
         private const val RUN_IDLE_TIMEOUT_MS = 30 * 60_000L
         /** 单条工具原始 JSON 的字符上限（约 512KB，远低于 CursorWindow 的 2MB）。 */
         private const val MAX_RAW_RESULT_CHARS = 512 * 1024
+        /**
+         * 流式期间写库的最小间隔。
+         *
+         * 原来每收到一个 token 就 upsert 一次：`sanitize` 扫全文本、Gson 序列化整段
+         * payload、Room 写整行 —— 一条 8KB 的回答按 20 字符一个 delta 就是 400 次
+         * 全量写入，写入量按 O(n²) 增长，工具输出（terminalOutput 累积）更糟。
+         * 这里按时间节流，终态（isFinal / 工具非 running）无条件落盘，所以
+         * 最终内容不会丢；流式期间网页端最多落后一个间隔。
+         */
+        private const val PERSIST_MIN_INTERVAL_MS = 800L
+        /** 文本一次增长超过这个量就立刻落盘，避免长段落等待节流窗口。 */
+        private const val PERSIST_FLUSH_CHARS = 8 * 1024
     }
 
     private val appContext = context.applicationContext
@@ -556,7 +575,7 @@ internal class WebAgentRunBridge(
                 persistToolEntry(state, entry)
             }
         }
-        publishMessages(state, finalizeInterruptedEntries = true)
+        publishMessages(state, finalizeInterruptedEntries = true, force = true)
         publishTaskEvent(state, "completed")
         notifyScheduledTaskResult(
             state = state,
@@ -593,7 +612,7 @@ internal class WebAgentRunBridge(
                 persistToolEntry(state, tool)
             }
         }
-        publishMessages(state, finalizeInterruptedEntries = true)
+        publishMessages(state, finalizeInterruptedEntries = true, force = true)
         publishTaskEvent(state, "error", message)
         notifyScheduledTaskResult(state = state, success = false, summary = message)
         removeState(state)
@@ -619,11 +638,46 @@ internal class WebAgentRunBridge(
         )
     }
 
+    /**
+     * 流式写库节流：终态必写，中间态按时间窗 + 增长量放行。
+     *
+     * 最终内容不会因为跳过一次写而丢失 —— finishSuccessfully / finishWithError
+     * 会把每个 entry 标成 isFinal 后无条件重写一遍。
+     */
+    private fun shouldPersistText(entry: WebAgentTextEntryState, text: String): Boolean {
+        val now = System.currentTimeMillis()
+        val first = entry.lastPersistAt == 0L
+        val grew = text.length - entry.lastPersistLength
+        if (entry.isFinal || first ||
+            now - entry.lastPersistAt >= PERSIST_MIN_INTERVAL_MS ||
+            grew >= PERSIST_FLUSH_CHARS
+        ) {
+            entry.lastPersistAt = now
+            entry.lastPersistLength = text.length
+            return true
+        }
+        return false
+    }
+
+    /** 工具进度同样高频（终端输出会一行一行地来），只有终态无条件落盘。 */
+    private fun shouldPersistTool(entry: WebAgentToolEntryState): Boolean {
+        val now = System.currentTimeMillis()
+        val terminal = entry.update.status != "running"
+        if (terminal || entry.lastPersistAt == 0L ||
+            now - entry.lastPersistAt >= PERSIST_MIN_INTERVAL_MS
+        ) {
+            entry.lastPersistAt = now
+            return true
+        }
+        return false
+    }
+
     private suspend fun persistAssistantEntry(
         state: WebAgentRunState,
         entry: WebAgentTextEntryState,
         isError: Boolean
     ) {
+        if (!shouldPersistText(entry, entry.text)) return
         historyRepository.upsertAssistantMessage(
             conversationId = state.conversationId,
             conversationMode = state.conversationMode,
@@ -646,6 +700,7 @@ internal class WebAgentRunBridge(
         state: WebAgentRunState,
         entry: WebAgentTextEntryState
     ) {
+        if (!shouldPersistText(entry, entry.text)) return
         historyRepository.upsertUiCard(
             conversationId = state.conversationId,
             conversationMode = state.conversationMode,
@@ -679,6 +734,7 @@ internal class WebAgentRunBridge(
         state: WebAgentRunState,
         entry: WebAgentToolEntryState
     ) {
+        if (!shouldPersistTool(entry)) return
         val update = entry.update
         val raw = update.raw
         val toolName = firstNonBlank(
@@ -771,7 +827,8 @@ internal class WebAgentRunBridge(
 
     private suspend fun publishMessages(
         state: WebAgentRunState,
-        finalizeInterruptedEntries: Boolean
+        finalizeInterruptedEntries: Boolean,
+        force: Boolean = false
     ) {
         val messages = conversationService.listConversationMessages(
             conversationId = state.conversationId,
@@ -780,6 +837,11 @@ internal class WebAgentRunBridge(
             // 图片附件不再以 base64 随每帧快照下发，改由浏览器按需拉取。
             resolveAttachmentUrls = true
         )
+        // 内容没变就别再推一遍：一帧全量快照几百 KB ~ 几 MB，重复推等于白烧
+        // 一次 Gson 序列化 + socket 写入 + 浏览器重建整个列表。
+        val fingerprint = messagesFingerprint(messages)
+        if (!force && fingerprint == state.lastPublishedFingerprint) return
+        state.lastPublishedFingerprint = fingerprint
         RealtimeHub.publish(
             "messages_replaced",
             mapOf(
@@ -793,13 +855,48 @@ internal class WebAgentRunBridge(
         state.publishIntervalMs = resolvePublishInterval(messages)
     }
 
+    /**
+     * 快照的轻量指纹。
+     *
+     * 只取「会随流式变化的可见字段」：正文、思考内容、工具卡片的状态与输出长度。
+     * 不追求与序列化结果严格等价 —— 漏判的代价只是少推一帧（下一帧或收尾的
+     * force=true 会补上），而比每帧做一次全量序列化便宜几个数量级。
+     */
+    private fun messagesFingerprint(messages: List<Map<String, Any?>>): Int {
+        var hash = 17
+        messages.forEach { message ->
+            hash = 31 * hash + (message["id"]?.toString()?.hashCode() ?: 0)
+            hash = 31 * hash + ((message["isLoading"] as? Boolean)?.hashCode() ?: 0)
+            hash = 31 * hash + ((message["reasoning_content"] as? String)?.hashCode() ?: 0)
+            val content = message["content"] as? Map<*, *>
+            if (content == null) return@forEach
+            hash = 31 * hash + ((content["text"] as? String)?.hashCode() ?: 0)
+            val card = content["cardData"] as? Map<*, *> ?: return@forEach
+            hash = 31 * hash + ((card["status"] ?: card["stage"])?.toString()?.hashCode() ?: 0)
+            hash = 31 * hash + ((card["summary"] as? String)?.hashCode() ?: 0)
+            hash = 31 * hash + (card["terminalOutput"] as? String)?.length.hashCode()
+            hash = 31 * hash + (card["rawResultJson"] as? String)?.length.hashCode()
+            hash = 31 * hash + (card["thinkingContent"] as? String)?.hashCode()
+        }
+        return hash
+    }
+
     private fun resolvePublishInterval(messages: List<Map<String, Any?>>): Long {
         var bytes = 0L
         messages.forEach { message ->
             bytes += 256L
-            val content = message["content"] as? Map<*, *>
-            bytes += (content?.get("text") as? String)?.length?.toLong() ?: 0L
             bytes += (message["reasoning_content"] as? String)?.length?.toLong() ?: 0L
+            val content = message["content"] as? Map<*, *> ?: return@forEach
+            bytes += (content["text"] as? String)?.length?.toLong() ?: 0L
+            // 工具卡片才是体量大头：terminalOutput / rawResultJson / argsJson 单条
+            // 可达几百 KB。原来只统计正文，长工具输出时体量被严重低估，间隔就
+            // 一直停在最小值，等于按 150ms 推几 MB。
+            val card = content["cardData"] as? Map<*, *> ?: return@forEach
+            listOf("terminalOutput", "rawResultJson", "argsJson", "resultPreviewJson", "summary")
+                .forEach { key ->
+                    bytes += (card[key] as? String)?.length?.toLong() ?: 0L
+                }
+            bytes += (card["thinkingContent"] as? String)?.length?.toLong() ?: 0L
         }
         val interval = bytes * 1000L / SNAPSHOT_BYTES_PER_SECOND
         return interval.coerceIn(SNAPSHOT_MIN_INTERVAL_MS, SNAPSHOT_MAX_INTERVAL_MS)

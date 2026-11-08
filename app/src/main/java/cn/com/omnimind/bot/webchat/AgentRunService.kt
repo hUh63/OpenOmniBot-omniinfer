@@ -536,7 +536,10 @@ class AgentRunService(
     suspend fun clarifyTask(taskId: String?, reply: String): Map<String, Any?> {
         val normalizedTaskId = taskId?.trim().takeUnless { it.isNullOrEmpty() }
             ?: throw IllegalArgumentException("taskId is required")
-        val runContext = runContexts.remove(normalizedTaskId)
+        // 先不摘除：startConversationRun 可能因为「该会话已有运行中的任务」抛错
+        // （旧 turn 还没收敛）。原来一进来就 remove，失败后这条 clarify 上下文
+        // 就永久丢了，用户再回复也只会一直报「context is no longer available」。
+        val runContext = runContexts[normalizedTaskId]
             ?: throw IllegalStateException("Agent run context is no longer available")
         val accepted = startConversationRun(
             conversationId = runContext.conversationId,
@@ -545,6 +548,7 @@ class AgentRunService(
                 "conversationMode" to runContext.conversationMode
             )
         )
+        runContexts.remove(normalizedTaskId)
         return accepted + ("previousTaskId" to normalizedTaskId)
     }
 
