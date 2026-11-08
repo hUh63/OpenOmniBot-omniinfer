@@ -72,6 +72,8 @@ object EmbeddedTerminalInitCoordinator {
     private var embeddedTerminalInitState = EmbeddedTerminalInitState()
     private var activeRun: CompletableDeferred<TermuxLiveEnvironmentResult>? = null
     private var activeJob: Job? = null
+    /** Application context of the current run, needed to cancel its installer. */
+    @Volatile private var installContext: android.content.Context? = null
 
     fun addListener(listener: (Map<String, Any?>) -> Unit) {
         synchronized(listenerLock) {
@@ -205,6 +207,11 @@ object EmbeddedTerminalInitCoordinator {
     fun cancelCurrent(): Boolean = synchronized(stateLock) {
         val job = activeJob?.takeIf { !it.isCompleted } ?: return false
         job.cancel(CancellationException("用户取消终端环境准备"))
+        // The download/extraction runs inside TerminalManager's own scope, so
+        // cancelling this coordinator job alone left it writing for minutes.
+        installContext?.let { context ->
+            runCatching { TerminalManager.getInstance(context).cancelEnvironmentInit() }
+        }
         true
     }
 
@@ -215,6 +222,7 @@ object EmbeddedTerminalInitCoordinator {
     ): Pair<CompletableDeferred<TermuxLiveEnvironmentResult>, Job> {
         val deferred = CompletableDeferred<TermuxLiveEnvironmentResult>()
         activeRun = deferred
+        installContext = context
         resetEmbeddedTerminalInitStateLocked(request)
         val job = workerScope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -456,6 +464,10 @@ object EmbeddedTerminalInitCoordinator {
         }
 
         synchronized(stateLock) {
+            // Installer threads may emit after this run was cancelled or finished;
+            // accepting them resurrected the terminal state to "running" and kept
+            // the foreground notification (and the Dart poll) alive forever.
+            if (embeddedTerminalInitState.completed && activeRun == null) return
             val now = System.currentTimeMillis()
             val current =
                 if (embeddedTerminalInitState.startedAt == 0L) {

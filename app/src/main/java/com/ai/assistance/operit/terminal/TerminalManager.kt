@@ -75,6 +75,8 @@ class TerminalManager private constructor(
     internal val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     /** 每个发行版只保留一份环境初始化任务，避免并发调用重复下载/解包。 */
     private val environmentInitJobs = java.util.concurrent.ConcurrentHashMap<String, Deferred<Boolean>>()
+    /** 同一发行版的安装串行化：两条入口（隐藏命令 / 发行版切换）不能同时解包同一份 rootfs。 */
+    private val environmentInitLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
 
     private val sessionsById = ConcurrentHashMap<String, ManagedSession>()
     private val _terminalState = MutableStateFlow(TerminalState())
@@ -150,10 +152,6 @@ class TerminalManager private constructor(
         distribution: TerminalDistribution.Spec = TerminalDistribution.selected(),
         onProgress: suspend (RuntimeInstallProgress) -> Unit = {}
     ): Boolean {
-        // Hidden ACP probes run during Agent switching. Once the requested
-        // runtime is already installed, do not queue behind the full runtime
-        // installer (which may be preparing OmniFlow or another terminal
-        // session concurrently).
         if (EmbeddedRuntimeInstaller.isDistributionReady(context, distribution)) {
             return runCatching {
                 ensureShellScripts()
@@ -163,21 +161,51 @@ class TerminalManager private constructor(
                 false
             }
         }
-        val status = EmbeddedRuntimeInstaller.ensureRuntimeInstalled(
-            context = context,
-            distribution = distribution,
-            onProgress = onProgress
-        )
-        if (!status.success) {
-            return false
+        // Serialise per distribution: awaitEnvironmentReady and a distribution
+        // switch both reach this method, and two concurrent extractions of the
+        // same rootfs leave a half-written tree with a ready marker.
+        val lock = environmentInitLocks.computeIfAbsent(distribution.id) { Mutex() }
+        return lock.withLock {
+            // Another caller may have finished while this one waited.
+            if (EmbeddedRuntimeInstaller.isDistributionReady(context, distribution)) {
+                return@withLock runCatching {
+                    ensureShellScripts()
+                    true
+                }.getOrElse {
+                    Log.e(TAG, "Failed to prepare shell scripts", it)
+                    false
+                }
+            }
+            val status = EmbeddedRuntimeInstaller.ensureRuntimeInstalled(
+                context = context,
+                distribution = distribution,
+                onProgress = onProgress
+            )
+            if (!status.success) {
+                return@withLock false
+            }
+            runCatching {
+                ensureShellScripts()
+                true
+            }.getOrElse {
+                Log.e(TAG, "Failed to prepare shell scripts", it)
+                false
+            }
         }
-        return runCatching {
-            ensureShellScripts()
-            true
-        }.getOrElse {
-            Log.e(TAG, "Failed to prepare shell scripts", it)
-            false
+    }
+
+    /** 用户点了取消：真正停掉后台的下载/解包，而不是只取消等待它的协程。 */
+    fun cancelEnvironmentInit(distributionId: String? = null): Boolean {
+        val ids = distributionId?.let { listOf(it) } ?: environmentInitJobs.keys.toList()
+        var cancelled = false
+        ids.forEach { id ->
+            val job = environmentInitJobs.remove(id) ?: return@forEach
+            if (!job.isCompleted) {
+                job.cancel(CancellationException("用户取消终端环境准备"))
+                cancelled = true
+            }
         }
+        return cancelled
     }
 
     fun prepareForMaintenance() {

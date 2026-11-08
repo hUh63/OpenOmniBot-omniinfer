@@ -13,7 +13,11 @@ private const val MAX_EVENT_BYTES = 8L * 1024 * 1024
 
 /** Reads existing Na SSE frames. A cursor is acknowledged only after projection;
  * comments/heartbeats never create messages or complete the prompt. */
-internal fun readNaEvents(source: BufferedSource, onEvent: (Map<String, Any?>) -> Boolean) {
+internal fun readNaEvents(
+    source: BufferedSource,
+    onEvent: (Map<String, Any?>) -> Boolean,
+    onHeartbeat: () -> Unit = {},
+) {
     val gson = Gson()
     val type = object : TypeToken<Map<String, Any?>>() {}.type
     var eventType = ""
@@ -38,6 +42,10 @@ internal fun readNaEvents(source: BufferedSource, onEvent: (Map<String, Any?>) -
                 "event" -> eventType = value
                 "data" -> { if (data.isNotEmpty()) data.append('\n'); data.append(value) }
             }
+        } else {
+            // Heartbeats used to be the one path that skipped the owner check, so a
+            // connection from a previous account could stay open indefinitely.
+            onHeartbeat()
         }
     }
     throw IOException("Na event connection closed")

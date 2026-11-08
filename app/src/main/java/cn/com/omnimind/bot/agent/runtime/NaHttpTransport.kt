@@ -7,9 +7,12 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLPeerUnverifiedException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -82,19 +85,30 @@ internal suspend fun <T> naHttpResponse(client: OkHttpClient, request: Request, 
                         continuation.resumeWith(Result.failure(error))
                     }
                     override fun onResponse(call: Call, response: Response) {
-                        val result = runCatching {
-                            response.use {
-                                if (!continuation.isActive) throw kotlinx.coroutines.CancellationException()
-                                guard?.check?.invoke()
-                                if (repeatable && attempts < 3 && response.code in transientStatuses) {
-                                    naRetryDelayMillis(attempts, response.header("Retry-After"))?.let {
-                                        throw NaHttpRetry(it)
+                        // An SSE consumer blocks for the whole subscription; running it
+                        // on the OkHttp dispatcher thread would starve every other call
+                        // of this client (the pool is shared with normal requests).
+                        val worker = CoroutineScope(Dispatchers.IO).launch {
+                            val result = runCatching {
+                                response.use {
+                                    if (!continuation.isActive) {
+                                        throw kotlinx.coroutines.CancellationException("Na request cancelled")
                                     }
+                                    guard?.check?.invoke()
+                                    if (repeatable && attempts < 3 && response.code in transientStatuses) {
+                                        naRetryDelayMillis(attempts, response.header("Retry-After"))?.let {
+                                            throw NaHttpRetry(it)
+                                        }
+                                    }
+                                    consume(response)
                                 }
-                                consume(response)
                             }
+                            continuation.resumeWith(result)
                         }
-                        continuation.resumeWith(result)
+                        continuation.invokeOnCancellation {
+                            worker.cancel()
+                            call.cancel()
+                        }
                     }
                 })
             }

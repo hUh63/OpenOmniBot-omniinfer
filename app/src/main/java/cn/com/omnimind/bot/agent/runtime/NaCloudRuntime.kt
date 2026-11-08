@@ -245,7 +245,8 @@ internal class NaCloudRuntime(
                                 owner.execute(eventClient, request, retryReads = false) { response ->
                                     check(response.isSuccessful) { "Na history stream HTTP ${response.code}" }
                                     check(response.header("Content-Type").orEmpty().startsWith("text/event-stream"))
-                                    readNaEvents(response.body.source(), receive)
+                                    readNaEvents(response.body.source(), receive,
+                                        onHeartbeat = { requireCurrentConnection(owner, revision) })
                                 }
                             },
                             checkOwner = { requireCurrentConnection(owner, revision) },
@@ -667,7 +668,11 @@ internal class NaCloudRuntime(
                                     check(response.header("Content-Type").orEmpty().startsWith("text/event-stream")) {
                                         "Na returned an invalid event stream"
                                     }
-                                    readNaEvents(response.body.source(), receive)
+                                    readNaEvents(response.body.source(), receive,
+                                        onHeartbeat = {
+                                            promptContext.ensureActive()
+                                            connection.account?.requireSessionGeneration(connection.generation)
+                                        })
                                 }
                             },
                             checkOwner = {

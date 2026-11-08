@@ -233,8 +233,10 @@ class AgentRuntimeManager private constructor(
     private val remoteConfigStore = CodexRemoteBridgeConfigStore(appContext)
     private val acpAgentProfileStore = AcpAgentProfileStore(appContext)
     /** Na 云端助手：HTTP runtime，不走 ACP 进程。 */
-    private val naRuntime by lazy {
+    @Volatile private var naRuntimeInstance: NaCloudRuntime? = null
+    private val naRuntime: NaCloudRuntime by lazy {
         NaCloudRuntime(appContext, scope, bindingRepository, acpAgentProfileStore, ::emitEvent)
+            .also { naRuntimeInstance = it }
     }
     /** 只做「包版本清单」：探测已装版本 / 查 npm dist-tags，不参与 ACP 会话。 */
     private val managedAgentUpdates = ManagedAgentUpdates(
@@ -758,6 +760,9 @@ class AgentRuntimeManager private constructor(
             invalidateLocalProbeCache()
             clearPendingEvents()
             allLocalRuntimes().forEach { it.disconnect() }
+            // Na runs and its history stream live outside the ACP session map;
+            // without this they keep pushing updates into a detached runtime.
+            naRuntimeInstance?.shutdown()
             activeRuntime = null
             activeLocalDistributionId = null
             clearActiveTurns()
