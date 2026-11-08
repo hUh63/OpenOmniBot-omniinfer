@@ -16,7 +16,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
@@ -202,7 +201,11 @@ internal class WebAgentRunBridge(
                 // 终态事件决定 run 能否收敛：丢了会让会话卡在「运行中」直到看门狗。
                 // 中间帧可以丢（网页端少几段），终态必须等消费端腾出空间。
                 if (isTerminalAgentEvent(event)) {
-                    runBlocking { events.send(event) }
+                    // 不能 runBlocking：这个回调由 AgentRuntimeManager.emitEvent 用
+                    // mainHandler.post 派发，跑在主线程上。队列满时阻塞等待消费端
+                    // （写库 + 重载会话）腾位置，主线程就被卡住 —— 长会话下是 ANR。
+                    // 改成在消费侧 scope 里排队发送，终态依旧不会丢。
+                    scope.launch { events.send(event) }
                 } else {
                     // 队列打满说明消费端跟不上（通常是超长会话）。丢事件比 OOM 好，
                     // 但要留下痕迹，否则表现只是「网页端少了几段」。

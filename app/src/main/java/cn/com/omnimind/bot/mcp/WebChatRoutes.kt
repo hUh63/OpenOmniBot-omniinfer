@@ -185,7 +185,13 @@ object WebChatRoutes {
                             limit = limit.coerceIn(1, 200),
                             offset = (call.request.queryParameters["offset"]?.toIntOrNull() ?: 0)
                                 .coerceAtLeast(0),
-                            resolveAttachmentUrls = true
+                            resolveAttachmentUrls = true,
+                            // 正在跑的会话不能做「中断归一化」：它会把还在执行的
+                            // 工具条目改写成 interrupted 落库。
+                            finalizeInterruptedEntries = !agentRunService.hasActiveConversationRun(
+                                conversationId = conversationId,
+                                conversationMode = mode
+                            )
                         )
                     )
                     return@get

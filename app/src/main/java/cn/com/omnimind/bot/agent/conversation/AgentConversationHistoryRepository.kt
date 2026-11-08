@@ -643,7 +643,13 @@ class AgentConversationHistoryRepository(
         conversationId: Long,
         conversationMode: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        /**
+         * 该会话当前有活跃 run 时必须传 false：归一化会把「还在跑」的工具条目
+         * 改写成 interrupted 并落库。宽限期（STALE_RUNNING_GRACE_MS）只救得了
+         * 2 分钟以内的工具，长命令 / 长构建照样会被翻页翻成「已中断」。
+         */
+        finalizeInterruptedEntries: Boolean = true
     ): Triple<List<Map<String, Any?>>, Boolean, Int> = withContext(Dispatchers.IO) {
         val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
         val modes = conversationModeCandidates(effectiveConversationMode)
@@ -662,8 +668,12 @@ class AgentConversationHistoryRepository(
         }
         // Every page is historical UI. A card from an older page must not
         // stay visually running merely because it was not in the first page
-        // loaded after process restore.
-        val normalized = normalizeEntriesForDisplay(page.entries)
+        // loaded after process restore. 但会话正在跑的时候不能这么做：见参数注释。
+        val normalized = if (finalizeInterruptedEntries) {
+            normalizeEntriesForDisplay(page.entries)
+        } else {
+            page.entries
+        }
         val messagePayloads = normalized.mapNotNull { entry -> entryToMessagePayload(entry.entry, entry.fullPayloadFile) }
         val sorted = ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
         // scanned = 本次真正从 SQL 消费掉的行数。payload 组装会丢掉 transport /

@@ -668,14 +668,17 @@ class ConversationDomainService(
         limit: Int,
         offset: Int,
         /** webchat 分页读取：附件同样换成按需 URL，否则每页都会带上 base64。 */
-        resolveAttachmentUrls: Boolean = false
+        resolveAttachmentUrls: Boolean = false,
+        /** 会话正在跑时必须传 false，否则正在执行的工具条目会被翻页改写成「已中断」。 */
+        finalizeInterruptedEntries: Boolean = true
     ): Map<String, Any?> {
         val mode = normalizeConversationMode(conversationMode)
         val (messages, hasMore, scanned) = historyRepository.listConversationMessagesPaged(
             conversationId = conversationId,
             conversationMode = mode,
             limit = limit,
-            offset = offset
+            offset = offset,
+            finalizeInterruptedEntries = finalizeInterruptedEntries
         )
         // scanned：本次 SQL 消耗掉的行数，Dart 侧必须用它推进 offset（不能用
         // messages.size，组装阶段会丢掉一部分条目）。
