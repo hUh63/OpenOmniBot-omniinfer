@@ -56,6 +56,19 @@ class ScheduledTaskStorageService {
     return loadScheduledTasksSync();
   }
 
+  /// 写路径专用：跳过节流，确保「读快照 → 改 → 整表写回」的基线是最新磁盘内容。
+  /// 原生闹钟执行完会直写 `flutter.scheduled_tasks`；用 2 秒内的陈旧快照整表写回
+  /// 会把已执行任务的时间退回去，甚至复活已删除的一次性任务。
+  static Future<List<ScheduledTask>> _loadForWrite() async {
+    _lastPrefsReloadAt = DateTime.now();
+    try {
+      await StorageService.reload();
+    } catch (e) {
+      print('重载定时任务存储失败: $e');
+    }
+    return loadScheduledTasksSync();
+  }
+
   /// 同步读取已缓存的定时任务，用于页面首帧恢复。
   static List<ScheduledTask> loadScheduledTasksSync() {
     try {
@@ -85,7 +98,7 @@ class ScheduledTaskStorageService {
   /// 添加定时任务
   static Future<bool> addScheduledTask(ScheduledTask task) async {
     try {
-      final tasks = await loadScheduledTasks();
+      final tasks = await _loadForWrite();
 
       // 检查是否已存在相同的任务
       final existingIndex = tasks.indexWhere((t) => t.id == task.id);
@@ -105,7 +118,7 @@ class ScheduledTaskStorageService {
   /// 更新定时任务
   static Future<bool> updateScheduledTask(ScheduledTask task) async {
     try {
-      final tasks = await loadScheduledTasks();
+      final tasks = await _loadForWrite();
       final index = tasks.indexWhere((t) => t.id == task.id);
 
       if (index == -1) {
@@ -123,7 +136,7 @@ class ScheduledTaskStorageService {
   /// 删除定时任务
   static Future<bool> deleteScheduledTask(String taskId) async {
     try {
-      final tasks = await loadScheduledTasks();
+      final tasks = await _loadForWrite();
       tasks.removeWhere((task) => task.id == taskId);
       return await saveScheduledTasks(tasks);
     } catch (e) {

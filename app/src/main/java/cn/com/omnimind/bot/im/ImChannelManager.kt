@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
 object ImChannelManager {
     private const val TAG = "[ImChannelManager]"
     private const val TYPING_REFRESH_MS = 2_500L
+    /** 与 webchat 的 run 空闲看门狗同量级：终态事件丢了也必须收敛。 */
+    private const val PENDING_RUN_TIMEOUT_MS = 30 * 60 * 1000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingRuns = ConcurrentHashMap<String, PendingImRun>()
@@ -221,10 +223,21 @@ object ImChannelManager {
     }
 
     private suspend fun handleRealtimeEvent(event: RealtimeEvent) {
-        if (event.event != "agent_stream_event") return
+        // `agent_stream_event` no longer has a publisher after the ACP migration;
+        // run termination now only arrives as `chat_task_event`. Accepting both keeps
+        // the old incremental path working if a publisher ever comes back.
+        if (event.event != "agent_stream_event" && event.event != "chat_task_event") return
         val taskId = event.data["taskId"]?.toString()?.takeIf { it.isNotBlank() } ?: return
         val pending = pendingRuns[taskId] ?: return
-        val kind = event.data["kind"]?.toString().orEmpty()
+        val kind = if (event.event == "chat_task_event") {
+            when (event.data["kind"]?.toString()) {
+                "completed" -> "completed"
+                "error" -> "error"
+                else -> return
+            }
+        } else {
+            event.data["kind"]?.toString().orEmpty()
+        }
         val isFinal = event.data["isFinal"] == true
         when (kind) {
             "text_snapshot" -> {
@@ -279,10 +292,15 @@ object ImChannelManager {
                 flushAgentTextStreams(pending, taskId)
                 val hasOutput = agentTextStreams[taskId]?.hasSentAny == true
                 if (!hasOutput) {
+                    // No live text stream any more: read the final answer back.
+                    val finalText = runCatching {
+                        processor?.finalAssistantText(pending.conversationId, pending.mode)
+                    }.getOrNull()
                     sendChunked(
                         pending.channel,
                         pending.peerId,
-                        "任务已完成，但没有产生文本输出。"
+                        finalText?.takeIf { it.isNotBlank() }
+                            ?: "任务已完成，但没有产生文本输出。"
                     )
                 }
                 agentTextStreams.remove(taskId)
@@ -384,6 +402,17 @@ object ImChannelManager {
         pendingRuns[pending.taskId] = pending
         if (typingJobs[pending.taskId]?.isActive != true) {
             startTypingIndicator(pending)
+        }
+        // A lost terminal event used to leave typing pulsing forever and kept
+        // `activeTaskId` occupied, so every later message from this peer was refused.
+        scope.launch {
+            delay(PENDING_RUN_TIMEOUT_MS)
+            val stillPending = pendingRuns[pending.taskId] ?: return@launch
+            runCatching {
+                sendChunked(stillPending.channel, stillPending.peerId, "任务超时，已停止等待。")
+            }
+            agentTextStreams.remove(pending.taskId)
+            finishPendingRun(pending.taskId)
         }
     }
 

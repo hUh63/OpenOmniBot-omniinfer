@@ -171,8 +171,12 @@ class App : BaseApplication() {
         runCatching {
             WorkspaceMemoryRollupScheduler(this).ensureScheduledIfEnabled()
         }
-        runCatching {
-            WorkspaceScheduledTaskScheduler(this).rescheduleAllEnabled()
+        // 冷启动主线程上读 prefs + 解析全部任务 + 逐个 cancel/setExact 闹钟，
+        // 任务多时明显拖慢首帧；与上面工作区迁移同理放到后台。
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching {
+                WorkspaceScheduledTaskScheduler(this@App).rescheduleAllEnabled()
+            }
         }
         runCatching {
             QuickLogWidgetUpdater.updateAll(this)

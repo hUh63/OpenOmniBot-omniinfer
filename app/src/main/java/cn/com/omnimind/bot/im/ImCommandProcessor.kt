@@ -14,6 +14,29 @@ internal class ImCommandProcessor(
     private val conversationService = ConversationDomainService(context.applicationContext)
     private val agentRunService = AgentRunService(context.applicationContext)
 
+    /**
+     * ACP 迁移后 `agent_stream_event` 已经没有任何发布端，IM 只能从 run 终态
+     * （`chat_task_event`）得知任务结束。正文需要回读会话里的最后一条 assistant
+     * 消息，否则 IM 用户永远只能收到「任务已完成，但没有产生文本输出」。
+     */
+    suspend fun finalAssistantText(conversationId: Long, mode: String): String? {
+        val messages = runCatching {
+            conversationService.listConversationMessages(
+                conversationId = conversationId,
+                conversationMode = mode,
+                finalizeInterruptedEntries = false
+            )
+        }.getOrNull() ?: return null
+        for (message in messages.asReversed()) {
+            val content = message["content"] as? Map<*, *>
+            val role = (message["role"] ?: content?.get("role"))?.toString()
+            if (role != "assistant") continue
+            val text = content?.get("text")?.toString() ?: content?.toString()
+            if (!text.isNullOrBlank()) return text
+        }
+        return null
+    }
+
     suspend fun handle(inbound: ImInboundMessage): ImProcessorResult {
         val text = inbound.text.trim()
         if (text.isEmpty()) return ImProcessorResult()

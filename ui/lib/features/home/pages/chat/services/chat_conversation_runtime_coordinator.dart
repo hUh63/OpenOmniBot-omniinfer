@@ -102,6 +102,9 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
 
   void _notifyRuntimeListeners() => notifyListeners();
 
+  StreamSubscription<dynamic>? _conversationListSubscription;
+  StreamSubscription<dynamic>? _agentEventSubscription;
+
   void ensureInitialized() {
     if (_initialized) return;
     _initialized = true;
@@ -109,16 +112,40 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     unawaited(VoicePlaybackCoordinator.instance.ensureInitialized());
 
     AssistsMessageService.initialize();
-    AssistsMessageService.conversationListChangedStream.listen((event) {
-      if (event['reason'] == 'na_history_owner_changed')
-        discardNaHistoryViews();
-    });
+    // Subscriptions are kept: a re-created stream controller must not leave the
+    // coordinator attached to a dead one, and a stream error must not silence it.
+    _conversationListSubscription?.cancel();
+    _conversationListSubscription = AssistsMessageService
+        .conversationListChangedStream
+        .listen(
+          (event) {
+            if (event['reason'] == 'na_history_owner_changed') {
+              discardNaHistoryViews();
+            }
+          },
+          onError: (Object error) => debugPrint(
+            '[ChatRuntimeCoordinator] conversation list stream failed: $error',
+          ),
+        );
     AssistsMessageService.addOnExternalUserMessageAppendedCallback(
       _handleExternalUserMessageAppended,
     );
     // The coordinator outlives Home and Chat routes. Returning to the list
     // must not stop projection/persistence of an already admitted ACP turn.
-    AgentRuntimeService.events.listen(_handleAgentRuntimeEvent);
+    _agentEventSubscription?.cancel();
+    _agentEventSubscription = AgentRuntimeService.events.listen(
+      (event) {
+        // One malformed payload used to end the whole projection for this turn.
+        try {
+          _handleAgentRuntimeEvent(event);
+        } catch (error) {
+          debugPrint('[ChatRuntimeCoordinator] agent event failed: $error');
+        }
+      },
+      onError: (Object error) => debugPrint(
+        '[ChatRuntimeCoordinator] agent event stream failed: $error',
+      ),
+    );
   }
 
   ChatConversationRuntimeState? runtimeFor({

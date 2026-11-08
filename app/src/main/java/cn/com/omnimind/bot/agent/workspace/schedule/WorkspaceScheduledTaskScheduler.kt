@@ -108,14 +108,28 @@ class WorkspaceScheduledTaskScheduler(
             require(task.subagentPrompt?.isNotBlank() == true) {
                 "任务内容不能为空：请填写要让 AI 执行的具体内容"
             }
-            task = task.copy(
-                nextExecutionTime = resolveNextExecutionAt(
-                    task = task,
-                    nowMillis = System.currentTimeMillis(),
-                    preferExistingFuture = true
-                )
+            val nextExecution = resolveNextExecutionAt(
+                task = task,
+                nowMillis = System.currentTimeMillis(),
+                preferExistingFuture = true
             )
-            scheduleAlarm(task)
+            if (nextExecution == null) {
+                // 与 rescheduleAllEnabled 一致：错过的一次性任务停用，并告诉用户原因，
+                // 不要留在列表里「看着还在、其实永不执行」。
+                task = task.copy(enabled = false, nextExecutionTime = null)
+                cancelAlarm(task.taskId)
+                if (task.notificationEnabled) {
+                    ScheduledTaskResultNotifier.notifyProblem(
+                        context = appContext,
+                        taskId = task.taskId,
+                        title = task.title,
+                        summary = "已错过设定时间，任务已停用。请重新设置时间后启用。"
+                    )
+                }
+            } else {
+                task = task.copy(nextExecutionTime = nextExecution)
+                scheduleAlarm(task)
+            }
         } else {
             cancelAlarm(task.taskId)
             task = task.copy(nextExecutionTime = null)
@@ -268,15 +282,25 @@ class WorkspaceScheduledTaskScheduler(
             OmniLog.e(TAG, "execute scheduled task failed: ${it.message}")
         }.isFailure
 
+        // executeTask() 可能跑几十秒（建会话 + 起 run）。执行期间用户可能已经改了
+        // 或删了这个任务：拿执行前的快照整表写回会覆盖那些修改，并把已删任务复活。
+        val latestMap = loadTaskMapMutable()
+        val latestTask = latestMap[normalizedId]
+        if (latestTask == null || !latestTask.enabled) {
+            cancelAlarm(normalizedId)
+            if (latestTask == null) removeTaskFromFlutterStorage(normalizedId)
+            return
+        }
+
         if (executedTask.repeatDaily && executedTask.enabled) {
             val nextExecution = resolveNextExecutionAt(
-                task = executedTask,
+                task = latestTask,
                 nowMillis = System.currentTimeMillis(),
                 preferExistingFuture = false
             )
-            val updated = executedTask.copy(nextExecutionTime = nextExecution)
-            taskMap[normalizedId] = updated
-            persistTaskMap(taskMap)
+            val updated = latestTask.copy(nextExecutionTime = nextExecution)
+            latestMap[normalizedId] = updated
+            persistTaskMap(latestMap)
             upsertTaskInFlutterStorage(updated)
             if (nextExecution != null) {
                 scheduleAlarm(updated)
@@ -294,9 +318,9 @@ class WorkspaceScheduledTaskScheduler(
         } else if (executeFailed) {
             // 一次性任务执行失败时不能走「成功即删除」那段：任务会凭空消失、
             // 没有任何通知，用户完全查不到发生过什么。保留记录并置为停用。
-            val failed = executedTask.copy(enabled = false, nextExecutionTime = null)
-            taskMap[normalizedId] = failed
-            persistTaskMap(taskMap)
+            val failed = latestTask.copy(enabled = false, nextExecutionTime = null)
+            latestMap[normalizedId] = failed
+            persistTaskMap(latestMap)
             cancelAlarm(normalizedId)
             upsertTaskInFlutterStorage(failed)
             if (failed.notificationEnabled) {
@@ -308,8 +332,8 @@ class WorkspaceScheduledTaskScheduler(
                 )
             }
         } else {
-            taskMap.remove(normalizedId)
-            persistTaskMap(taskMap)
+            latestMap.remove(normalizedId)
+            persistTaskMap(latestMap)
             cancelAlarm(normalizedId)
             removeTaskFromFlutterStorage(normalizedId)
         }
@@ -597,6 +621,12 @@ class WorkspaceScheduledTaskScheduler(
         val now = LocalDateTime.now(zone)
         var target = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
         if (!target.isAfter(now)) {
+            // 一次性任务错过设定时刻就应当停下来。原来这里无条件顺延到明天，
+            // 让放弃排期的 rescheduleAllEnabled 规则被 upsert/sync 绕过。
+            val existing = task.nextExecutionTime
+            if (preferExistingFuture && existing != null && existing <= nowMillis && !task.repeatDaily) {
+                return null
+            }
             target = target.plusDays(1)
         }
         return target.atZone(zone).toInstant().toEpochMilli()

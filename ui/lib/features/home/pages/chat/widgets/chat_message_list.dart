@@ -328,15 +328,14 @@ class _ChatMessageListState extends State<ChatMessageList> {
   Future<void> _loadOlderMessages() async {
     try {
       await widget.onLoadMore!.call();
-      if (!mounted) return;
-      // The leading sliver grows away from a stable origin, so pagination
-      // needs no extent estimate or post-layout jump to preserve the viewport.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _isAutoLoadingHistory = false;
-      });
-    } catch (_) {
+    } catch (error) {
+      // This future is started with unawaited(): rethrowing surfaced as an
+      // uncaught zone error (red screen in debug, silent loss in release).
+      debugPrint('[ChatMessageList] load older messages failed: $error');
+    } finally {
+      // Release the latch on every path: a later page can be requested right
+      // after the failure instead of waiting for the widget to be rebuilt.
       _isAutoLoadingHistory = false;
-      rethrow;
     }
   }
 

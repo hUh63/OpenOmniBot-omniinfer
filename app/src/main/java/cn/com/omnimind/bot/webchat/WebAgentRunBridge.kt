@@ -16,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
@@ -175,9 +176,15 @@ internal class WebAgentRunBridge(
         ) { event ->
             val queued = events.trySend(event)
             if (queued.isFailure) {
-                // 队列打满说明消费端跟不上（通常是超长会话）。丢事件比 OOM 好，
-                // 但要留下痕迹，否则表现只是「网页端少了几段」。
-                OmniLog.w(TAG, "agent event dropped: queue full")
+                // 终态事件决定 run 能否收敛：丢了会让会话卡在「运行中」直到看门狗。
+                // 中间帧可以丢（网页端少几段），终态必须等消费端腾出空间。
+                if (isTerminalAgentEvent(event)) {
+                    runBlocking { events.send(event) }
+                } else {
+                    // 队列打满说明消费端跟不上（通常是超长会话）。丢事件比 OOM 好，
+                    // 但要留下痕迹，否则表现只是「网页端少了几段」。
+                    OmniLog.w(TAG, "agent event dropped: queue full")
+                }
             }
         }
         // 终态看门狗：ACP 只保证「尽力取消」，不回终态时兜底收敛，
@@ -360,6 +367,12 @@ internal class WebAgentRunBridge(
         state.turnId?.let { arguments["turnId"] = it }
         manager.handleMethod("session/cancel", arguments)
         return true
+    }
+
+    private fun isTerminalAgentEvent(event: Map<String, Any?>): Boolean {
+        val method = event["method"]?.toString()?.lowercase().orEmpty()
+        return method.contains("turn_completed") || method.contains("turn_failed") ||
+            method.contains("thread_closed") || method == "error" || method.endsWith("/error")
     }
 
     private suspend fun handleEvent(event: Map<String, Any?>) {

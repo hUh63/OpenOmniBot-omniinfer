@@ -94,7 +94,7 @@ class ScheduledTaskSchedulerService {
       }
       return;
     }
-    cancelTask(taskId);
+    cancelTask(taskId, cancelNative: false);
 
     // 如果不是重复任务，删除
     if (!task.repeatDaily) {
@@ -126,7 +126,7 @@ class ScheduledTaskSchedulerService {
       }
       return;
     }
-    cancelTask(taskId);
+    cancelTask(taskId, cancelNative: false);
     if (_currentCountdownTask?.id == taskId) {
       _currentCountdownTask = null;
     }
@@ -301,9 +301,12 @@ class ScheduledTaskSchedulerService {
     }
   }
 
-  /// 取消定时任务
-  static void cancelTask(String taskId) {
-    if (_useNativeAlarmScheduler) {
+  /// 取消定时任务。
+  ///
+  /// [cancelNative] 为 false 时不触碰原生存储：调用方紧接着会自己做 update/delete，
+  /// 两次无序写入曾把刚重排好的每日任务整条删掉。
+  static void cancelTask(String taskId, {bool cancelNative = true}) {
+    if (_useNativeAlarmScheduler && cancelNative) {
       unawaited(AssistsMessageService.deleteWorkspaceScheduledTask(taskId));
     }
     _scheduledTimers[taskId]?.cancel();
