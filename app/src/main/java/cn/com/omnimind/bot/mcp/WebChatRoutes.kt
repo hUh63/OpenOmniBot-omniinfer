@@ -173,6 +173,23 @@ object WebChatRoutes {
                     return@get
                 }
                 val mode = call.request.queryParameters["mode"] ?: "agent"
+                // 长会话一次性返回整段历史会让首屏很慢（且单次响应可达数 MB）。
+                // 带 limit 时走分页，前端用返回的 scanned 推进 offset；
+                // 不带 limit 时保持原有全量语义。
+                val limit = call.request.queryParameters["limit"]?.toIntOrNull()
+                if (limit != null) {
+                    call.respondJson(
+                        conversationService.listConversationMessagesPaged(
+                            conversationId = conversationId,
+                            conversationMode = mode,
+                            limit = limit.coerceIn(1, 200),
+                            offset = (call.request.queryParameters["offset"]?.toIntOrNull() ?: 0)
+                                .coerceAtLeast(0),
+                            resolveAttachmentUrls = true
+                        )
+                    )
+                    return@get
+                }
                 val finalizeInterruptedEntries = !agentRunService.hasActiveConversationRun(
                     conversationId = conversationId,
                     conversationMode = mode

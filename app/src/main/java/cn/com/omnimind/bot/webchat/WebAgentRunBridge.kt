@@ -55,7 +55,9 @@ private const val SNAPSHOT_MIN_INTERVAL_MS = 150L
 private const val SNAPSHOT_BYTES_PER_SECOND = 1_500_000L
 
 /** 节流上限：再大的会话也至少每秒推一次，否则观感会像卡死。 */
-private const val SNAPSHOT_MAX_INTERVAL_MS = 1_200L
+// 长会话一帧就是几百 KB~数 MB：原来 1.2s 的上限等于每秒近 1MB 的持续推送。
+// 放宽到 3s 只降低频率，不改「全量替换」语义，也就不影响前端契约。
+private const val SNAPSHOT_MAX_INTERVAL_MS = 3_000L
 
 private data class WebAgentTextEntryState(
     val entryId: String,
@@ -150,6 +152,8 @@ internal class WebAgentRunBridge(
          * 工具进度，30 分钟全哑基本等于链路已死。
          */
         private const val RUN_IDLE_TIMEOUT_MS = 30 * 60_000L
+        /** 单条工具原始 JSON 的字符上限（约 512KB，远低于 CursorWindow 的 2MB）。 */
+        private const val MAX_RAW_RESULT_CHARS = 512 * 1024
     }
 
     private val appContext = context.applicationContext
@@ -367,6 +371,24 @@ internal class WebAgentRunBridge(
         state.turnId?.let { arguments["turnId"] = it }
         manager.handleMethod("session/cancel", arguments)
         return true
+    }
+
+    /**
+     * 工具原始返回只供卡片调试视图使用（模型输入走 content/summary），
+     * 但把它整段塞进 payload 会让单行突破 Room 的 CursorWindow 2MB 上限，
+     * 之后按 id 读该条目（附件、单条详情）都会抛 SQLiteBlobTooBigException。
+     */
+    private fun boundedRawResultJson(raw: Map<String, Any?>): String {
+        val json = gson.toJson(raw)
+        if (json.length <= MAX_RAW_RESULT_CHARS) return json
+        return gson.toJson(
+            mapOf(
+                "truncated" to true,
+                "originalChars" to json.length,
+                "preview" to json.take(MAX_RAW_RESULT_CHARS / 2),
+                "note" to "原始返回过大，已截断，仅保留前半部分预览。"
+            )
+        )
     }
 
     private fun isTerminalAgentEvent(event: Map<String, Any?>): Boolean {
@@ -706,7 +728,7 @@ internal class WebAgentRunBridge(
                 "progress" to firstNonBlank(raw["progress"], raw["message"]).orEmpty(),
                 "argsJson" to arguments.takeIf { it.isNotEmpty() }?.let(gson::toJson),
                 "resultPreviewJson" to raw["result"]?.let(gson::toJson),
-                "rawResultJson" to gson.toJson(raw),
+                "rawResultJson" to boundedRawResultJson(raw),
                 "terminalOutput" to terminalOutput,
                 "streamMeta" to streamMeta(
                     state = state,

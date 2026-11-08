@@ -93,6 +93,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
+/** 单条工具原始输出字符上限（约 512KB，远低于 Room CursorWindow 的 2MB）。 */
+private const val MAX_RAW_RESULT_CHARS = 512 * 1024
+
 /**
  * Xiaowan is a built-in ACP Agent. The loopback transport is only the official
  * ACP SDK transport boundary; no app-private request or event protocol exists.
@@ -2250,7 +2253,13 @@ internal fun toolResultAcpPayload(result: ToolExecutionResult): JsonObject {
     // Do not stringify the same body into aliases that history serializes again.
     fun putContent(preview: String, raw: String? = null) {
         payload["result"] = jsonElementFromJsonText(preview)
-        if (raw != null && raw != preview) payload["rawResultJson"] = raw
+        if (raw != null && raw != preview) payload["rawResultJson"] = boundedToolRawJson(raw)
+    }
+
+    /** 工具原始输出只用于卡片调试；超长会撑爆 Room 单行（CursorWindow 2MB）。 */
+    private fun boundedToolRawJson(raw: String): String {
+        if (raw.length <= MAX_RAW_RESULT_CHARS) return raw
+        return raw.take(MAX_RAW_RESULT_CHARS) + "\n…(原始输出过长，已截断)"
     }
     when (result) {
         is ToolExecutionResult.ChatMessage -> {

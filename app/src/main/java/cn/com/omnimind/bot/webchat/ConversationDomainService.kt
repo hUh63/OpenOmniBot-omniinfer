@@ -666,17 +666,25 @@ class ConversationDomainService(
         conversationId: Long,
         conversationMode: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        /** webchat 分页读取：附件同样换成按需 URL，否则每页都会带上 base64。 */
+        resolveAttachmentUrls: Boolean = false
     ): Map<String, Any?> {
+        val mode = normalizeConversationMode(conversationMode)
         val (messages, hasMore, scanned) = historyRepository.listConversationMessagesPaged(
             conversationId = conversationId,
-            conversationMode = normalizeConversationMode(conversationMode),
+            conversationMode = mode,
             limit = limit,
             offset = offset
         )
         // scanned：本次 SQL 消耗掉的行数，Dart 侧必须用它推进 offset（不能用
         // messages.size，组装阶段会丢掉一部分条目）。
-        return mapOf("messages" to messages, "hasMore" to hasMore, "scanned" to scanned)
+        val displayed = if (resolveAttachmentUrls) {
+            withAttachmentUrls(conversationId, mode, messages)
+        } else {
+            messages
+        }
+        return mapOf("messages" to displayed, "hasMore" to hasMore, "scanned" to scanned)
     }
 
     suspend fun deleteMessageIds(conversationId: Long, conversationMode: String, entryIds: List<String>) {
