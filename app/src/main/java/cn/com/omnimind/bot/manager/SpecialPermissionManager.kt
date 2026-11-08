@@ -31,6 +31,7 @@ import cn.com.omnimind.bot.workspace.PublicStorageAccess
 import cn.com.omnimind.bot.workspace.WorkspaceStorageAccess
 import com.rk.libcommons.OmnibotTerminalEnvironment
 import com.ai.assistance.operit.terminal.TerminalManager
+import com.rk.terminal.runtime.EmbeddedRuntimeInstaller
 import com.rk.terminal.runtime.TerminalDistribution
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -639,7 +640,12 @@ class SpecialPermissionManager(private val context: Context) {
                 val distribution = TerminalDistribution.supported.firstOrNull { it.id == rawId }
                     ?: throw IllegalArgumentException("Unsupported terminal distribution: $rawId")
                 val current = TerminalDistribution.selected()
-                if (current.id == distribution.id) {
+                // Selecting the same id in settings does not prove the rootfs is
+                // installed: onboarding, restore or an aborted install can leave
+                // settings pointing at a runtime that was never extracted.
+                if (current.id == distribution.id &&
+                    EmbeddedRuntimeInstaller.isDistributionReady(context, distribution)
+                ) {
                     withContext(Dispatchers.Main) { result.success(distribution.id) }
                     return@launch
                 }
