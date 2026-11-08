@@ -418,8 +418,15 @@ internal class WebAgentRunBridge(
 
     private suspend fun handleEvent(event: Map<String, Any?>) {
         val conversationId = event.readLong("conversationId")
+        // turnId / threadId 顶层缺失时从 params 里补：下面的「旧 turn 事件一律丢弃」
+        // 依赖这两个值，而并非所有事件（codex_event、error 等）都会在顶层带上它们。
+        // 补不到就等于不过滤 —— 上一条 turn 迟到的 turn_completed 会把刚开始的新
+        // run 直接判成完成。
+        val params = normalizeMap(event["params"])
         val threadId = event.readString("threadId")
+            ?: firstNonBlank(params["threadId"], params["thread_id"])
         val turnId = event.readString("turnId")
+            ?: firstNonBlank(params["turnId"], params["turn_id"])
         val state = conversationId?.let(runsByConversationId::get)
             ?: threadId?.let(runsByThreadId::get)
             ?: turnId?.let(runsByTurnId::get)
@@ -1044,7 +1051,7 @@ internal fun parseWebAgentEvent(event: Map<String, Any?>): WebAgentEventUpdate {
     }
     if (
         normalizedMethod == "turn_failed" ||
-        (normalizedMethod == "error" && params["willRetry"] != true)
+        (normalizedMethod == "error" && !isTruthyFlag(params["willRetry"]))
     ) {
         return WebAgentEventUpdate(
             parentTaskId = parentTaskId,
@@ -1475,6 +1482,16 @@ private fun firstNonBlank(vararg values: Any?): String? {
     return values.asSequence()
         .mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotEmpty) }
         .firstOrNull()
+}
+
+/**
+ * 布尔标志的宽松读取。同一个字段经过 JSON / MethodChannel / 本地进程三种传输后
+ * 可能是 true、"true"、1 —— 用 `!= true` 严格比较会把 "true" 判成 false。
+ */
+private fun isTruthyFlag(value: Any?): Boolean = when (value) {
+    is Boolean -> value
+    is Number -> value.toInt() != 0
+    else -> value?.toString()?.trim()?.equals("true", ignoreCase = true) == true
 }
 
 private fun Map<String, Any?>.readString(key: String): String? {
