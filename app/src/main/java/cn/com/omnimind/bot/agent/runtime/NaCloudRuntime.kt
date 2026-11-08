@@ -66,10 +66,16 @@ internal class NaCloudRuntime(
     private var token = NaNotificationDelivery.restoreDevelopmentToken(appContext, development, baseUrl)
         // Keystore recovery exists only after the user opts in to background reception.
     private val mutex = Mutex()
+    // Listing does network I/O and must not block session/new|load; it only needs
+    // to serialise against other list refreshes.
+    private val listMutex = Mutex()
     private val prompts = ConcurrentHashMap<String, Deferred<Map<String, Any?>>>()
     private val promptInputs = ConcurrentHashMap<String, Map<String, Any?>>()
     private val promptOwners = ConcurrentHashMap<String, NaCloudConnection>()
-    private val activeRuns = ConcurrentHashMap<String, String>()
+    // One session may own several admitted runs (a retried turn, a notification
+    // delivery racing a user prompt). A single-value map silently dropped the
+    // older run from cancel() reach.
+    private val activeRuns = ConcurrentHashMap<String, MutableSet<String>>()
     private val cancelPending = ConcurrentHashMap.newKeySet<String>()
     private var cachedStatus: Map<String, Any?> = emptyMap()
     private val clientOriginId: String = naInstallationOrigin(appContext.noBackupFilesDir)
@@ -483,6 +489,15 @@ internal class NaCloudRuntime(
             throw NaRuntimeException("na_response_invalid", "session_load")
         val sessionId = existing ?: prefix + remoteId
         profiles.bindSession(sessionId, NA_AGENT_ID)
+        // Runs admitted in a previous process are missing from the in-memory map;
+        // without this the stop button silently succeeds while the run keeps going.
+        (response["runs"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.forEach { run ->
+            val runId = run["id"]?.toString()?.takeIf { it.isNotBlank() }
+            val status = run["status"]?.toString()
+            if (runId != null && status !in setOf("completed", "cancelled", "failed")) {
+                activeRuns.getOrPut(sessionId) { ConcurrentHashMap.newKeySet() }.add(runId)
+            }
+        }
         val requestedConversationId = (args["conversationId"] as? Number)?.toLong()
         val local = if (requestedConversationId != null || bindings.getBindingByThreadId(sessionId) != null) {
             bind(sessionId, requestedConversationId, snapshot["title"]?.toString())
@@ -492,7 +507,7 @@ internal class NaCloudRuntime(
             "thread" to naThreadSnapshot(sessionId, response, clientOriginId))
     }
 
-    private suspend fun list(withCursorFallback: Boolean = false): Map<String, Any?> = mutex.withLock {
+    private suspend fun list(withCursorFallback: Boolean = false): Map<String, Any?> = listMutex.withLock {
         val prefix = connection().prefix
         // Older servers do not include a list cursor. Read it before listing,
         // never afterward, so mutations during the list can still be replayed.
@@ -637,7 +652,7 @@ internal class NaCloudRuntime(
                     val runId = (accepted["runId"] as? String)?.takeIf { it.isNotBlank() }
                         ?: throw NaRuntimeException("na_response_invalid", "message_admission")
                     admittedRunId = runId
-                    activeRuns[id] = runId
+                    activeRuns.getOrPut(id) { ConcurrentHashMap.newKeySet() }.add(runId)
                     val projector = NaItemProjection(reservation)
                     if (cancelPending.remove(id)) request("POST", "/api/runs/$runId/cancel", emptyMap())
                     withTimeout(31 * 60 * 1000L) {
@@ -673,10 +688,26 @@ internal class NaCloudRuntime(
                             "stopReason" to when(run["status"]) { "completed" -> "end_turn"; "cancelled" -> "cancelled"; else -> "error" },
                             "error" to run["error"])
                     }
+                } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                    // Dropping the local wait leaves the run executing on the
+                    // server, and the in-memory run id is gone by then, so the
+                    // user could never stop it. Ask the server to cancel first.
+                    val orphan = admittedRunId
+                    if (orphan != null) {
+                        withContext(kotlinx.coroutines.NonCancellable) {
+                            try {
+                                request("POST", "/api/runs/$orphan/cancel", emptyMap())
+                            } catch (_: Throwable) {
+                                // Best effort: the prompt already reported cancellation.
+                            }
+                        }
+                    }
+                    mapOf("sessionId" to id, "threadId" to id, "conversationId" to local,
+                        "turnId" to reservation, "stopReason" to "cancelled")
                 } catch (_: NaAttachmentCancelled) {
                     mapOf("sessionId" to id, "threadId" to id, "conversationId" to local,
                         "turnId" to reservation, "stopReason" to "cancelled")
-                } finally { admittedRunId?.let { activeRuns.remove(id, it) }; cancelPending.remove(id) }
+                } finally { admittedRunId?.let { finishActiveRun(id, it) }; cancelPending.remove(id) }
             }.also { promptOwners[key] = connection; promptInputs[key] = submittedInput; prompts[key] = it }
         }
         // A failed or cancelled attempt must leave the idempotency cache: callers
@@ -721,11 +752,48 @@ internal class NaCloudRuntime(
     }
 
     private suspend fun cancel(args: Map<String, Any?>): Map<String, Any?> {
-        val id = resolveSession(args) ?: return mapOf("ok" to true)
-        val run = activeRuns[id]
-        if (run != null) request("POST", "/api/runs/$run/cancel", emptyMap())
-        else if (prompts.entries.any { it.key.startsWith("$id/") && !it.value.isCompleted }) cancelPending.add(id)
-        return mapOf("ok" to true, "sessionId" to id)
+        val id = resolveSession(args) ?: return mapOf("ok" to false, "sessionId" to null)
+        val runs = activeRuns[id]?.toList().orEmpty()
+        var cancelled = false
+        for (run in runs) {
+            cancelled = true
+            try {
+                request("POST", "/api/runs/$run/cancel", emptyMap())
+            } catch (callerCancelled: kotlinx.coroutines.CancellationException) {
+                throw callerCancelled
+            } catch (_: Throwable) {
+                // A finished run rejects cancel; keep stopping the remaining ones.
+            }
+        }
+        if (!cancelled) {
+            // Either the prompt has not been admitted yet (flag it so the worker
+            // cancels right after admission) or we lost track of the run.
+            if (prompts.entries.any { it.key.startsWith("$id/") && !it.value.isCompleted }) {
+                cancelPending.add(id)
+                cancelled = true
+            }
+        }
+        return mapOf("ok" to cancelled, "sessionId" to id)
+    }
+
+    /** Drop every in-flight run, prompt and history subscription. The runtime
+     * stays usable for a later reconnect; only per-connection work is released. */
+    fun shutdown() {
+        prompts.values.forEach { it.cancel() }
+        prompts.clear()
+        promptInputs.clear()
+        promptOwners.clear()
+        cancelPending.clear()
+        activeRuns.clear()
+        cachedStatus = emptyMap()
+        historySyncJob?.cancel()
+        historySyncJob = null
+    }
+
+    private fun finishActiveRun(sessionId: String, runId: String) {
+        val runs = activeRuns[sessionId] ?: return
+        runs.remove(runId)
+        if (runs.isEmpty()) activeRuns.remove(sessionId, runs)
     }
 
     private fun relativePath(args: Map<String, Any?>): String {
@@ -787,8 +855,12 @@ internal class NaCloudRuntime(
             mapOf("ok" to true, "path" to "/workspace/$relative", "name" to relative.substringAfterLast('/'),
                 "size" to data.size, "mimeType" to mime,
                 "previewKind" to if(textLike) "text" else if(mime.startsWith("image/")) "image" else "file",
-                "encoding" to if(textLike) "utf8" else "base64", "content" to if(textLike) data.toString(Charsets.UTF_8) else null,
-                "dataBase64" to Base64.getEncoder().encodeToString(data), "truncated" to false)
+                // Exactly one representation: sending both the text and its base64
+                // copy turned a 20 MiB file into a ~47 MiB string across the bridge.
+                "encoding" to if (textLike) "utf8" else "base64",
+                "content" to if (textLike) data.toString(Charsets.UTF_8) else null,
+                "dataBase64" to if (textLike) null else Base64.getEncoder().encodeToString(data),
+                "truncated" to false)
         }
     }
 
@@ -833,6 +905,13 @@ private fun Map<String, Any?>.map(key: String): Map<String, Any?> = this[key] as
  * shared AgentEventReducer. Item ids and suffix offsets make repeated reads
  * idempotent and preserve whitespace across message/reasoning chunks.
  */
+private fun commonPrefixLength(left: String, right: String): Int {
+    val limit = minOf(left.length, right.length)
+    var index = 0
+    while (index < limit && left[index] == right[index]) index++
+    return index
+}
+
 internal class NaItemProjection(private val turnId: String) {
     private val textById = mutableMapOf<String, String>()
     private val toolsById = mutableMapOf<String, Map<String, Any?>>()
@@ -843,10 +922,13 @@ internal class NaItemProjection(private val turnId: String) {
             val text = item["text"]?.toString().orEmpty()
             val previous = textById[id].orEmpty()
             if (text == previous) return emptyList()
-            check(text.startsWith(previous)) { "Na text snapshot changed after visible output" }
+            // The server can rewrite an item (retry, truncation, reordering) instead
+            // of only appending. Throwing here failed the entire turn, so emit the
+            // part we have not shown yet and keep the projection alive.
+            val shown = if (text.startsWith(previous)) previous.length else commonPrefixLength(previous, text)
             textById[id] = text
             return listOf(mapOf("sessionUpdate" to if (type == "agent_message") "agent_message_chunk" else "agent_thought_chunk",
-                "messageId" to id, "content" to mapOf("type" to "text", "text" to text.substring(previous.length))))
+                "messageId" to id, "content" to mapOf("type" to "text", "text" to text.substring(shown))))
         }
         if (toolsById[id] == item) return emptyList()
         val first = !toolsById.containsKey(id)
