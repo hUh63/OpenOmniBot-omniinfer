@@ -886,7 +886,7 @@ internal class WebAgentRunBridge(
             hash = 31 * hash + ((card["summary"] as? String)?.hashCode() ?: 0)
             hash = 31 * hash + ((card["terminalOutput"] as? String)?.length ?: 0)
             hash = 31 * hash + ((card["rawResultJson"] as? String)?.length ?: 0)
-            hash = 31 * hash + (card["thinkingContent"] as? String)?.hashCode()
+            hash = 31 * hash + ((card["thinkingContent"] as? String)?.hashCode() ?: 0)
         }
         return hash
     }
